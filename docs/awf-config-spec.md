@@ -161,7 +161,7 @@ AWF settings MAY be supplied via config files, including stdin (`--config -`).
 - When both `apiProxy.targets.antigravity` and `apiProxy.targets.gemini` are set, `antigravity` takes precedence per field.
 - `apiProxy.targets.vertex.host` → `--vertex-api-target`
 - `apiProxy.targets.vertex.basePath` → `--vertex-api-base-path`
-- `security.legacySecurity` → `--legacy-security` *(boolean; enables legacy/compat security mode; mutually exclusive with strict mode)*
+- `security.legacySecurity` → `--legacy-security` *(boolean; when true, enables legacy/compat security mode; when false or omitted, strict security is used)*
 - `security.securityMode` → `--security-mode` *([DEPRECATED] Use `legacySecurity` instead. Accepted values: `"strict"` (default) or `"compat"`. `"compat"` is equivalent to `--legacy-security`.)*
 - `security.sslBump` → `--ssl-bump`
 - `security.enableDlp` → `--enable-dlp`
