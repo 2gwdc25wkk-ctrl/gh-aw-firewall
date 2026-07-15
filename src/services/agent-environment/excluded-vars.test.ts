@@ -105,6 +105,14 @@ describe('buildExclusionSet', () => {
     it('should exclude GOOGLE_VERTEX_BASE_URL (Vertex AI base URL)', () => {
       expect(buildExclusionSet(config).has('GOOGLE_VERTEX_BASE_URL')).toBe(true);
     });
+
+    it('should exclude GITHUB_TOKEN (credential isolation)', () => {
+      expect(buildExclusionSet(config).has('GITHUB_TOKEN')).toBe(true);
+    });
+
+    it('should exclude GH_TOKEN (credential isolation)', () => {
+      expect(buildExclusionSet(config).has('GH_TOKEN')).toBe(true);
+    });
   });
 
   describe('when enableApiProxy is false', () => {
@@ -125,6 +133,14 @@ describe('buildExclusionSet', () => {
     it('should NOT exclude GEMINI_API_KEY', () => {
       expect(buildExclusionSet(config).has('GEMINI_API_KEY')).toBe(false);
     });
+
+    it('should NOT exclude GITHUB_TOKEN', () => {
+      expect(buildExclusionSet(config).has('GITHUB_TOKEN')).toBe(false);
+    });
+
+    it('should NOT exclude GH_TOKEN', () => {
+      expect(buildExclusionSet(config).has('GH_TOKEN')).toBe(false);
+    });
   });
 
   describe('when difcProxyHost is set (DIFC proxy security)', () => {
@@ -139,8 +155,8 @@ describe('buildExclusionSet', () => {
     });
   });
 
-  describe('when difcProxyHost is not set', () => {
-    const config = makeConfig({ difcProxyHost: undefined });
+  describe('when difcProxyHost is not set and enableApiProxy is false', () => {
+    const config = makeConfig({ difcProxyHost: undefined, enableApiProxy: false });
 
     it('should NOT exclude GITHUB_TOKEN', () => {
       expect(buildExclusionSet(config).has('GITHUB_TOKEN')).toBe(false);
