@@ -113,6 +113,10 @@ describe('buildExclusionSet', () => {
     it('should exclude GH_TOKEN (credential isolation)', () => {
       expect(buildExclusionSet(config).has('GH_TOKEN')).toBe(true);
     });
+
+    it('should exclude GITHUB_PERSONAL_ACCESS_TOKEN (credential isolation)', () => {
+      expect(buildExclusionSet(config).has('GITHUB_PERSONAL_ACCESS_TOKEN')).toBe(true);
+    });
   });
 
   describe('when enableApiProxy is false', () => {
@@ -141,6 +145,10 @@ describe('buildExclusionSet', () => {
     it('should NOT exclude GH_TOKEN', () => {
       expect(buildExclusionSet(config).has('GH_TOKEN')).toBe(false);
     });
+
+    it('should NOT exclude GITHUB_PERSONAL_ACCESS_TOKEN', () => {
+      expect(buildExclusionSet(config).has('GITHUB_PERSONAL_ACCESS_TOKEN')).toBe(false);
+    });
   });
 
   describe('when difcProxyHost is set (DIFC proxy security)', () => {
@@ -153,6 +161,10 @@ describe('buildExclusionSet', () => {
     it('should exclude GH_TOKEN', () => {
       expect(buildExclusionSet(config).has('GH_TOKEN')).toBe(true);
     });
+
+    it('should exclude GITHUB_PERSONAL_ACCESS_TOKEN', () => {
+      expect(buildExclusionSet(config).has('GITHUB_PERSONAL_ACCESS_TOKEN')).toBe(true);
+    });
   });
 
   describe('when difcProxyHost is not set and enableApiProxy is false', () => {
@@ -164,6 +176,10 @@ describe('buildExclusionSet', () => {
 
     it('should NOT exclude GH_TOKEN', () => {
       expect(buildExclusionSet(config).has('GH_TOKEN')).toBe(false);
+    });
+
+    it('should NOT exclude GITHUB_PERSONAL_ACCESS_TOKEN', () => {
+      expect(buildExclusionSet(config).has('GITHUB_PERSONAL_ACCESS_TOKEN')).toBe(false);
     });
   });
 
