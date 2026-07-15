@@ -50,13 +50,40 @@ const SENSITIVE_CONFIG_KEYS = new Set([
   'githubToken',
 ]);
 
+function redactKnownSecretValues(command: string, config: WrapperConfig): string {
+  let redacted = command;
+  const configRecord = config as unknown as Record<string, unknown>;
+  const secretValues = new Set<string>();
+
+  for (const key of SENSITIVE_CONFIG_KEYS) {
+    const value = configRecord[key];
+    if (typeof value === 'string' && value.length > 0) {
+      secretValues.add(value);
+    }
+  }
+
+  for (const [envKey, envValue] of Object.entries(process.env)) {
+    if (!envValue) continue;
+    if (envValue.length < 8) continue;
+    if (/(TOKEN|SECRET|PASSWORD|API_KEY|AUTH|KEY)/i.test(envKey)) {
+      secretValues.add(envValue);
+    }
+  }
+
+  for (const secretValue of secretValues) {
+    redacted = redacted.split(secretValue).join('***REDACTED***');
+  }
+
+  return redacted;
+}
+
 function redactConfigForLogging(config: WrapperConfig): Record<string, unknown> {
   const redactedConfig: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(config)) {
     if (SENSITIVE_CONFIG_KEYS.has(key)) continue;
 
     if (key === 'agentCommand') {
-      redactedConfig[key] = redactSecrets(value as string);
+      redactedConfig[key] = redactKnownSecretValues(redactSecrets(value as string), config);
       continue;
     }
 

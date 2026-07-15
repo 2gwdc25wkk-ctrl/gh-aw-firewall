@@ -496,7 +496,11 @@ run_agent_with_token_protection() {
 
 log_execution_context() {
 echo "[entrypoint] Switching to awfuser (UID: $(id -u awfuser), GID: $(id -g awfuser))"
-echo "[entrypoint] Executing command: $@"
+if [ "$#" -eq 0 ]; then
+  echo "[entrypoint] Executing command: <none>"
+else
+  echo "[entrypoint] Executing command: $1 (args redacted: $# total)"
+fi
 echo ""
 }
 

@@ -616,6 +616,26 @@ describe('createMainAction', () => {
       });
     });
 
+    it('redactConfigForLogging redacts secret values from process.env in agentCommand', () => {
+      const originalGithubToken = process.env.GITHUB_TOKEN;
+      process.env.GITHUB_TOKEN = 'ghp_test_token_from_env_1234567890';
+      try {
+        const redacted = testHelpers.redactConfigForLogging({
+          ...STUB_CONFIG,
+          agentCommand: `echo "${process.env.GITHUB_TOKEN}"`,
+        } as unknown as import('../types').WrapperConfig);
+
+        expect(String(redacted.agentCommand)).toContain('***REDACTED***');
+        expect(String(redacted.agentCommand)).not.toContain('ghp_test_token_from_env_1234567890');
+      } finally {
+        if (originalGithubToken === undefined) {
+          delete process.env.GITHUB_TOKEN;
+        } else {
+          process.env.GITHUB_TOKEN = originalGithubToken;
+        }
+      }
+    });
+
     it('redactConfigForLogging preserves null additionalEnv', () => {
       const redacted = testHelpers.redactConfigForLogging({
         ...STUB_CONFIG,
