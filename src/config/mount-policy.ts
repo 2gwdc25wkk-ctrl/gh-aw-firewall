@@ -62,6 +62,43 @@ function assertStringArray(value: unknown, label: string): readonly string[] {
   return value as readonly string[];
 }
 
+/**
+ * Validates an array of simple `$HOME`-relative directory names: each entry
+ * must be a non-empty string with no `/` separator, no `..` component, and no
+ * leading `/` or `~`. No duplicate entries are allowed.
+ */
+function assertHomeSubdirArray(value: unknown, label: string): readonly string[] {
+  const arr = assertStringArray(value, label);
+  const seen = new Set<string>();
+  for (const v of arr) {
+    if (v.length === 0) fail(`${label} must not contain empty strings`);
+    if (v.startsWith('/') || v.startsWith('~'))
+      fail(`${label} entries must be relative $HOME paths, not absolute: ${v}`);
+    if (v.includes('/')) fail(`${label} entries must be simple directory names (no '/'): ${v}`);
+    if (v.includes('..')) fail(`${label} entries must not contain '..': ${v}`);
+    if (seen.has(v)) fail(`${label} has duplicate entry: ${v}`);
+    seen.add(v);
+  }
+  return arr;
+}
+
+/**
+ * Validates an array of absolute host paths: each entry must start with `/`,
+ * must not be empty, must not contain `..`, and must be unique.
+ */
+function assertAbsolutePathArray(value: unknown, label: string): readonly string[] {
+  const arr = assertStringArray(value, label);
+  const seen = new Set<string>();
+  for (const v of arr) {
+    if (v.length === 0) fail(`${label} must not contain empty strings`);
+    if (!v.startsWith('/')) fail(`${label} entries must be absolute paths (start with '/'): ${v}`);
+    if (v.includes('..')) fail(`${label} entries must not contain '..': ${v}`);
+    if (seen.has(v)) fail(`${label} has duplicate entry: ${v}`);
+    seen.add(v);
+  }
+  return arr;
+}
+
 function parseCredentials(value: unknown): readonly CredentialEntry[] {
   if (typeof value !== 'object' || value === null) {
     fail('credentials must be an object');
@@ -97,7 +134,20 @@ function parseCredentials(value: unknown): readonly CredentialEntry[] {
       if (e.type !== 'dir') {
         fail(`credentials.entries[${i}].files is only valid for type 'dir'`);
       }
-      files = assertStringArray(e.files, `credentials.entries[${i}].files`);
+      const rawFiles = assertStringArray(e.files, `credentials.entries[${i}].files`);
+      const seenFiles = new Set<string>();
+      for (const f of rawFiles) {
+        if (f.length === 0)
+          fail(`credentials.entries[${i}].files must not contain empty strings`);
+        if (f.includes('/'))
+          fail(`credentials.entries[${i}].files entries must be plain filenames (no '/'): ${f}`);
+        if (f.includes('..'))
+          fail(`credentials.entries[${i}].files entries must not contain '..': ${f}`);
+        if (seenFiles.has(f))
+          fail(`credentials.entries[${i}].files has duplicate entry: ${f}`);
+        seenFiles.add(f);
+      }
+      files = rawFiles;
     }
     if (typeof e.reason !== 'string' || e.reason.length === 0) {
       fail(`credentials.entries[${i}].reason must be a non-empty string`);
@@ -125,14 +175,14 @@ function validate(input: unknown): MountPolicy {
   return {
     system: {
       directories: {
-        default: assertStringArray(directories.default, 'system.directories.default'),
-        sysroot: assertStringArray(directories.sysroot, 'system.directories.sysroot'),
+        default: assertAbsolutePathArray(directories.default, 'system.directories.default'),
+        sysroot: assertAbsolutePathArray(directories.sysroot, 'system.directories.sysroot'),
       },
-      etc: assertStringArray(system.etc, 'system.etc'),
+      etc: assertAbsolutePathArray(system.etc, 'system.etc'),
     },
     home: {
-      toolSubdirs: assertStringArray(home.toolSubdirs, 'home.toolSubdirs'),
-      forbiddenSubdirs: assertStringArray(home.forbiddenSubdirs, 'home.forbiddenSubdirs'),
+      toolSubdirs: assertHomeSubdirArray(home.toolSubdirs, 'home.toolSubdirs'),
+      forbiddenSubdirs: assertHomeSubdirArray(home.forbiddenSubdirs, 'home.forbiddenSubdirs'),
     },
     credentials: parseCredentials(p.credentials),
   };

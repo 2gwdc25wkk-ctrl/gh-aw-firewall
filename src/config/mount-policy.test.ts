@@ -34,6 +34,55 @@ describe('mount-policy', () => {
         if (entry.files !== undefined) expect(entry.type).toBe('dir');
       }
     });
+
+    it('home.toolSubdirs entries are simple relative names without traversal', () => {
+      for (const dir of HOME_TOOL_SUBDIRS) {
+        expect(dir).not.toBe('');
+        expect(dir).not.toContain('/');
+        expect(dir).not.toContain('..');
+        expect(dir).not.toMatch(/^[/~]/);
+      }
+    });
+
+    it('home.toolSubdirs has no duplicate entries', () => {
+      expect(new Set(HOME_TOOL_SUBDIRS).size).toBe(HOME_TOOL_SUBDIRS.length);
+    });
+
+    it('home.forbiddenSubdirs entries are simple relative names without traversal', () => {
+      for (const dir of HOME_FORBIDDEN_SUBDIRS) {
+        expect(dir).not.toBe('');
+        expect(dir).not.toContain('/');
+        expect(dir).not.toContain('..');
+        expect(dir).not.toMatch(/^[/~]/);
+      }
+    });
+
+    it('system directories are absolute paths without traversal', () => {
+      for (const dir of [...systemDirectories(false), ...systemDirectories(true)]) {
+        expect(dir).toMatch(/^\//);
+        expect(dir).not.toContain('..');
+      }
+    });
+
+    it('/etc paths are absolute without traversal', () => {
+      for (const p of etcAllowlist()) {
+        expect(p).toMatch(/^\//);
+        expect(p).not.toContain('..');
+      }
+    });
+
+    it('credential dir-entry files are plain filenames (no path separators or traversal)', () => {
+      for (const entry of CREDENTIAL_ENTRIES) {
+        if (entry.files) {
+          for (const f of entry.files) {
+            expect(f).not.toBe('');
+            expect(f).not.toContain('/');
+            expect(f).not.toContain('..');
+          }
+          expect(new Set(entry.files).size).toBe(entry.files.length);
+        }
+      }
+    });
   });
 
   describe('credentialFilesToHide', () => {
@@ -100,5 +149,10 @@ describe('mount-policy', () => {
   it('freezes-through the raw JSON into a typed policy object', () => {
     expect(mountPolicy.home.toolSubdirs).toBe(HOME_TOOL_SUBDIRS);
     expect(mountPolicy.credentials).toBe(CREDENTIAL_ENTRIES);
+  });
+
+  it('includes .copilot and .gemini in home.toolSubdirs', () => {
+    expect(HOME_TOOL_SUBDIRS).toContain('.copilot');
+    expect(HOME_TOOL_SUBDIRS).toContain('.gemini');
   });
 });

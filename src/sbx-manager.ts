@@ -104,12 +104,6 @@ let scrubbedCredentials: ScrubbedCredential[] = [];
 let credentialBackupRoot: string | undefined;
 
 /**
- * Whitelisted `$HOME` subdirs the sbx backend mounts wholesale into the microVM:
- * the shared tool-dir allow list plus the agent-state dirs `.copilot`/`.gemini`.
- */
-const SBX_MOUNTED_HOME_SUBDIRS: readonly string[] = ['.copilot', ...HOME_TOOL_SUBDIRS, '.gemini'];
-
-/**
  * Moves known credential stores out of the wholesale-mounted `$HOME` tool dirs
  * before the sandbox is created, so they never enter the microVM. The paths are
  * moved (not deleted) to a backup dir at the home root — which is NOT one of the
@@ -122,7 +116,7 @@ function scrubHomeCredentials(homePath: string): void {
   scrubbedCredentials = [];
   credentialBackupRoot = undefined;
 
-  const mountedParents = new Set<string>(SBX_MOUNTED_HOME_SUBDIRS);
+  const mountedParents = new Set<string>(HOME_TOOL_SUBDIRS);
   for (const entry of credentialEntriesUnderMountedParents(mountedParents)) {
     const original = path.join(homePath, entry.path);
     if (!fs.existsSync(original)) continue;
@@ -262,9 +256,9 @@ export async function createSandbox(config: SbxConfig): Promise<string> {
   // positional (host path == guest path) and cannot express the per-file
   // /dev/null credential overlays that compose mode uses (see
   // credential-hiding.ts), so the only way to keep host secrets out of the VM
-  // is to curate which $HOME subdirs are mounted. We share the same whitelist
-  // as the compose chroot home strategy (HOME_TOOL_SUBDIRS) plus the agent
-  // state dirs (.copilot, .gemini). Credential stores such as ~/.aws, ~/.ssh,
+  // is to curate which $HOME subdirs are mounted. The central mount policy
+  // (HOME_TOOL_SUBDIRS) lists the allowed tool-state dirs including agent-state
+  // dirs (.copilot, .gemini). Credential stores such as ~/.aws, ~/.ssh,
   // ~/.docker, ~/.kube, ~/.azure, ~/.gnupg, ~/.netrc and ~/.gitconfig are never
   // whitelisted, so they never enter the sandbox. Only paths that exist on the
   // host are mounted, because sbx requires the mount source to exist.
@@ -279,8 +273,7 @@ export async function createSandbox(config: SbxConfig): Promise<string> {
   // scrubHomeCredentials below) and restored after teardown, so the benign tool
   // state stays available while the secrets never enter the microVM.
   const homePath = process.env.HOME || '/home/runner';
-  const homeSubdirs = SBX_MOUNTED_HOME_SUBDIRS;
-  for (const subdir of homeSubdirs) {
+  for (const subdir of HOME_TOOL_SUBDIRS) {
     const hostSubdir = `${homePath}/${subdir}`;
     if (seenPaths.has(hostSubdir)) continue;
     if (!fs.existsSync(hostSubdir)) continue;

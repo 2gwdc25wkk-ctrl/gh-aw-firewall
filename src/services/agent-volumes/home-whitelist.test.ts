@@ -3,7 +3,7 @@ import { HOME_TOOL_SUBDIRS, HOME_FORBIDDEN_SUBDIRS } from './home-whitelist';
 describe('home-whitelist (mount-policy shim)', () => {
   it('re-exports the shared home allow list', () => {
     expect(HOME_TOOL_SUBDIRS).toEqual(
-      expect.arrayContaining(['.cache', '.config', '.local', '.cargo', '.npm']),
+      expect.arrayContaining(['.cache', '.config', '.local', '.cargo', '.npm', '.copilot', '.gemini']),
     );
   });
 
