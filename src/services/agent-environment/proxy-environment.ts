@@ -35,6 +35,12 @@ export function buildProxyEnvironment(params: ProxyEnvironmentParams): void {
     if (config.topologyAttach) {
       noProxyHosts.push(...config.topologyAttach);
     }
+    // The DIFC/cli-proxy host is addressed by proxy-aware clients directly and
+    // must bypass Squid even when it isn't listed in topologyAttach. Strip any
+    // ":port" suffix since undici matches NO_PROXY against the hostname only.
+    if (config.difcProxyHost) {
+      noProxyHosts.push(config.difcProxyHost.split(':')[0]);
+    }
   }
 
   // The MCP gateway is served on the network gateway (e.g. 172.30.0.1). In
