@@ -8,6 +8,7 @@ import { parseDomains, parseDomainsFile } from '../domain-utils';
 import { processLocalhostKeyword } from '../option-parsers';
 import { resolveCopilotApiRouting } from '../copilot-api-resolver';
 import { resolveApiTargetsToAllowedDomains } from '../api-proxy-config';
+import { resolveTopologyPeerHosts } from '../topology-peers';
 
 /**
  * Resolves the Commander option-value source for a given option name.
@@ -175,6 +176,30 @@ export function resolveAllowedDomains(options: Record<string, unknown>): Allowed
     process.env,
     logger.debug.bind(logger)
   );
+
+  // In network-isolation (topology) mode, automatically add trusted topology
+  // peer hostnames to the Squid allowed-domain ACL. NO_PROXY is also set for
+  // these peers (in proxy-environment.ts) so that proxy-aware clients
+  // (undici/rmcp) connect directly; adding them here ensures Squid does not
+  // block requests from tools that honour HTTP(S)_PROXY but ignore NO_PROXY.
+  //
+  // This covers the standard-port (80/443) path. Non-standard MCP ports (e.g.
+  // http://awmg-mcpg:8080) and Squid's DNS resolution of these Docker-only
+  // hostnames are handled separately via SquidConfig.topologyPeers and the
+  // squid-proxy extra_hosts patch (see config-writer.ts / topology.ts).
+  //
+  // NOTE ON SQUID SEMANTICS: these names are emitted as dstdomain ACL entries
+  // via formatDomainForSquid, which prepends a leading dot (e.g. "awmg-mcpg" ->
+  // ".awmg-mcpg"). Squid therefore matches the host itself *and* any subdomain
+  // (*.awmg-mcpg). This is safe for internal Docker hostnames (a bare label
+  // like "github" matches host "github", not "github.com"), but operators
+  // should avoid topology names that collide with trusted public labels.
+  for (const peer of resolveTopologyPeerHosts(options)) {
+    if (!allowedDomains.includes(peer)) {
+      allowedDomains.push(peer);
+      logger.debug(`Network-isolation: auto-allowing topology peer "${peer}" in Squid ACL`);
+    }
+  }
 
   validateAllowedDomains(allowedDomains);
 
