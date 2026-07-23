@@ -792,3 +792,88 @@ protections. This is a POLICY concern, not an mcpg concern.
 - Execution-time duties: validate each collected output against the per-child allowed-output-type
   policy + write-sink (fail-fast also at collection time); apply per-compartment with idempotency /
   partial-failure handling; audit results in the {A}-protected log.
+
+## Config surface (MVP): `agentGroups` as a secrecy-tag array
+
+This concretizes the "Config schema (open — proposed shape)" section into a first, minimal
+addition to the awf **standard config schema** (`docs/awf-config.schema.json`, mirrored to
+`src/awf-config-schema.json`) and **spec** (`docs/awf-config-spec.md`). It is deliberately the
+smallest surface that expresses the v2 decisions; the richer per-group `groups:` block above is
+the eventual super-set that this desugars into.
+
+### Shape
+```yaml
+# awf config file (camelCase schema key; CLI flag --agent-groups)
+agentGroups:
+  - "private:lpcox/foo"
+  - "private:lpcox/bar"
+```
+- `agentGroups` is an **array of secrecy tags** (strings). Absent/empty ⇒ today's single-group
+  behavior (coordinator only), i.e. fully backward compatible.
+- **Each array entry creates exactly one child agent group** whose secrecy label is the singleton
+  set containing exactly that tag: entry `"private:lpcox/foo"` ⇒ child group with secrecy label
+  `{ private:lpcox/foo }`. No entry shares a tag with another (see uniqueness rule).
+- The **coordinator** group is implicit and is NOT listed here. It has EMPTY secrecy + high
+  integrity and sits outside the taint lattice (decision #4). `agentGroups` enumerates only the
+  children.
+
+### Tag grammar (proposed)
+`<class>:<owner>/<repo>` — e.g. `private:lpcox/foo`.
+- `class` — the compartment/visibility class (MVP: `private`). Reserved for future classes
+  (e.g. `internal`, `public`); the filter/label machinery treats the WHOLE string as one opaque
+  atomic tag, so grammar is for humans + provisioning, not for label algebra.
+- `owner/repo` — the GitHub repo the child is scoped to. This is what selects the child's
+  per-group **read-only** mcpg installation token and its safe-outputs write-sink (decisions
+  #5–#7). The tag is therefore both the secrecy label AND the provisioning key.
+- One tag ↔ one repo ↔ one compartment ↔ one child group ↔ one mcpg instance. Clean 1:1:1:1:1.
+
+### What one tag expands to (desugaring)
+Each tag `T = class:owner/repo` materializes a child group with the constrained defaults from
+decisions #5–#8 (no free config in the MVP):
+- secrecy label `{T}`, low integrity;
+- egress = `owner/repo` via its OWN single-tenant, READ-ONLY mcpg instance (both surfaces) +
+  its own safe-outputs sink; nothing else;
+- its own topology island (own internal net, Squid, agent) with a per-group subnet from the /16;
+- one mailbox to the coordinator only (declassifying broker in front of the coord inbox);
+- child task model = stateful `--resume`, serial per child.
+The coordinator keeps whatever agent/mcp/api-proxy config the top-level awf config already
+specifies today; `agentGroups` does not change the coordinator's own surface.
+
+### Placement in the std schema — OPEN (recommend `security.agentGroups`)
+Two options:
+- (A) **`security.agentGroups`** — groups it with the existing DIFC surface (`security.difcProxy`,
+  `security.enableDlp`, host-access). Recommended: agent groups ARE a security/isolation feature
+  and this keeps the DIFC knobs colocated.
+- (B) top-level **`agentGroups`** — signals it as a first-class orchestration concept on par with
+  `network`/`apiProxy`. More discoverable, but scatters DIFC config.
+Recommendation: (A) for the MVP (`security.agentGroups: string[]`), revisit if/when the richer
+per-group object shape lands (it may warrant a top-level `groups:` block that supersedes this).
+
+### Spec (`docs/awf-config-spec.md`) additions this implies
+- **Data model** row: `security.agentGroups` | array of strings | "Secrecy tags; each creates one
+  read-only child agent group scoped to `owner/repo`."
+- **CLI mapping** row: `security.agentGroups` → `--agent-groups <tag[,tag...]>` (repeatable or
+  comma-separated; match the existing multi-value flag convention, e.g. `--allow-domains`).
+- **Normalization**: trim; drop empties; de-dupe; stable order (array order = child index order).
+- **Validation** (fail-fast at config-validation, before any container starts):
+  1. each entry matches `^[a-z0-9-]+:[^/]+/[^/]+$` (class + owner/repo);
+  2. tags are UNIQUE (two children may not share a secrecy tag — would collapse compartments);
+  3. `owner/repo` is well-formed (no path traversal, no wildcards);
+  4. count ≤ a configured max (subnet/resource budget from the /16 allocator);
+  5. reserved: a child tag may not resolve to the coordinator's own repo/identity;
+  6. (later) each `owner/repo` must have a provisionable read-only installation token — but token
+     provisioning is out of the schema's scope; schema only validates SHAPE.
+
+### Naming — CONFIRM
+Existing schema keys are camelCase (`allowDomains`, `difcProxy`), so the schema key should be
+`agentGroups` with CLI flag `--agent-groups`. The user's `"agent-groups"` reads as the CLI/kebab
+spelling. Flagging so we lock: **schema `agentGroups` + CLI `--agent-groups`** (recommended) vs.
+kebab everywhere. No code yet — decision only.
+
+### Explicitly deferred (NOT in this MVP surface)
+- Per-child agent/mcp/api-proxy overrides (the richer `groups:` object) — the array is
+  string-only for now; entries can later become objects (`{ tag, agent?, mcp?, schema? }`) without
+  a breaking change (string ⇒ `{ tag }`).
+- Per-child declassification schema override (decision #10) — defaults to `{ result: YES|NO }`;
+  surfaced later as `schema:` on the object form.
+- Mailbox/timing/concurrency knobs (decisions #11–#15) — global defaults for the MVP.
