@@ -877,3 +877,79 @@ kebab everywhere. No code yet — decision only.
 - Per-child declassification schema override (decision #10) — defaults to `{ result: YES|NO }`;
   surfaced later as `schema:` on the object form.
 - Mailbox/timing/concurrency knobs (decisions #11–#15) — global defaults for the MVP.
+
+## PIVOT: "sealed probe" — a lightweight alternative to agent groups
+
+A simpler primitive that captures the value of a constrained child compartment WITHOUT the
+agent-group topology machinery. Instead of offloading to a sandboxed *agent*, the primary agent
+offloads to a **sealed probe**: a self-written Python **script** that runs in a sandbox with access
+to a private repo and returns a **single bit**. Exposed to the primary agent as a skill.
+
+### Why "sealed probe"
+The name conveys the four required properties:
+- **Lightweight** — it is a script, not an agent (no MCP, no session, no LLM in the loop).
+- **Deterministic** — it is *code*, a fixed auditable program. The exact bytes that touched the
+  private data are logged; there is no freeform model reasoning to audit.
+- **Sandboxed** — runs in an isolated, hardened, (v1) network-less sandbox.
+- **Handles private data** — reads a private repo clone; the computation and the data are
+  **inaccessible to the calling agent** ("sealed"). Only the bit escapes.
+
+### Relationship to the agent-group design
+A sealed probe IS the earlier child compartment, but running a script instead of an agent and with
+the child→coordinator return shrunk to exactly 1 bit. It reuses the same principles: the 1-bit
+return is the declassification budget (decision #10); the caller stays ⊥ and learns only the bit;
+failure-closure to a single fixed symbol (decision #11). It drops the heavy parts: no per-group
+Squid/mcpg/api-proxy topology, no mailbox/broker timing grid (v1), no long-lived peers.
+
+### v1 architecture (LOCKED)
+Three parts:
+1. **`sealed_probe` skill** exposed to the primary agent.
+   - in: `repo` (which private repo) + `script` (the Python the agent authored) [+ optional params].
+   - out: one **bit**, or a single fixed **ERROR** symbol. Nothing else.
+2. **Probe-runner broker** — a trusted, deterministic container/process reachable ONLY over a
+   **local unix socket** from the primary agent's sandbox. Holds repo read access. The agent gets
+   NO repo credentials and NO container-launch privileges — the broker is the only privileged party.
+   It constructs and launches the probe, then returns the validated result via the skill interface.
+3. **Probe sandbox** — built per-invocation by the broker: **`network: none`**, a **read-only clone**
+   of `repo` mounted, the agent's `script` mounted, runs `python script`. Hardened with awf's
+   existing agent protections (cap-drop / seccomp); gVisor/sbx available as an optional stronger knob.
+
+Flow:
+```
+primary agent ──unix socket {repo, script}──▶ broker
+broker: snapshot read-only clone → no-network sandbox → run python
+        → read + validate verdict (exactly 1 bit) → return bit ──▶ skill ──▶ agent
+        (crash / malformed / missing / timeout → fixed ERROR; no other bytes ever returned)
+```
+
+### v1 mechanics
+- **Bit contract**: the script writes one value to a fixed path (e.g. `/probe/out`); the broker
+  validates it is exactly `{0,1}` and returns that. `stdout`/`stderr`/artifacts/clone contents/logs
+  are NEVER returned to the caller — this is what keeps the probe *sealed*. Any failure (crash,
+  malformed/missing verdict, timeout) collapses to the single fixed **ERROR** symbol (failure-closure).
+- **Sealed + deterministic BY CONSTRUCTION**: with `network: none`, no egress channel exists at all,
+  so the bit is literally the only way out — sealing and determinism hold structurally, not by
+  enforcement/parsing.
+- **Sandbox runtime**: reuse awf's agent hardening minus the network stack — v1 needs no Squid /
+  mcpg / api-proxy because there is no network. gVisor/sbx optional.
+- **Broker properties**: trusted + deterministic; given `(clone snapshot, script)` it yields
+  `(bit | ERROR)` and returns NOTHING else over the socket (no passthrough of child output).
+
+### Deferred to v2+ (all additive)
+- **Live read-only `gh`** access to the repo (read issues/PRs) — reintroduces a network egress
+  channel; brings back the read-only mcpg path (both surfaces) + the declassifier for anything
+  beyond the bit.
+- **Safe-outputs** on the repo — the probe emits declarative intents to a per-probe sink; a trusted
+  executor (separate write-scoped token the probe can't reach) applies them to the repo batch-at-end
+  (decisions #7/#8). Writes land on the repo itself (secrecy {repo}), NOT returned to the caller, so
+  the 1-bit caller boundary still holds.
+- **Timing side-channel mitigation** — v1 returns as soon as the probe finishes (completion-time
+  leak acknowledged). The fixed-interval / growing-epoch release grid (decision #12) is a v2 hardening.
+
+### Open (v1 → implementation)
+- Skill wire format on the socket (framing of `{repo, script, params}` → `{bit | ERROR}`).
+- How the broker obtains the read-only clone (its own repo-scoped read token; clone-on-request vs.
+  pre-provisioned) and where that credential lives (broker only, never in the probe or the caller).
+- Probe resource/time limits (CPU/mem/wall-clock) and the timeout → ERROR mapping.
+- Whether the probe's `script` may import third-party packages (offline only in v1) or a fixed stdlib-
+  only interpreter.
