@@ -953,3 +953,64 @@ broker: snapshot read-only clone → no-network sandbox → run python
 - Probe resource/time limits (CPU/mem/wall-clock) and the timeout → ERROR mapping.
 - Whether the probe's `script` may import third-party packages (offline only in v1) or a fixed stdlib-
   only interpreter.
+
+## Sealed probe: config surface + skill exposure (LOCKED)
+
+### Placement — TOP-LEVEL `sealedProbes` (not under `security`)
+A sealed-probe setup is a whole execution SUBSYSTEM (broker sidecar + agent-facing skill + a fleet
+of per-invocation sub-sandboxes), so it belongs at the top level alongside the other subsystem/mode
+categories, NOT buried under `security`. Rationale + precedent:
+- `security` today is a flat bag of flags that tune the ONE existing sandbox (`legacySecurity`,
+  `sslBump`, `enableDlp`, `enableHostAccess`, host ports) plus a single small `difcProxy` object.
+  A sealed-probe subsystem is not a dial on that sandbox.
+- The right precedent is **`apiProxy`** — also a sidecar subsystem with many fields, also top-level.
+  `sealedProbes` mirrors it.
+- Supersedes the `agentGroups` config surface for v1 (that belonged to the heavier agent-group path).
+  We supersede rather than relocate it.
+
+### Config block
+```yaml
+sealedProbes:
+  enabled: true
+  privateRepos:            # allowlist the broker may clone read-only; one repo per probe target
+    - "lpcox/foo"
+    - "lpcox/bar"
+  runtime: gvisor          # probe sandbox isolation: docker | gvisor | sbx
+  timeout: 30              # per-probe wall-clock seconds → ERROR on exceed
+  memoryLimit: "512m"
+  interpreter: python3     # v1: stdlib-only (package policy becomes a field here later)
+```
+- `privateRepos` is a LIST of `owner/repo` strings. Absent/`enabled:false` ⇒ no broker, no skill
+  (fully backward compatible).
+- **Credential sourcing**: the config declares WHICH repos are allowed; the per-repo read-only
+  token comes from the ENVIRONMENT, never the config file (consistent with awf's credential-isolation
+  model, spec §9). The broker holds the token; the primary agent and the config never see it.
+
+### Skill exposure — one skill, `privateRepo` enum parameter (option A)
+The broker exposes a SINGLE agent-facing skill whose signature is parameterized by the private repo:
+```
+sealed_probe(privateRepo: enum[<privateRepos>], script: string [, params]) -> bit | ERROR
+```
+- The `privateRepo` parameter is typed as an **enum generated from the configured `privateRepos`**,
+  so the tool SCHEMA structurally constrains the agent to the allowlist; the broker double-checks
+  membership and rejects anything else → `ERROR`.
+- Each `(privateRepo, script)` invocation is ONE probe run against that repo's read-only clone.
+- Return is still exactly `bit | ERROR`; `stdout`/`stderr`/clone/logs never returned (sealed).
+- Why exposing the repo name as a selector is safe: the repo name is NOT secret (it is already in the
+  run's own config). Sealing protects the repo CONTENTS and the COMPUTATION, which stay hidden — only
+  the bit escapes. So a repo selector costs zero confidentiality.
+- Idiomatic for an LLM tool call and scales to any number of repos (vs. one-skill-per-repo, which
+  clutters the tool list and doesn't scale).
+
+### Validation (fail-fast at config load)
+- `privateRepos`: non-empty when `enabled`; each entry matches `^[^/]+/[^/]+$`; unique; no wildcards
+  / path traversal.
+- `runtime` ∈ {docker, gvisor, sbx}; `timeout` > 0; `memoryLimit` a valid size string.
+- A read token must be resolvable (from env) for each `privateRepo` — but token *provisioning* is out
+  of the schema's scope; the schema validates SHAPE only.
+
+### Relationship to prior config drafts
+- Replaces `security.agentGroups` (secrecy-tag array) as the active config direction for v1.
+- The v2 deferrals from the sealed-probe section (live `gh`, safe-outputs, timing grid) will add
+  fields UNDER this same top-level `sealedProbes` block (e.g. `liveGh`, `safeOutputs`, `timing`),
+  keeping it the single home for the subsystem.
