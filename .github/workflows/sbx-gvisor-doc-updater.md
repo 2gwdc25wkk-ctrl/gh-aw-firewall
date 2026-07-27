@@ -13,7 +13,8 @@ permissions:
 sandbox:
   agent:
     id: awf
-max-turns: 40
+max-turns: 20
+model: claude-haiku-4.5
 engine:
   id: copilot
 network:
