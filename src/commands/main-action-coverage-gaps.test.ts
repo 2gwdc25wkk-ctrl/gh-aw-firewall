@@ -1,22 +1,7 @@
-// Module-level mock functions for fs — must be declared before jest.mock('fs')
-const mockMkdirSync = jest.fn();
-const mockWriteFileSync = jest.fn();
-const mockChmodSync = jest.fn();
-const mockOpenSync = jest.fn().mockReturnValue(42);
-const mockCloseSync = jest.fn();
 const mockExecSync = jest.fn();
 
-jest.mock('fs', () => {
-  const actual = jest.requireActual<typeof import('fs')>('fs');
-  return {
-    ...actual,
-    mkdirSync: (...args: unknown[]) => mockMkdirSync(...args),
-    writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
-    chmodSync: (...args: unknown[]) => mockChmodSync(...args),
-    openSync: (...args: unknown[]) => mockOpenSync(...args),
-    closeSync: (...args: unknown[]) => mockCloseSync(...args),
-  };
-});
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+jest.mock('fs', () => require('./main-action-fs-mock.test-utils').mainActionFsMockFactory());
 
 jest.mock('child_process', () => ({
   execSync: (...args: unknown[]) => mockExecSync(...args),
