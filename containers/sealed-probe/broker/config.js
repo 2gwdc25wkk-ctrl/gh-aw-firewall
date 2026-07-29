@@ -2,6 +2,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const { MAX_PROBE_TIMEOUT_SECONDS } = require('./protocol');
+const { SEALED_PROBE_SENSITIVITY_RUN_BITS } = require('./sensitivity');
 
 /**
  * Broker configuration.
@@ -48,6 +50,23 @@ function parsePositiveInt(name, fallback) {
   return parsed;
 }
 
+/**
+ * Parses the per-invocation timeout, additionally re-enforcing (defense in
+ * depth; AWF's host-side preflight already rejects an out-of-range value
+ * before this container ever starts) that it preserves the final response
+ * bucket's post-processing margin.
+ */
+function parseTimeoutSeconds() {
+  const parsed = parsePositiveInt('AWF_SEALED_PROBE_TIMEOUT', 30);
+  if (parsed > MAX_PROBE_TIMEOUT_SECONDS) {
+    throw new Error(
+      `Environment variable AWF_SEALED_PROBE_TIMEOUT must be at most ${MAX_PROBE_TIMEOUT_SECONDS} seconds ` +
+      '(the final response bucket reserves one minute for termination, validation, and cleanup)',
+    );
+  }
+  return parsed;
+}
+
 function loadConfig() {
   const memoryLimit = process.env.AWF_SEALED_PROBE_MEMORY || '512m';
   if (!/^[1-9][0-9]*[bkmgBKMG]$/.test(memoryLimit)) {
@@ -77,7 +96,7 @@ function loadConfig() {
     // which is not necessarily the broker's (ARC/DinD split filesystems).
     hostWorkDir: requireEnv('AWF_SEALED_PROBE_HOST_WORK_DIR'),
     dockerRuntime,
-    timeoutSeconds: parsePositiveInt('AWF_SEALED_PROBE_TIMEOUT', 30),
+    timeoutSeconds: parseTimeoutSeconds(),
     maxInvocations: parsePositiveInt('AWF_SEALED_PROBE_MAX_INVOCATIONS', 32),
     memoryLimit,
     socketUid: parsePositiveInt('AWF_SEALED_PROBE_SOCKET_UID', 0),
@@ -86,16 +105,18 @@ function loadConfig() {
 }
 
 /**
- * Loads the AWF-generated repo → opaque seed id map.
+ * Loads the AWF-generated repo → { opaque seed id, sensitivity } map.
  *
  * The map is the *only* way a repository can be selected: a request supplies
  * a normalized `owner/repo` id, which is looked up here. Callers never supply
- * a path, and an unknown id is simply absent from the map.
+ * a path, and an unknown id is simply absent from the map. Sensitivity is
+ * carried in the (AWF-trusted, host-written) map itself, never accepted from
+ * a request — a request cannot choose or override its repository's budget.
  */
 function loadSeedMap(seedMapPath) {
   const parsed = JSON.parse(fs.readFileSync(seedMapPath, 'utf8'));
-  if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.seeds)) {
-    throw new Error('Seed map is malformed');
+  if (!parsed || parsed.version !== 2 || !Array.isArray(parsed.seeds)) {
+    throw new Error('Seed map is malformed or is an unsupported version');
   }
   if (typeof parsed.runId !== 'string' || !/^[0-9a-f]{8,}$/.test(parsed.runId)) {
     throw new Error('Seed map has no usable runId');
@@ -103,7 +124,12 @@ function loadSeedMap(seedMapPath) {
 
   const seeds = new Map();
   for (const entry of parsed.seeds) {
-    if (!entry || typeof entry.repo !== 'string' || typeof entry.seedId !== 'string') {
+    if (
+      !entry
+      || typeof entry.repo !== 'string'
+      || typeof entry.seedId !== 'string'
+      || !Object.prototype.hasOwnProperty.call(SEALED_PROBE_SENSITIVITY_RUN_BITS, entry.sensitivity)
+    ) {
       throw new Error('Seed map entry is malformed');
     }
     // Seed ids are AWF-generated opaque hex names. Re-validating here means a
@@ -111,7 +137,7 @@ function loadSeedMap(seedMapPath) {
     if (!/^[0-9a-f]{16,64}$/.test(entry.seedId)) {
       throw new Error('Seed map entry has an unexpected seed id');
     }
-    seeds.set(entry.repo.toLowerCase(), entry.seedId);
+    seeds.set(entry.repo.toLowerCase(), { seedId: entry.seedId, sensitivity: entry.sensitivity });
   }
 
   return { runId: parsed.runId, seeds };

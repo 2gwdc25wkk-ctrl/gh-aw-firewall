@@ -2,13 +2,18 @@ import type { WrapperConfig } from '../types';
 import execa from 'execa';
 import { assertProbeRuntimeAvailable, preflightTestHelpers, validateSealedProbeConfig } from './preflight';
 import type { SealedProbesConfig } from '../types';
+import type { SealedProbeRepository } from '../types/sealed-probe-options';
 
 jest.mock('execa', () => ({ __esModule: true, default: jest.fn() }));
 const mockExeca = execa as unknown as jest.Mock;
 
+function repo(name: string, sensitivity: SealedProbeRepository['sensitivity'] = 'internal'): SealedProbeRepository {
+  return { repo: name, sensitivity };
+}
+
 const baseSealedProbes: SealedProbesConfig = {
   enabled: true,
-  privateRepos: ['octo/private'],
+  privateRepos: [repo('octo/private')],
   runtime: 'docker',
   timeout: 30,
   memoryLimit: '512m',
@@ -49,14 +54,14 @@ describe('validateSealedProbeConfig', () => {
     ['octo/../etc', 'traversal'],
     ['user:token@octo/private', 'credentials'],
     ['octo/private/extra', 'extra path segment'],
-  ])('rejects unsafe repository slug %s (%s)', (repo) => {
-    const errors = validateSealedProbeConfig(buildConfig({ privateRepos: [repo] }), envWithToken);
+  ])('rejects unsafe repository slug %s (%s)', (repoSlug) => {
+    const errors = validateSealedProbeConfig(buildConfig({ privateRepos: [repo(repoSlug)] }), envWithToken);
     expect(errors.join('\n')).toContain('is not a bare owner/repo slug');
   });
 
   it('rejects case-insensitive duplicates', () => {
     const errors = validateSealedProbeConfig(
-      buildConfig({ privateRepos: ['octo/private', 'Octo/Private'] }),
+      buildConfig({ privateRepos: [repo('octo/private'), repo('Octo/Private')] }),
       envWithToken,
     );
     expect(errors.join('\n')).toContain('duplicate entry');
@@ -118,6 +123,16 @@ describe('validateSealedProbeConfig', () => {
     expect(errors.join('\n')).toContain('timeout must be a positive integer');
     expect(errors.join('\n')).toContain('maxInvocations must be a positive integer');
     expect(errors.join('\n')).toContain('is not a Docker memory limit');
+  });
+
+  it('accepts a timeout that preserves the final one-minute processing margin (540s)', () => {
+    expect(validateSealedProbeConfig(buildConfig({ timeout: 540 }), envWithToken)).toEqual([]);
+  });
+
+  it('rejects a timeout that consumes the final timing bucket processing margin', () => {
+    const errors = validateSealedProbeConfig(buildConfig({ timeout: 541 }), envWithToken);
+    expect(errors.join('\n')).toContain('timeout must be at most 540 seconds');
+    expect(errors.join('\n')).toContain('reserves its final minute');
   });
 
   it('rejects an unsupported interpreter', () => {

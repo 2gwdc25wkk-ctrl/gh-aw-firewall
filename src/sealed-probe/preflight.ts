@@ -3,7 +3,7 @@ import { getLocalDockerEnv } from '../host-env';
 import { runtimeUsesComposeAgent } from '../container-runtime';
 import type { SealedProbesConfig, WrapperConfig } from '../types';
 import { normalizeRepoKey } from './paths';
-import { SEALED_PROBE_REPO_PATTERN } from './protocol';
+import { MAX_PROBE_TIMEOUT_SECONDS, SEALED_PROBE_REPO_PATTERN } from './protocol';
 import { resolveStagingToken } from './staging';
 
 /**
@@ -63,7 +63,8 @@ export function validateSealedProbeConfig(
   }
 
   const seenKeys = new Set<string>();
-  for (const repo of sealedProbes.privateRepos) {
+  for (const entry of sealedProbes.privateRepos) {
+    const repo = entry.repo;
     if (!SEALED_PROBE_REPO_PATTERN.test(repo)) {
       errors.push(
         `sealedProbes.privateRepos entry "${repo}" is not a bare owner/repo slug ` +
@@ -90,8 +91,16 @@ export function validateSealedProbeConfig(
     errors.push(`sealedProbes.interpreter "${sealedProbes.interpreter}" is not supported`);
   }
 
+  // Reserve the final minute of the 10-minute response bucket for Docker
+  // termination, result validation, container removal, and workspace cleanup.
+  // The script timeout cannot consume the entire observable boundary.
   if (!Number.isInteger(sealedProbes.timeout) || sealedProbes.timeout < 1) {
     errors.push('sealedProbes.timeout must be a positive integer number of seconds');
+  } else if (sealedProbes.timeout > MAX_PROBE_TIMEOUT_SECONDS) {
+    errors.push(
+      `sealedProbes.timeout must be at most ${MAX_PROBE_TIMEOUT_SECONDS} seconds ` +
+      '(the 10-minute response bucket reserves its final minute for termination, validation, and cleanup)',
+    );
   }
 
   if (!Number.isInteger(sealedProbes.maxInvocations) || sealedProbes.maxInvocations < 1) {
