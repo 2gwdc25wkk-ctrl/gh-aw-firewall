@@ -10,6 +10,7 @@ import { parseUrlPatterns } from './domain-matchers';
 import { SslConfig, SQUID_PORT } from './host-env';
 import { generateDockerCompose, redactDockerComposeSecrets } from './compose-generator';
 import { resolveLogPaths } from './log-paths';
+import { DEFAULT_DNS_SERVERS, filterForNetworkIsolation } from './dns-resolver';
 import {
   AGENT_IP,
   API_PROXY_IP,
@@ -214,7 +215,8 @@ function writeAuditArtifacts(
   config: WrapperConfig,
   networkConfig: NetworkConfig,
   dockerCompose: DockerComposeConfig,
-  squidConfig: string
+  squidConfig: string,
+  squidDnsServers?: string[]
 ): void {
   const auditDir = config.auditDir || path.join(config.workDir, 'audit');
   fs.mkdirSync(auditDir, { recursive: true, mode: 0o755 });
@@ -248,7 +250,7 @@ function writeAuditArtifacts(
     enableHostAccess: config.enableHostAccess,
     allowHostPorts: config.allowHostPorts,
     enableDlp: config.enableDlp,
-    dnsServers: config.dnsServers,
+    dnsServers: squidDnsServers ?? config.dnsServers,
     ...(config.enableApiProxy && networkConfig.proxyIp ? {
       apiProxyIp: networkConfig.proxyIp,
     } : {}),
@@ -315,6 +317,23 @@ export async function writeConfigs(config: WrapperConfig): Promise<void> {
     logger.debug(`Parsed ${urlPatterns.length} URL pattern(s) for SSL Bump filtering`);
   }
 
+  // In network-isolation (topology) mode the Squid container is dual-homed: it
+  // has a static IP on the internal `awf-net` network and an auto-assigned IP on
+  // the external `awf-ext` Docker bridge. All DNS queries leave through `awf-ext`.
+  // When the host's routing is later modified by tools like Tailscale (e.g. an
+  // accepted exit-node or subnet route that captures 0.0.0.0/0 or the specific
+  // DNS server address), DNS servers that depend on host-specific routing — such
+  // as Azure DHCP DNS (168.63.129.16) or Tailscale Magic DNS (100.100.100.100) —
+  // can become unreachable from the Docker bridge, causing every Squid DNS lookup
+  // to fail with TCP_TUNNEL:HIER_NONE 503. Filter them out in isolation mode when
+  // the DNS list was auto-detected (not explicitly supplied by the operator via
+  // --dns-servers), so Squid falls back to publicly-routable servers that are not
+  // affected by VPN route changes. Explicitly-specified servers are trusted as-is.
+  const resolvedDnsServers = config.dnsServers ?? DEFAULT_DNS_SERVERS;
+  const squidDnsServers = config.networkIsolation && !config.dnsServersExplicit
+    ? filterForNetworkIsolation(resolvedDnsServers, logger)
+    : resolvedDnsServers;
+
   // Note: Use container path for SSL database since it's mounted at /var/spool/squid_ssl_db
   const squidConfig = generateSquidConfig({
     // Combine non-sensitive and sensitive (secret-derived) domains so Squid allows
@@ -330,7 +349,7 @@ export async function writeConfigs(config: WrapperConfig): Promise<void> {
     enableHostAccess: config.enableHostAccess,
     allowHostPorts: config.allowHostPorts,
     enableDlp: config.enableDlp,
-    dnsServers: config.dnsServers,
+    dnsServers: squidDnsServers,
     upstreamProxy: config.upstreamProxy,
     // Allow the api-proxy sidecar IP through Squid before the raw-IP deny rule.
     // Some HTTP clients (e.g., Node.js fetch / undici ProxyAgent) route requests
@@ -363,7 +382,7 @@ export async function writeConfigs(config: WrapperConfig): Promise<void> {
   // These files contain no secrets (redacted compose, domain ACLs, policy rules)
   // and are made world-readable so the gh-aw post-run audit step (running as
   // non-root runner user) can stat/read them even if AWF cleanup is interrupted.
-  writeAuditArtifacts(config, networkConfig, dockerCompose, squidConfig);
+  writeAuditArtifacts(config, networkConfig, dockerCompose, squidConfig, squidDnsServers);
 }
 
 /** @internal Exposed only for unit tests — not part of the public API. */
