@@ -21,26 +21,21 @@ run_inside_agent() {
   local schema expected_sequence result_kind
   case "${SMOKE_SENSITIVITY:-}" in
     public)
-      # The array admits 2^28 results, so each invocation costs 32 bits.
-      # Public must remain unmetered even after three invocations (96 bits).
       schema="$ARRAY_SCHEMA"
       expected_sequence="ok ok ok"
       result_kind="array"
       ;;
     internal)
-      # Two 32-bit invocations exactly exhaust the 64-bit internal budget.
       schema="$ARRAY_SCHEMA"
       expected_sequence="ok ok error"
       result_kind="array"
       ;;
     confidential)
-      # A boolean costs 5 bits, so only one fits in the 8-bit budget.
       schema="$BOOLEAN_SCHEMA"
       expected_sequence="ok error error"
       result_kind="boolean"
       ;;
     sealed)
-      # The zero-bit sealed budget must reject even the first query.
       schema="$BOOLEAN_SCHEMA"
       expected_sequence="error error error"
       result_kind="boolean"
