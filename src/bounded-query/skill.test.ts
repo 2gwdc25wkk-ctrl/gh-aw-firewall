@@ -75,6 +75,8 @@ describe('writeBoundedQuerySkill', () => {
   });
 
   afterEach(() => {
+    const paths = resolveBoundedQueryPaths(workDir);
+    fs.rmSync(paths.ingressRoot, { recursive: true, force: true });
     fs.rmSync(workDir, { recursive: true, force: true });
   });
 
@@ -87,7 +89,8 @@ describe('writeBoundedQuerySkill', () => {
     });
 
     expect(containerPath).toBe(AGENT_SKILL_PATH);
-    expect(paths.skillPath.startsWith(workDir)).toBe(true);
+    expect(paths.skillPath.startsWith(paths.ingressRoot)).toBe(true);
+    expect(paths.skillPath.startsWith(workDir)).toBe(false);
     // Open with O_NOFOLLOW to avoid TOCTOU between stat and read.
     const fd = fs.openSync(paths.skillPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     try {

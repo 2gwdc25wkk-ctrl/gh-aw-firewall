@@ -196,7 +196,9 @@ describe('stageBoundedQuerySeeds', () => {
   });
 
   afterEach(() => {
-    releaseSeedPermissions(resolveBoundedQueryPaths(workDir).seedsDir);
+    const paths = resolveBoundedQueryPaths(workDir);
+    releaseSeedPermissions(paths.seedsDir);
+    fs.rmSync(paths.root, { recursive: true, force: true });
     fs.rmSync(workDir, { recursive: true, force: true });
   });
 
@@ -293,7 +295,7 @@ describe('stageBoundedQuerySeeds', () => {
     expect(fs.existsSync(path.join(gitDir, 'FETCH_HEAD'))).toBe(false);
     expect(fs.existsSync(path.join(gitDir, 'refs', 'remotes'))).toBe(false);
     expect(fs.readFileSync(path.join(gitDir, 'packed-refs'), 'utf8')).not.toContain('refs/remotes/');
-    expect(paths.seedsDir).toContain('bounded-queries');
+    expect(paths.seedsDir).toContain('awf-bounded-query-private-');
   });
 
   it('records the staged commit and an opaque seed id', async () => {
@@ -413,7 +415,9 @@ describe('releaseSeedPermissions', () => {
       releaseSeedPermissions(paths.seedsDir);
       expect(() => fs.rmSync(paths.seedsDir, { recursive: true })).not.toThrow();
     } finally {
-      releaseSeedPermissions(resolveBoundedQueryPaths(workDir).seedsDir);
+      const paths = resolveBoundedQueryPaths(workDir);
+      releaseSeedPermissions(paths.seedsDir);
+      fs.rmSync(paths.root, { recursive: true, force: true });
       fs.rmSync(workDir, { recursive: true, force: true });
     }
   });

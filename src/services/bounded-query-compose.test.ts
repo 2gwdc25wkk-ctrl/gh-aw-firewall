@@ -91,7 +91,7 @@ describe('bounded-query broker in generated Docker Compose', () => {
     it('gives the agent the socket and skill mounts and nothing else bounded-query related', () => {
       const result = generateDockerCompose(enabled(), mockNetworkConfig);
       const agent = result.services['agent'] as unknown as Record<string, unknown>;
-      const boundedQueryMounts = (agent.volumes as string[]).filter((v) => v.includes('/bounded-queries'));
+      const boundedQueryMounts = (agent.volumes as string[]).filter((v) => v.includes('awf-bounded-query'));
 
       expect(boundedQueryMounts).toHaveLength(4);
       expect(boundedQueryMounts.filter((v) => v.endsWith(':rw'))).toHaveLength(2);
