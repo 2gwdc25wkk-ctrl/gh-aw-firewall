@@ -56,7 +56,7 @@ RUN chmod -R a-w /opt/awf \
     && node --check /opt/awf/broker/healthcheck.js
 
 # Fixed broker-only mount points.
-RUN mkdir -p /srv/awf/seeds /srv/awf/work /run/awf-bounded-query /var/log/awf-bounded-query
+RUN mkdir -p /srv/awf/seeds /srv/awf/work /run/awf-bounded-query /run/awf-bounded-query-control /var/log/awf-bounded-query
 
 # The broker is root only to copy host-owned read-only seeds into private
 # workspaces and hand those workspaces to the unprivileged query uid.

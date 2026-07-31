@@ -12,14 +12,22 @@ import {
 
 describe('bounded-query paths', () => {
   const workDir = '/tmp/awf-12345';
+  const privateBaseDir = '/var/tmp/awf-test-private';
 
-  it('derives every artifact path under a single bounded-queries subtree', () => {
-    const paths = resolveBoundedQueryPaths(workDir);
+  it('separates broker-private state from agent-visible ingress', () => {
+    const paths = resolveBoundedQueryPaths(workDir, privateBaseDir);
 
-    expect(paths.root).toBe(path.join(workDir, 'bounded-queries'));
-    for (const value of Object.values(paths)) {
-      expect(value.startsWith(paths.root)).toBe(true);
-    }
+    expect(paths.root.startsWith(`${privateBaseDir}/awf-bounded-query-private-`)).toBe(true);
+    expect(paths.root.startsWith('/tmp')).toBe(false);
+    expect(paths.ingressRoot.startsWith(`${privateBaseDir}/awf-bounded-query-ingress-`)).toBe(true);
+    expect(paths.ingressRoot.startsWith(workDir)).toBe(false);
+    expect(paths.seedsDir.startsWith(paths.root)).toBe(true);
+    expect(paths.workDir.startsWith(paths.root)).toBe(true);
+    expect(paths.controlDir.startsWith(paths.root)).toBe(true);
+    expect(paths.auditDir.startsWith(paths.root)).toBe(true);
+    expect(paths.seedMapPath.startsWith(paths.root)).toBe(true);
+    expect(paths.runDir.startsWith(paths.ingressRoot)).toBe(true);
+    expect(paths.agentDir.startsWith(paths.ingressRoot)).toBe(true);
   });
 
   it('places the socket and skill inside their advertised directories', () => {

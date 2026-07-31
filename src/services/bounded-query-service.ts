@@ -10,6 +10,7 @@ import {
   AGENT_SOCKET_DIR,
   AGENT_SOCKET_PATH,
   BROKER_AUDIT_DIR,
+  BROKER_CONTROL_DIR,
   BROKER_DOCKER_SOCKET_PATH,
   BROKER_SEED_MAP_PATH,
   BROKER_SEEDS_DIR,
@@ -182,6 +183,7 @@ export function buildBoundedQueryService(params: BoundedQueryServiceParams): Bou
         `${paths.seedsDir}:${BROKER_SEEDS_DIR}:ro`,
         `${paths.workDir}:${BROKER_WORK_DIR}:rw`,
         `${paths.runDir}:${BROKER_SOCKET_DIR}:rw`,
+        `${paths.controlDir}:${BROKER_CONTROL_DIR}:rw`,
         `${paths.auditDir}:${BROKER_AUDIT_DIR}:rw`,
         `${paths.seedMapPath}:${BROKER_SEED_MAP_PATH}:ro`,
         `${dockerSocketPath}:${BROKER_DOCKER_SOCKET_PATH}:rw`,
@@ -233,29 +235,12 @@ export function buildBoundedQueryService(params: BoundedQueryServiceParams): Bou
     AWF_BOUNDED_QUERY_REPOS: boundedQueries.privateRepos.map((repository) => repository.repo).join(','),
   };
 
-  // The agent receives four bounded-query mounts:
-  //
-  //  1+2. Masking mounts: an empty directory is mounted at the bounded-query
-  //       root as seen through the agent's broad /tmp bind mount. This hides
-  //       seeds, work, audit, and the seed-map from the agent even in rootless
-  //       mode where directory permissions alone are insufficient.
-  //
-  //  3+4. Socket mount: the broker's Unix socket directory at its contract path.
-  //
-  //  5+6. Skill mount: the generated SKILL.md at its contract path.
-  //
-  // Paths are duplicated (bare and /host-prefixed) because the agent runs
-  // chrooted into /host. The masking mounts come first; Docker applies mounts
-  // in order, so the more-specific socket/skill mounts take precedence.
+  // The agent receives only the socket and skill mounts. Paths are duplicated
+  // (bare and /host-prefixed) because the agent runs chrooted into /host.
   const agentVolumes = applyHostPathPrefixToVolumes(
     [
-      // Masking mounts — cover the bounded-query root visible through /tmp.
-      `${paths.maskDir}:${paths.root}:ro`,
-      `${paths.maskDir}:/host${paths.root}:ro`,
-      // Socket mounts.
       `${paths.runDir}:${AGENT_SOCKET_DIR}:rw`,
       `${paths.runDir}:/host${AGENT_SOCKET_DIR}:rw`,
-      // Skill mounts.
       `${paths.agentDir}:${AGENT_SKILL_DIR}:ro`,
       `${paths.agentDir}:/host${AGENT_SKILL_DIR}:ro`,
     ],
@@ -272,9 +257,8 @@ export function buildBoundedQueryService(params: BoundedQueryServiceParams): Bou
 /**
  * True when a volume entry is one of the bounded-query agent mounts.
  *
- * The ARC/DinD sysroot filter drops bind mounts sourced from `workDir`; the
- * bounded-query socket, skill, and masking mounts are sourced there but are
- * mandatory, so they are exempted explicitly rather than silently disappearing.
+ * Recognizing these mounts centrally lets sysroot filtering preserve mandatory
+ * bounded-query ingress without coupling that code to dynamic host paths.
  */
 export function isBoundedQueryAgentMount(volume: string): boolean {
   const target = volume.split(':')[1];
@@ -282,10 +266,7 @@ export function isBoundedQueryAgentMount(volume: string): boolean {
   const normalized = target.startsWith('/host') ? target.slice('/host'.length) : target;
   return (
     normalized === AGENT_SOCKET_DIR ||
-    normalized === AGENT_SKILL_DIR ||
-    // The masking mount's target is the bounded-query root itself (paths.root).
-    // We check by suffix since paths.root includes the dynamic workDir prefix.
-    normalized.endsWith('/bounded-queries')
+    normalized === AGENT_SKILL_DIR
   );
 }
 

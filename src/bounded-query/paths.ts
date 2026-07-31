@@ -4,29 +4,36 @@ import * as path from 'path';
 /**
  * Filesystem layout and fixed container paths for the bounded-query subsystem.
  *
- * Everything bounded queries need lives under a single run-unique subtree of
- * `config.workDir` so that the existing work-directory hardening (0700,
- * symlink rejection, end-of-run removal) applies to it unchanged.
+ * Broker-private state and the only agent-visible artifacts live in disjoint,
+ * run-specific host roots outside `/tmp`. Only the ingress roots are mounted
+ * into the primary agent.
  *
  * Layout (host side):
  *
  * ```text
- * <workDir>/bounded-queries/
+ * /var/tmp/awf-bounded-query-private-<uid>-<workDir digest>/
  *   seeds/<seedId>/     immutable, read-only repository seed (one per repo)
  *   work/               broker-owned per-invocation writable copies
- *   run/                broker Unix socket, shared read-write with the agent
- *   agent/              generated SKILL.md, shared read-only with the agent
+ *   control/            broker readiness and other private control state
  *   audit/              protected broker diagnostics (never agent-visible)
  *   seed-map.json       normalized repo -> opaque seed id map (broker input)
+ *
+ * /var/tmp/awf-bounded-query-ingress-<uid>-<workDir digest>/
+ *   run/                broker Unix socket, shared read-write with the agent
+ *   skill/              generated SKILL.md, shared read-only with the agent
  * ```
  */
 export interface BoundedQueryPaths {
-  /** `<workDir>/bounded-queries` — parent of every bounded-query artifact. */
+  /** Dedicated broker-private host root. Never mounted into the primary agent. */
   root: string;
   /** Immutable per-repository seeds. Mounted read-only into the broker. */
   seedsDir: string;
   /** Broker-owned scratch space for per-invocation writable repo copies. */
   workDir: string;
+  /** Broker-private readiness and control state. */
+  controlDir: string;
+  /** Parent of the only bounded-query artifacts visible to the primary agent. */
+  ingressRoot: string;
   /** Directory holding the broker's Unix socket, shared with the agent. */
   runDir: string;
   /** Directory holding agent-visible artifacts (the generated SKILL.md). */
@@ -39,18 +46,10 @@ export interface BoundedQueryPaths {
   socketPath: string;
   /** Host path of the generated skill document. */
   skillPath: string;
-  /**
-   * Empty directory used to mask the entire bounded-query root from the agent's
-   * broad `/tmp` bind mount.
-   *
-   * The agent receives `run/` (socket) and `agent/` (skill) as separate,
-   * more-specific bind mounts at different container paths. The parent
-   * `<workDir>/bounded-queries/` is masked with this empty directory so the
-   * agent cannot enumerate seeds, work, audit, or the seed-map through `/tmp`.
-   * Located OUTSIDE the bounded-query root to avoid self-referential masking.
-   */
-  maskDir: string;
 }
+
+/** Broker-private state is deliberately outside the agent's broad `/tmp` mount. */
+export const BOUNDED_QUERY_PRIVATE_BASE_DIR = '/var/tmp';
 
 /** Name of the broker's Unix domain socket inside {@link BoundedQueryPaths.runDir}. */
 export const BOUNDED_QUERY_SOCKET_FILENAME = 'broker.sock';
@@ -91,6 +90,9 @@ export const BROKER_SOCKET_DIR = '/run/awf-bounded-query';
 /** Protected diagnostics directory inside the broker container. */
 export const BROKER_AUDIT_DIR = '/var/log/awf-bounded-query';
 
+/** Broker-private control directory inside the broker container. */
+export const BROKER_CONTROL_DIR = '/run/awf-bounded-query-control';
+
 /** Docker socket mount point inside the broker container. */
 export const BROKER_DOCKER_SOCKET_PATH = '/var/run/docker.sock';
 
@@ -100,24 +102,39 @@ export const QUERY_MOUNT_DIR = '/query';
 /** Fixed read-only path the submitted query script is mounted at. */
 export const QUERY_SCRIPT_PATH = '/awf/query-script.py';
 
+/** Derives the private root identity without revealing the work-directory path. */
+function deriveRootIdentity(awfWorkDir: string): string {
+  const uid = process.getuid?.() ?? 0;
+  const digest = crypto
+    .createHash('sha256')
+    .update(path.resolve(awfWorkDir), 'utf8')
+    .digest('hex')
+    .slice(0, 20);
+  return `${uid}-${digest}`;
+}
+
 /** Derives every bounded-query path from the AWF work directory. */
-export function resolveBoundedQueryPaths(awfWorkDir: string): BoundedQueryPaths {
-  const root = path.join(awfWorkDir, 'bounded-queries');
-  const runDir = path.join(root, 'run');
-  const agentDir = path.join(root, 'agent');
+export function resolveBoundedQueryPaths(
+  awfWorkDir: string,
+  privateBaseDir = BOUNDED_QUERY_PRIVATE_BASE_DIR,
+): BoundedQueryPaths {
+  const rootIdentity = deriveRootIdentity(awfWorkDir);
+  const root = path.join(privateBaseDir, `awf-bounded-query-private-${rootIdentity}`);
+  const ingressRoot = path.join(privateBaseDir, `awf-bounded-query-ingress-${rootIdentity}`);
+  const runDir = path.join(ingressRoot, 'run');
+  const agentDir = path.join(ingressRoot, 'skill');
   return {
     root,
     seedsDir: path.join(root, 'seeds'),
     workDir: path.join(root, 'work'),
+    controlDir: path.join(root, 'control'),
+    ingressRoot,
     runDir,
     agentDir,
     auditDir: path.join(root, 'audit'),
     seedMapPath: path.join(root, 'seed-map.json'),
     socketPath: path.join(runDir, BOUNDED_QUERY_SOCKET_FILENAME),
     skillPath: path.join(agentDir, BOUNDED_QUERY_SKILL_FILENAME),
-    // Sibling of the bounded-query root — never inside it — so the mask mount
-    // does not accidentally mask itself.
-    maskDir: path.join(awfWorkDir, 'bounded-queries-mask'),
   };
 }
 

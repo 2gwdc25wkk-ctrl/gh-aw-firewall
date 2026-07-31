@@ -71,7 +71,9 @@ describe('prepareBoundedQueries', () => {
   });
 
   afterEach(() => {
-    releaseSeedPermissions(resolveBoundedQueryPaths(workDir).seedsDir);
+    const paths = resolveBoundedQueryPaths(workDir);
+    releaseSeedPermissions(paths.seedsDir);
+    fs.rmSync(paths.root, { recursive: true, force: true });
     fs.rmSync(workDir, { recursive: true, force: true });
   });
 
@@ -88,7 +90,9 @@ describe('prepareBoundedQueries', () => {
     expect(fs.existsSync(paths.workDir)).toBe(true);
     expect(fs.existsSync(paths.runDir)).toBe(true);
     expect(fs.existsSync(paths.auditDir)).toBe(true);
+    expect(fs.existsSync(paths.controlDir)).toBe(true);
     expect(fs.existsSync(paths.skillPath)).toBe(true);
+    expect(paths.root.startsWith(workDir)).toBe(false);
 
     const seedMap = JSON.parse(fs.readFileSync(paths.seedMapPath, 'utf8'));
     expect(seedMap.version).toBe(2);
@@ -155,6 +159,26 @@ describe('prepareBoundedQueries', () => {
     }
   });
 
+  it('rejects a pre-existing private root instead of reusing attacker-controlled state', async () => {
+    const paths = resolveBoundedQueryPaths(workDir);
+    fs.mkdirSync(paths.root);
+    await expect(prepareBoundedQueries(buildConfig(workDir), { env: { GH_TOKEN: 't' }, gitRunner }))
+      .rejects.toThrow(/EEXIST|file already exists/);
+  });
+
+  it('rejects a pre-existing ingress root instead of following a planted symlink', async () => {
+    const paths = resolveBoundedQueryPaths(workDir);
+    const target = fs.mkdtempSync(path.join('/var/tmp', 'awf-bounded-query-ingress-target-'));
+    fs.symlinkSync(target, paths.ingressRoot);
+    try {
+      await expect(prepareBoundedQueries(buildConfig(workDir), { env: { GH_TOKEN: 't' }, gitRunner }))
+        .rejects.toThrow(/EEXIST|file already exists/);
+    } finally {
+      fs.rmSync(paths.ingressRoot, { force: true });
+      fs.rmSync(target, { recursive: true, force: true });
+    }
+  });
+
   it('aborts when a seed cannot be staged', async () => {
     const failing: GitRunner = async () => {
       throw new Error('fatal: repository not found');
@@ -178,9 +202,9 @@ describe('teardownBoundedQueries', () => {
 
   it('restores seed write permissions so generic cleanup can remove them', async () => {
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'awf-bounded-query-teardown-'));
+    const paths = resolveBoundedQueryPaths(workDir);
     try {
       await prepareBoundedQueries(buildConfig(workDir), { env: { GH_TOKEN: 't' }, gitRunner });
-      const paths = resolveBoundedQueryPaths(workDir);
 
       expect(() => fs.rmSync(paths.seedsDir, { recursive: true })).toThrow();
 
@@ -188,9 +212,11 @@ describe('teardownBoundedQueries', () => {
       // no-op; the permission restore is what must happen.
       await teardownBoundedQueries(buildConfig(workDir));
 
-      expect(() => fs.rmSync(paths.seedsDir, { recursive: true })).not.toThrow();
+      expect(fs.existsSync(paths.root)).toBe(false);
+      expect(fs.existsSync(paths.ingressRoot)).toBe(false);
     } finally {
-      releaseSeedPermissions(resolveBoundedQueryPaths(workDir).seedsDir);
+      releaseSeedPermissions(paths.seedsDir);
+      fs.rmSync(paths.root, { recursive: true, force: true });
       fs.rmSync(workDir, { recursive: true, force: true });
     }
   });
@@ -205,7 +231,9 @@ describe('teardownBoundedQueries', () => {
 
       expect(() => fs.rmSync(paths.seedsDir, { recursive: true })).toThrow();
     } finally {
-      releaseSeedPermissions(resolveBoundedQueryPaths(workDir).seedsDir);
+      const cleanupPaths = resolveBoundedQueryPaths(workDir);
+      releaseSeedPermissions(cleanupPaths.seedsDir);
+      fs.rmSync(cleanupPaths.root, { recursive: true, force: true });
       fs.rmSync(workDir, { recursive: true, force: true });
     }
   });
@@ -253,6 +281,7 @@ describe('teardownBoundedQueries', () => {
       await teardownBoundedQueries(buildConfig(workDir));
       expect(mockExeca).not.toHaveBeenCalled();
     } finally {
+      fs.rmSync(paths.root, { recursive: true, force: true });
       fs.rmSync(workDir, { recursive: true, force: true });
     }
   });
@@ -264,9 +293,11 @@ describe('teardownBoundedQueries', () => {
       mockExeca.mockRejectedValueOnce(new Error('docker unavailable'));
 
       await expect(teardownBoundedQueries(buildConfig(workDir))).resolves.toBeUndefined();
-      expect(() => fs.rmSync(resolveBoundedQueryPaths(workDir).seedsDir, { recursive: true })).not.toThrow();
+      expect(fs.existsSync(resolveBoundedQueryPaths(workDir).root)).toBe(false);
     } finally {
-      releaseSeedPermissions(resolveBoundedQueryPaths(workDir).seedsDir);
+      const cleanupPaths = resolveBoundedQueryPaths(workDir);
+      releaseSeedPermissions(cleanupPaths.seedsDir);
+      fs.rmSync(cleanupPaths.root, { recursive: true, force: true });
       fs.rmSync(workDir, { recursive: true, force: true });
     }
   });
@@ -285,6 +316,7 @@ describe('teardownBoundedQueries', () => {
       await expect(teardownBoundedQueries(buildConfig(workDir))).resolves.toBeUndefined();
       expect(mockReleaseSeedPermissions).toHaveBeenCalledWith(paths.seedsDir);
     } finally {
+      fs.rmSync(paths.root, { recursive: true, force: true });
       fs.rmSync(workDir, { recursive: true, force: true });
     }
   });

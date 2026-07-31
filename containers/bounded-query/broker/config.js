@@ -19,9 +19,10 @@ const WORK_DIR = '/srv/awf/work';
 const SEED_MAP_PATH = '/srv/awf/seed-map.json';
 const SOCKET_DIR = '/run/awf-bounded-query';
 const SOCKET_PATH = path.join(SOCKET_DIR, 'broker.sock');
+const CONTROL_DIR = '/run/awf-bounded-query-control';
 const AUDIT_DIR = '/var/log/awf-bounded-query';
-/** Broker-private readiness marker; the audit directory is never agent-mounted. */
-const READY_PATH = path.join(AUDIT_DIR, 'broker.ready');
+/** Broker-private readiness marker; the control directory is never agent-mounted. */
+const READY_PATH = path.join(CONTROL_DIR, 'broker.ready');
 const QUERY_SECCOMP_PATH = '/opt/awf/query-seccomp.json';
 
 /** Mount points inside the query container. Fixed, never caller-supplied. */
@@ -84,6 +85,7 @@ function loadConfig() {
     seedMapPath: SEED_MAP_PATH,
     socketDir: SOCKET_DIR,
     socketPath: SOCKET_PATH,
+    controlDir: CONTROL_DIR,
     readyPath: READY_PATH,
     auditDir: AUDIT_DIR,
     querySeccompPath: QUERY_SECCOMP_PATH,

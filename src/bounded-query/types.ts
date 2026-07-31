@@ -34,7 +34,7 @@ export interface BoundedQuerySeed {
 }
 
 /**
- * The document written to `<workDir>/bounded-queries/seed-map.json` and mounted
+ * The document written to the dedicated broker-private host root and mounted
  * read-only into the broker.
  *
  * It intentionally contains only what the broker needs: the mapping from a

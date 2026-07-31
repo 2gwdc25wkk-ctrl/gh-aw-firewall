@@ -19,7 +19,7 @@ const boundedQueries: BoundedQueriesConfig = {
 
 /**
  * End-to-end compose assembly checks for bounded queries: the broker must appear
- * as an optional, network-less service, gate the agent, and inject exactly two
+ * as an optional, network-less service, gate the agent, and inject only ingress
  * mounts plus three environment variables into the agent — and nothing at all
  * when the feature is off.
  */
@@ -93,11 +93,9 @@ describe('bounded-query broker in generated Docker Compose', () => {
       const agent = result.services['agent'] as unknown as Record<string, unknown>;
       const boundedQueryMounts = (agent.volumes as string[]).filter((v) => v.includes('/bounded-queries'));
 
-      // 2 masking mounts (hide the bounded-query root) + 2 socket mounts + 2 skill mounts = 6
-      expect(boundedQueryMounts).toHaveLength(6);
-      // Masking mounts are read-only; socket mounts are read-write; skill mounts are read-only
+      expect(boundedQueryMounts).toHaveLength(4);
       expect(boundedQueryMounts.filter((v) => v.endsWith(':rw'))).toHaveLength(2);
-      expect(boundedQueryMounts.filter((v) => v.endsWith(':ro'))).toHaveLength(4);
+      expect(boundedQueryMounts.filter((v) => v.endsWith(':ro'))).toHaveLength(2);
       expect(boundedQueryMounts.join(' ')).not.toContain('/seeds');
       expect(boundedQueryMounts.join(' ')).not.toContain('docker.sock');
     });

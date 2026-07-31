@@ -13,6 +13,8 @@ import { assertQueryRuntimeAvailable, validateBoundedQueryConfig } from './prefl
 import { writeBoundedQuerySkill } from './skill';
 import { releaseSeedPermissions, resolveStagingToken, stageBoundedQuerySeeds, type GitRunner } from './staging';
 import { BOUNDED_QUERY_SEED_MAP_VERSION, type BoundedQuerySeedMap } from './types';
+import { assertBoundedQueryPrivateRootIsolated } from './mount-policy';
+import { fixArtifactPermissionsForRootless } from '../artifact-permissions';
 
 /**
  * Bounded-query lifecycle orchestration.
@@ -25,9 +27,8 @@ import { BOUNDED_QUERY_SEED_MAP_VERSION, type BoundedQuerySeedMap } from './type
  *   agent, and any query exist;
  * - compose generation can rely on the on-disk layout already being present.
  *
- * `teardownBoundedQueries` removes orphaned query containers and restores write
- * permissions on the immutable seeds so AWF's generic work-directory cleanup
- * can delete them.
+ * `teardownBoundedQueries` removes orphaned query containers and the separate
+ * broker-private host root.
  */
 
 /** Docker label applied to every query container, used for orphan cleanup. */
@@ -47,26 +48,24 @@ function ensureModeDirectory(target: string, mode: number): void {
 /**
  * Creates the bounded-query directory layout.
  *
- * The socket and skill directories are handed to the host user because the
- * agent process runs under the host UID/GID; everything else stays
- * root-owned (0700) inside the already-hardened work directory.
- *
- * The mask directory is created as an empty, read-only-to-others directory.
- * It is bind-mounted into the agent at the bounded-query root path, replacing
- * the agent's view of the entire bounded-query subtree (including seeds, work,
- * and audit) through the broad `/tmp` bind mount. Only the socket and skill
- * (mounted at separate container paths) remain agent-visible.
+ * The private root is created without `recursive` so a pre-existing path,
+ * including a symlink planted between preflight and creation, fails closed.
  */
 function prepareDirectories(paths: BoundedQueryPaths): void {
-  ensureModeDirectory(paths.root, 0o700);
+  fs.mkdirSync(paths.root, { mode: 0o700 });
+  if (fs.lstatSync(paths.root).isSymbolicLink()) {
+    throw new Error(`Refusing to use symlink as bounded-query private root: ${paths.root}`);
+  }
+  fs.mkdirSync(paths.ingressRoot, { mode: 0o700 });
+  if (fs.lstatSync(paths.ingressRoot).isSymbolicLink()) {
+    throw new Error(`Refusing to use symlink as bounded-query ingress root: ${paths.ingressRoot}`);
+  }
   ensureModeDirectory(paths.seedsDir, 0o700);
   ensureModeDirectory(paths.workDir, 0o700);
+  ensureModeDirectory(paths.controlDir, 0o700);
   ensureModeDirectory(paths.auditDir, 0o700);
   ensureModeDirectory(paths.runDir, 0o770);
   ensureModeDirectory(paths.agentDir, 0o755);
-  // Empty directory used as a masking mount in the agent container.
-  // Mode 0o755 so Docker can bind-mount it without special privileges.
-  ensureModeDirectory(paths.maskDir, 0o755);
 
   try {
     fs.chownSync(paths.runDir, parseInt(getSafeHostUid(), 10), parseInt(getSafeHostGid(), 10));
@@ -120,6 +119,9 @@ export async function prepareBoundedQueries(
     throw new Error(`Bounded-query configuration is invalid:\n  - ${errors.join('\n  - ')}`);
   }
 
+  const paths = resolveBoundedQueryPaths(config.workDir);
+  assertBoundedQueryPrivateRootIsolated(config, paths, env);
+
   await assertQueryRuntimeAvailable(boundedQueries);
 
   const token = resolveStagingToken(env);
@@ -128,8 +130,6 @@ export async function prepareBoundedQueries(
     // never `undefined!`-asserted into the staging call.
     throw new Error('Bounded-query staging credential disappeared between validation and staging');
   }
-
-  const paths = resolveBoundedQueryPaths(config.workDir);
 
   // Guard against symlink injection before writing any credential-bearing state.
   // The generic work-directory check in config-writer.ts runs later (during
@@ -226,7 +226,12 @@ export async function teardownBoundedQueries(config: WrapperConfig): Promise<voi
   if (!isBoundedQueriesEnabled(config)) return;
 
   const paths = resolveBoundedQueryPaths(config.workDir);
-  if (!fs.existsSync(paths.root)) return;
+  if (!fs.existsSync(paths.root)) {
+    if (!config.keepContainers) {
+      fs.rmSync(paths.ingressRoot, { recursive: true, force: true });
+    }
+    return;
+  }
 
   const runId = readRunId(paths);
   if (runId) {
@@ -238,7 +243,8 @@ export async function teardownBoundedQueries(config: WrapperConfig): Promise<voi
   }
 
   if (config.keepContainers) {
-    logger.info(`Bounded-query seeds preserved (read-only) at: ${paths.seedsDir}`);
+    logger.info(`Bounded-query private state preserved at: ${paths.root}`);
+    logger.info(`Bounded-query agent ingress preserved at: ${paths.ingressRoot}`);
     return;
   }
 
@@ -246,6 +252,31 @@ export async function teardownBoundedQueries(config: WrapperConfig): Promise<voi
     releaseSeedPermissions(paths.seedsDir);
   } catch (error) {
     logger.warn('Bounded queries: failed to restore seed permissions before cleanup', error);
+  }
+
+  try {
+    fs.rmSync(paths.root, { recursive: true, force: true });
+    fs.rmSync(paths.ingressRoot, { recursive: true, force: true });
+  } catch (error: unknown) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'EACCES') {
+      logger.debug('Bounded queries: repairing rootless private-state permissions before cleanup');
+      fixArtifactPermissionsForRootless(
+        [paths.root, paths.ingressRoot],
+        config.dockerHostPathPrefix,
+        config.imageRegistry,
+        config.imageTag,
+        config.agentImage,
+      );
+      try {
+        fs.rmSync(paths.root, { recursive: true, force: true });
+        fs.rmSync(paths.ingressRoot, { recursive: true, force: true });
+        return;
+      } catch (retryError) {
+        logger.warn('Bounded queries: failed to remove private state after permission repair', retryError);
+        return;
+      }
+    }
+    logger.warn('Bounded queries: failed to remove private state during cleanup', error);
   }
 }
 

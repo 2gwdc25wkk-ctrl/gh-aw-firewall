@@ -83,8 +83,12 @@ describe('buildBoundedQueryService', () => {
       expect(volumes).toContain(`${paths.auditDir}:/var/log/awf-bounded-query:rw`);
     });
 
+    it('keeps broker control state on a broker-only mount', () => {
+      expect(volumes).toContain(`${paths.controlDir}:/run/awf-bounded-query-control:rw`);
+    });
+
     it('mounts nothing else', () => {
-      expect(volumes).toHaveLength(6);
+      expect(volumes).toHaveLength(7);
     });
 
     it('passes only AWF-chosen limits and the resolved query image', () => {
@@ -196,13 +200,8 @@ describe('buildBoundedQueryService', () => {
 
     it('mounts the socket read-write and the skill read-only, for chroot and non-chroot paths', () => {
       expect(agentVolumes).toEqual([
-        // Masking mounts first — hide the bounded-query root visible through /tmp.
-        `${paths.maskDir}:${paths.root}:ro`,
-        `${paths.maskDir}:/host${paths.root}:ro`,
-        // Socket mounts.
         `${paths.runDir}:${AGENT_SOCKET_DIR}:rw`,
         `${paths.runDir}:/host${AGENT_SOCKET_DIR}:rw`,
-        // Skill mounts.
         `${paths.agentDir}:${AGENT_SKILL_DIR}:ro`,
         `${paths.agentDir}:/host${AGENT_SKILL_DIR}:ro`,
       ]);
@@ -210,8 +209,11 @@ describe('buildBoundedQueryService', () => {
 
     it('never mounts the seeds, the broker work directory, or the audit log into the agent', () => {
       const joined = agentVolumes.join(' ');
+      expect(agentVolumes).toHaveLength(4);
+      expect(joined).not.toContain(paths.root);
       expect(joined).not.toContain(paths.seedsDir);
       expect(joined).not.toContain(paths.workDir);
+      expect(joined).not.toContain(paths.controlDir);
       expect(joined).not.toContain(paths.auditDir);
       expect(joined).not.toContain(paths.seedMapPath);
     });
@@ -229,9 +231,8 @@ describe('buildBoundedQueryService', () => {
     });
 
     it('prefixes the agent socket and skill mounts symmetrically', () => {
-      // Masking mounts are at [0] and [1]; socket mounts start at [2].
-      expect(agentVolumes[2]).toBe(`/host${paths.runDir}:${AGENT_SOCKET_DIR}:rw`);
-      expect(agentVolumes[4]).toBe(`/host${paths.agentDir}:${AGENT_SKILL_DIR}:ro`);
+      expect(agentVolumes[0]).toBe(`/host${paths.runDir}:${AGENT_SOCKET_DIR}:rw`);
+      expect(agentVolumes[2]).toBe(`/host${paths.agentDir}:${AGENT_SKILL_DIR}:ro`);
     });
 
     it('hands the daemon-visible work directory to the broker for query mounts', () => {
