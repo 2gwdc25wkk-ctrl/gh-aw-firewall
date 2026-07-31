@@ -23,6 +23,7 @@ const CONTROL_DIR = '/run/awf-bounded-query-control';
 const AUDIT_DIR = '/var/log/awf-bounded-query';
 /** Broker-private readiness marker; the control directory is never agent-mounted. */
 const READY_PATH = path.join(CONTROL_DIR, 'broker.ready');
+const SBX_CAPABILITY_PATH = path.join(CONTROL_DIR, 'sbx-ingress.json');
 const QUERY_SECCOMP_PATH = '/opt/awf/query-seccomp.json';
 
 /** Mount points inside the query container. Fixed, never caller-supplied. */
@@ -48,7 +49,25 @@ function parsePositiveInt(name, fallback) {
   if (!Number.isInteger(parsed) || parsed < 1) {
     throw new Error(`Environment variable ${name} must be a positive integer`);
   }
+
   return parsed;
+}
+
+function loadSbxIngressCapabilities(capabilityPath) {
+  const parsed = JSON.parse(fs.readFileSync(capabilityPath, 'utf8'));
+  const pattern = /^[0-9a-f]{64}$/;
+  if (
+    !parsed
+    || parsed.version !== 1
+    || typeof parsed.query !== 'string'
+    || typeof parsed.probe !== 'string'
+    || !pattern.test(parsed.query)
+    || !pattern.test(parsed.probe)
+    || parsed.query === parsed.probe
+  ) {
+    throw new Error('SBX ingress capability file is malformed');
+  }
+  return { query: parsed.query, probe: parsed.probe };
 }
 
 /**
@@ -75,9 +94,24 @@ function loadConfig() {
   }
 
   const queryBackend = requireEnv('AWF_BOUNDED_QUERY_BACKEND');
-  if (queryBackend !== 'docker' && queryBackend !== 'gvisor') {
+  if (queryBackend !== 'docker' && queryBackend !== 'gvisor' && queryBackend !== 'sbx') {
     throw new Error(`Unsupported AWF_BOUNDED_QUERY_BACKEND: ${queryBackend}`);
   }
+  const primaryBackend = requireEnv('AWF_BOUNDED_QUERY_PRIMARY_BACKEND');
+  if (primaryBackend !== 'docker' && primaryBackend !== 'gvisor' && primaryBackend !== 'sbx') {
+    throw new Error(`Unsupported AWF_BOUNDED_QUERY_PRIMARY_BACKEND: ${primaryBackend}`);
+  }
+
+  const tcpPortRaw = process.env.AWF_BOUNDED_QUERY_TCP_PORT;
+  const tcpPort = tcpPortRaw === undefined ? undefined : parsePositiveInt('AWF_BOUNDED_QUERY_TCP_PORT');
+  if (tcpPort !== undefined && tcpPort > 65535) {
+    throw new Error('AWF_BOUNDED_QUERY_TCP_PORT must be a valid TCP port');
+  }
+
+  const hostWorkDir = requireEnv('AWF_BOUNDED_QUERY_HOST_WORK_DIR');
+  const sbxWorkDir = queryBackend === 'sbx'
+    ? requireEnv('AWF_BOUNDED_QUERY_SBX_WORK_DIR')
+    : undefined;
 
   return {
     seedsDir: SEEDS_DIR,
@@ -96,13 +130,21 @@ function loadConfig() {
     queryImage: requireEnv('AWF_BOUNDED_QUERY_IMAGE'),
     // The daemon resolves query bind-mount sources in *its* filesystem view,
     // which is not necessarily the broker's (ARC/DinD split filesystems).
-    hostWorkDir: requireEnv('AWF_BOUNDED_QUERY_HOST_WORK_DIR'),
+    hostWorkDir,
+    // sbx and Docker daemons can have different filesystem namespaces (ARC/DinD).
+    // Never reuse the Docker-daemon-visible path for sbx mounts.
+    sbxWorkDir,
     queryBackend,
+    primaryBackend,
     timeoutSeconds: parseTimeoutSeconds(),
     maxInvocations: parsePositiveInt('AWF_BOUNDED_QUERY_MAX_INVOCATIONS', 32),
     memoryLimit,
     socketUid: parsePositiveInt('AWF_BOUNDED_QUERY_SOCKET_UID', 0),
     socketGid: parsePositiveInt('AWF_BOUNDED_QUERY_SOCKET_GID', 0),
+    tcpPort,
+    sbxIngressCapabilities: tcpPort === undefined
+      ? undefined
+      : loadSbxIngressCapabilities(SBX_CAPABILITY_PATH),
   };
 }
 
@@ -145,4 +187,4 @@ function loadSeedMap(seedMapPath) {
   return { runId: parsed.runId, seeds };
 }
 
-module.exports = { READY_PATH, loadConfig, loadSeedMap };
+module.exports = { READY_PATH, SBX_CAPABILITY_PATH, loadConfig, loadSeedMap, loadSbxIngressCapabilities };

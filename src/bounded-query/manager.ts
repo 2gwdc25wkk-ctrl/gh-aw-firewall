@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import execa from 'execa';
 import { logger } from '../logger';
 import { getLocalDockerEnv } from '../host-env';
@@ -9,12 +10,23 @@ import {
   resolveBoundedQueryPaths,
   type BoundedQueryPaths,
 } from './paths';
-import { assertQueryRuntimeAvailable, validateBoundedQueryConfig } from './preflight';
+import {
+  assertPrimaryRuntimeAvailable,
+  assertQueryRuntimeAvailable,
+  validateBoundedQueryConfig,
+} from './preflight';
 import { writeBoundedQuerySkill } from './skill';
+import { writeBoundedQueryWrapper } from './wrapper-artifact';
 import { releaseSeedPermissions, resolveStagingToken, stageBoundedQuerySeeds, type GitRunner } from './staging';
 import { BOUNDED_QUERY_SEED_MAP_VERSION, type BoundedQuerySeedMap } from './types';
 import { assertBoundedQueryPrivateRootIsolated } from './mount-policy';
 import { fixArtifactPermissionsForRootless } from '../artifact-permissions';
+import { runtimeUsesComposeAgent } from '../container-runtime';
+import { probeSbxUnixSocketMount } from '../sbx-manager';
+import {
+  resolveBoundedQueryPrimaryBackend,
+  serializeBoundedQueryRuntimeTelemetry,
+} from './runtime-matrix';
 
 /**
  * Bounded-query lifecycle orchestration.
@@ -132,6 +144,37 @@ export interface PrepareBoundedQueriesDeps {
   gitRunner?: GitRunner;
   /** Override the host environment the staging credential is read from. */
   env?: NodeJS.ProcessEnv;
+  /** Override the sbx Unix-socket passthrough probe (tests). */
+  probeSbxUnixSocket?: () => Promise<boolean>;
+  /** Override query-runtime capability preflight (tests). */
+  assertRuntimeAvailable?: typeof assertQueryRuntimeAvailable;
+  /** Override primary-runtime capability preflight (tests). */
+  assertPrimaryAvailable?: typeof assertPrimaryRuntimeAvailable;
+}
+
+interface SbxIngressCapabilities {
+  version: 1;
+  query: string;
+  probe: string;
+}
+
+function writeSbxIngressCapabilities(paths: BoundedQueryPaths): void {
+  const capabilities: SbxIngressCapabilities = {
+    version: 1,
+    query: crypto.randomBytes(32).toString('hex'),
+    probe: crypto.randomBytes(32).toString('hex'),
+  };
+  const fd = fs.openSync(
+    paths.capabilityPath,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    fs.writeSync(fd, JSON.stringify(capabilities));
+    fs.fchmodSync(fd, 0o600);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /**
@@ -153,10 +196,55 @@ export async function prepareBoundedQueries(
     throw new Error(`Bounded-query configuration is invalid:\n  - ${errors.join('\n  - ')}`);
   }
 
+  const primaryBackend = resolveBoundedQueryPrimaryBackend(config.containerRuntime);
+  const telemetryBase = {
+    primaryBackend,
+    queryBackend: boundedQueries.runtime,
+    lifecycleClass: 'preflight' as const,
+  };
+  const assertRuntimeAvailable = deps.assertRuntimeAvailable ?? assertQueryRuntimeAvailable;
+  const assertPrimaryAvailable = deps.assertPrimaryAvailable ?? assertPrimaryRuntimeAvailable;
+  try {
+    await assertPrimaryAvailable(config.containerRuntime);
+  } catch (error) {
+    logger.info(
+      `Bounded-query runtime telemetry: ${serializeBoundedQueryRuntimeTelemetry({
+        ...telemetryBase,
+        capabilityState: 'unavailable',
+        category: 'primary-runtime-unavailable',
+      })}`,
+    );
+    throw error;
+  }
+  try {
+    await assertRuntimeAvailable(boundedQueries);
+  } catch (error) {
+    logger.info(
+      `Bounded-query runtime telemetry: ${serializeBoundedQueryRuntimeTelemetry({
+        ...telemetryBase,
+        capabilityState: boundedQueries.runtime === 'sbx' ? 'blocked' : 'unavailable',
+        category: boundedQueries.runtime === 'sbx' ? 'query-security-block' : 'query-runtime-unavailable',
+      })}`,
+    );
+    throw error;
+  }
+  logger.info(
+    `Bounded-query runtime telemetry: ${serializeBoundedQueryRuntimeTelemetry({
+      ...telemetryBase,
+      capabilityState: 'supported',
+      category: 'ready',
+    })}`,
+  );
+
+  if (runtimeUsesComposeAgent(config.containerRuntime)) {
+    config.boundedQueryIngressTransport = 'unix';
+  } else {
+    const probe = deps.probeSbxUnixSocket ?? probeSbxUnixSocketMount;
+    config.boundedQueryIngressTransport = (await probe()) ? 'unix' : 'sbx-http';
+  }
+
   const paths = resolveBoundedQueryPaths(config.workDir);
   assertBoundedQueryPrivateRootIsolated(config, paths, env);
-
-  await assertQueryRuntimeAvailable(boundedQueries);
 
   const token = resolveStagingToken(env);
   if (!token) {
@@ -182,6 +270,9 @@ export async function prepareBoundedQueries(
   }
 
   prepareDirectories(paths);
+  if (config.boundedQueryIngressTransport === 'sbx-http') {
+    writeSbxIngressCapabilities(paths);
+  }
 
   const runId = generateBoundedQueryRunId();
   const staging = await stageBoundedQuerySeeds({
@@ -207,6 +298,7 @@ export async function prepareBoundedQueries(
     timeoutSeconds: boundedQueries.timeout,
     maxInvocations: boundedQueries.maxInvocations,
   });
+  writeBoundedQueryWrapper(paths);
 
   logger.info(
     `Bounded queries: staged ${staging.seeds.length} immutable seed(s); staging credential discarded.`,
@@ -299,4 +391,5 @@ export const managerTestHelpers = {
   readRunId,
   removeOrphanQueryContainers,
   removePrivateState,
+  writeSbxIngressCapabilities,
 };

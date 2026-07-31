@@ -1594,7 +1594,7 @@ The root object MAY contain a `boundedQueries` section:
 |-------|------|-------------|---------|
 | `enabled` | boolean | — | `false` |
 | `privateRepos` | array | Non-empty and unique (by repo slug, case-insensitively) when `enabled` is `true`. Each entry is either an object `{ "repo": "owner/repo", "sensitivity": "public" \| "internal" \| "confidential" \| "sealed" }`, or (one-release legacy compatibility) a bare `owner/repo` string, normalized to `{ repo, sensitivity: "internal" }` with a warning. Each `repo` MUST be a bare `owner/repo` slug — no scheme/host (`://`), path traversal (`..`), query string (`?`), fragment (`#`), wildcard (`*`), or extra path segments. | `[]` |
-| `runtime` | string | One of `"docker"`, `"gvisor"` | `"docker"` |
+| `runtime` | string | One of `"docker"`, `"gvisor"`, `"sbx"`. The `sbx` value is a fail-closed preview blocked unless its executable capability proof satisfies every mandatory isolation control. | `"docker"` |
 | `timeout` | integer | `1`–`540` seconds (the final minute of the 10-minute response bucket is reserved for termination, validation, and cleanup; §14.3) | `30` |
 | `memoryLimit` | string | Docker-style memory limit, e.g. `"512m"`, `"1g"` | `"512m"` |
 | `interpreter` | string | Only `"python3"` is currently supported | `"python3"` |
@@ -1628,14 +1628,57 @@ section.
 **Preflight (fail-closed).** With `enabled: true`, AWF aborts before the
 primary agent starts when: `privateRepos` is empty or contains an unsafe or
 duplicated slug; `runtime` is `"gvisor"` and the `runsc` OCI runtime is not
-registered with the Docker daemon; `container.containerRuntime` is a
-microVM backend, which cannot receive the broker socket; the resolved Docker
-host is not a `unix://` socket, which a `network_mode: none` broker cannot
-reach; the interpreter or a limit is unsupported; `timeout` exceeds 540
+registered with the Docker daemon; `runtime` is `"sbx"` and the executable
+capability proof cannot establish every mandatory no-network and resource
+bound; a Docker/gVisor query resolves to a non-`unix://` Docker host, which a
+`network_mode: none` broker cannot reach; the interpreter or a limit is
+unsupported; `timeout` exceeds 540
 seconds — the 10-minute response bucket reserves its final minute for Docker
 termination, result validation, container removal, and workspace cleanup; no
 staging credential is present in
 `GH_TOKEN`/`GITHUB_TOKEN`; or any seed cannot be materialized and verified.
+
+**`sbx` query backend status.** The configuration value and broker-owned
+`SbxQueryRunner` boundary are present, but support is fail-closed as of the
+audited Docker Sandboxes CLI `v0.37.1`. The executable broker capability probe
+uses `sbx version`, `sbx create --help`, and `sbx exec --help`, exits non-zero,
+and reports missing guarantees as JSON. Although this release supports
+`sbx create --name --cpus --memory --template`, read-only same-path mounts,
+`sbx exec --user --workdir`, `sbx ls --json`, `sbx stop`, and
+`sbx rm --force`, it has no enforceable per-VM `network=none`, PID, disk,
+per-file size, or explicit guest mount-target control. Local/kit network denies
+are not sufficient because organization governance can replace them. AWF
+therefore aborts before staging or Compose assembly, passes no Docker socket or
+sbx credential to the broker, and never falls back to Docker/gVisor. Enabling
+launch requires all missing controls plus a digest-pinned, Python
+standard-library-only AWF query template/bootstrap.
+
+**Independent runtime matrix.** `container.containerRuntime` selects the primary
+agent while `boundedQueries.runtime` independently selects a fresh query
+sandbox. Every accepted invocation creates one new sandbox and destroys it
+before response. The current capability matrix is:
+
+| Primary agent | Docker query | gVisor query | sbx query |
+|---|---|---|---|
+| Docker | Supported with Docker | Supported with registered `runsc` | Blocked |
+| gVisor | Supported with primary `runsc` | Supported with registered `runsc` | Blocked |
+| sbx | Supported after primary ingress probe | Supported after primary ingress and `runsc` probes | Blocked |
+
+Unavailable cells abort at preflight and never stage. A blocked sbx query is an
+expected security result, not runtime success. `"runtime": "sbx"` is both the
+explicit experimental selection and a requirement to pass every executable
+probe; it never authorizes fallback.
+
+**Runtime telemetry.** Telemetry records contain exactly `primaryBackend`,
+`queryBackend`, `lifecycleClass`, `capabilityState`, and `category`. They MUST
+NOT contain repository data or identifiers, scripts, outputs, paths, tokens,
+ingress capabilities, or daemon credentials.
+
+Promotion of sbx queries requires real-VM proof of no network/lateral access,
+all resource bounds, mount-target isolation, credential/state separation,
+canonical output behavior, and cleanup after timeout, resource failure, and
+interruption, plus a digest-pinned AWF Python-only template. Version/help
+probing alone is insufficient.
 
 The seed map the broker reads carries each repository's trusted
 `sensitivity` alongside its opaque seed id — the map is built entirely from
@@ -1868,12 +1911,26 @@ guarantees the broker never copies that seed or launches Python for it.
 ### 14.7 Trusted Broker and Query Sandbox
 
 The broker runs as an optional Docker Compose service
-(`bounded-query-broker`, container `awf-bounded-query-broker`) with
-`network_mode: none`: no `awf-net`, no external bridge, no DNS, no Squid, no
-api-proxy/cli-proxy, and no host-network path. Its entire surface is one Unix
-socket in a directory bind-mounted into the agent. It also receives the
-resolved Docker socket so it can launch queries; that path is never placed in
-the agent's environment or volumes.
+(`bounded-query-broker`, container `awf-bounded-query-broker`). For Compose
+agents it uses `network_mode: none`; its entire surface is one Unix socket in a
+directory bind-mounted into the agent. For an sbx primary agent, trusted
+preflight first executes a disposable-sandbox probe of Unix-socket passthrough.
+If that probe succeeds, the same socket transport is used. Otherwise the
+broker is attached only to a dedicated Docker `internal` network with one
+ephemeral port narrowly published on host `127.0.0.1`. It is never attached to
+`awf-net`, `awf-ext`, Squid, DNS, or an internet-routed network. It also
+receives the resolved Docker socket so it can launch queries; that path is
+never placed in the agent's environment or volumes.
+
+The sbx endpoint requires a random per-run capability read by the broker from
+broker-private control state. A separate one-shot probe capability proves the
+actual sandbox can reach the endpoint before the primary agent starts. Both
+capabilities are absent from generated skills, Compose and audit artifacts,
+logs, query environments, and query launch arguments. The broker exposes no
+health or diagnostic route: both transports use the exact same `POST /query`
+framing, limits, canonical result bytes, scheduler/timing buckets, and audit
+path. Authentication, malformed framing, oversized requests, and internal
+failures all collapse to `{"status":"error"}`.
 
 The broker maps a normalized `owner/repo` id through the AWF-generated seed
 map to an opaque seed directory and its trusted sensitivity. Callers never
@@ -1913,9 +1970,9 @@ which is mounted into the broker alone.
 
 ### 14.8 Agent Interface
 
-When bounded queries are enabled, the agent receives exactly two bind mounts —
-the broker socket directory (read-write) and a generated skill directory
-(read-only) — plus three environment variables
+When bounded queries are enabled, a Compose agent receives exactly two bind
+mounts — the broker socket directory (read-write) and a generated skill/wrapper
+directory (read-only) — plus three environment variables
 (`AWF_BOUNDED_QUERY_SOCKET`, `AWF_BOUNDED_QUERY_SKILL`,
 `AWF_BOUNDED_QUERY_REPOS`, the last a comma-separated list of configured repo
 slugs only — never sensitivities or budgets). GitHub tokens are removed from
@@ -1936,6 +1993,13 @@ responsibilities are enforcing the fixed CLI shape, base64url-encoding the
 schema into a request header, transporting the script body unmodified, and
 passing the broker's response through unmodified.
 
+An sbx agent receives only the generated skill/wrapper directory as a read-only
+mount. If Unix passthrough was proven, it additionally receives the socket
+directory read-only and `AWF_BOUNDED_QUERY_SOCKET`. Otherwise it receives
+`AWF_BOUNDED_QUERY_ENDPOINT` and `AWF_BOUNDED_QUERY_CAPABILITY`. It never
+receives the broker-private root, Docker socket, seeds, work/control/audit
+state, seed map, probe capability, or query launch authority.
+
 The generated `SKILL.md` is written under the run-specific ingress root and
 mounted read-only at `/run/awf-bounded-query-skill/SKILL.md`. It documents,
 per configured repository, its sensitivity and run budget (e.g. `` `octo/alpha`
@@ -1951,8 +2015,9 @@ is a documented limitation, not an oversight.
 All seeds, invocation workspaces, the seed map, broker control state, and
 protected audit data live below
 `/var/tmp/awf-bounded-query-private-<uid>-<workDir digest>/`. Only the disjoint
-`/var/tmp/awf-bounded-query-ingress-<uid>-<workDir digest>/run/` and generated
-skill directory are agent-visible through explicit bind mounts. Before
+`/var/tmp/awf-bounded-query-ingress-<uid>-<workDir digest>/run/` (when Unix
+transport is selected) and generated skill/wrapper directory are agent-visible
+through explicit bind mounts. Before
 credential-bearing staging, AWF resolves each path through
 its longest existing ancestor (following symlinks) and rejects any private-root
 overlap with the union of Docker, gVisor, and sbx agent-visible mounts,
@@ -1960,9 +2025,11 @@ including `/tmp`, the workspace, custom volumes, and whitelisted home tool
 directories. Docker-in-Docker host-path translation is checked and applied to
 the private broker mounts and ingress mounts symmetrically.
 
-For the same reason, a microVM primary agent runtime (`sbx`) is rejected at
-preflight: it does not receive Compose bind mounts, so the socket and skill
-could not be exposed. Bounded queries are never partially enabled.
+An sbx host that cannot create the disposable capability probe or cannot reach
+the selected ingress from the actual primary sandbox fails preflight before
+the agent command starts. Transport never silently downgrades after selection.
+Query execution remains limited to the Docker and gVisor runners; this ingress
+support does not execute query sandboxes inside sbx.
 
 ### 14.9 Protocol v1 Compatibility
 

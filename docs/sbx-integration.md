@@ -80,6 +80,34 @@ it lets AWF interpose its own Squid proxy *underneath* Docker's sandbox proxy.
 
 VMs persist until explicitly removed; stopping an agent does not delete the VM.
 
+### Bounded-query runtime is independent
+
+`container.containerRuntime: "sbx"` selects the primary agent's execution
+model. `boundedQueries.runtime: "sbx"` is a separate backend behind the trusted
+broker's `QueryRunner` boundary and must never reuse the primary agent VM,
+agent-ingress capability, or agent credentials.
+
+The bounded-query sbx backend is currently a fail-closed preview. Docker
+Sandboxes `v0.37.1` has CPU/memory limits and read-only same-path mounts, but
+does not expose enforceable per-VM network-none, PID, disk, per-file size, or
+guest mount-target controls. Local/kit network denies can also be replaced by
+organization governance. AWF's executable capability probe therefore blocks
+this query backend before staging or Compose assembly; no sbx daemon access is
+passed to the broker and there is no Docker/gVisor fallback. See
+[Bounded Queries](bounded-queries.md#sbx-query-runtime-status).
+
+The full 3×3 primary/query matrix is documented in
+[Bounded Queries](bounded-queries.md#primary-agent-and-query-runtime-matrix).
+All sbx-query cells are intentionally blocked; Docker and gVisor query
+backends may run under an sbx primary agent only after its independent broker
+ingress probe passes. Every query gets a new sandbox and no backend falls back.
+
+Promotion is gated on a digest-pinned Python-only template and real-VM proof of
+network/lateral denial, PID/memory/CPU/disk/file-size enforcement, explicit
+guest mount targets, credential and cross-invocation isolation, canonical
+failure bytes, timing buckets, and interruption cleanup. Docker Sandboxes
+`v0.37.1` cannot satisfy those controls.
+
 ## Part 2 — How AWF uses `sbx`
 
 AWF's default backend runs the agent as a **Docker Compose service** alongside
@@ -248,10 +276,13 @@ and, when true, substitutes two functions into the shared workflow runner:
   2. Builds the agent environment (`buildAgentEnvironment`) using microVM-specific
      network targets (see below), merging credential env
      (`buildAgentCredentialEnv`) when the api-proxy is enabled.
-  3. Calls `createSandbox({ workspaceDir, squidIp: SQUID_IP, extraMounts })`.
-  4. Polls api-proxy health (via `host.docker.internal:10000/health`) since
+  3. When bounded queries are enabled, resolves the trusted broker ingress,
+     mounts only its skill/wrapper directory (plus the socket directory when
+     Unix passthrough was proven), and probes reachability before agent startup.
+  4. Calls `createSandbox({ workspaceDir, squidIp: SQUID_IP, extraMounts })`.
+  5. Polls api-proxy health (via `host.docker.internal:10000/health`) since
      there is no compose `depends_on` gate across the VM boundary.
-  5. Runs a Squid connectivity diagnostic (`curl --proxy ... https://api.github.com`).
+  6. Runs a Squid connectivity diagnostic (`curl --proxy ... https://api.github.com`).
 - **`sbxRunAgentCommand`** runs the actual agent command with `execInSandbox`,
   honoring the agent timeout, workdir, TTY, and computed environment, and dumps
   api-proxy logs on non-zero exit for debugging.
@@ -276,6 +307,14 @@ reachable** — the VM is on its own network. AWF compensates with two indirecti
   `host.docker.internal`, which resolves to the docker0 bridge from inside the
   VM. `COPILOT_*` / proxy env vars are pointed there instead of at
   `172.30.0.30`.
+- **The bounded-query broker** uses a mounted Unix socket when an executable
+  disposable-sandbox probe proves sbx passthrough supports host sockets.
+  Otherwise it uses an authenticated HTTP endpoint on an ephemeral
+  host-gateway-only port that `host.docker.internal` can reach from inside the
+  VM. The broker is attached only to a dedicated Docker
+  `internal` network, not `awf-net` or `awf-ext`, so this ingress does not add
+  broker egress. The actual primary sandbox must pass a one-shot endpoint probe
+  before its agent command starts.
 
 The net effect: agent tools that respect `HTTP_PROXY`/`HTTPS_PROXY` route through
 AWF's Squid domain ACL; credentials are injected by AWF's api-proxy. Tools that
