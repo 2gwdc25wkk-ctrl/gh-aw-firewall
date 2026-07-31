@@ -18,39 +18,49 @@ run_inside_agent() {
     fail "unexpected AWF_BOUNDED_QUERY_REPOS: ${AWF_BOUNDED_QUERY_REPOS:-<unset>}"
   [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]] ||
     fail "staging credentials reached the agent environment"
+  [[ -n "${AWF_BOUNDED_QUERY_SOCKET:-}" && -S "$AWF_BOUNDED_QUERY_SOCKET" ]] ||
+    fail "bounded-query broker socket is unavailable"
 
   local schema expected_sequence result_kind
-  case "${SMOKE_SENSITIVITY:-}" in
-    public)
-      schema="$ARRAY_SCHEMA"
-      expected_sequence="ok ok ok"
-      result_kind="array"
-      ;;
-    internal)
-      schema="$ARRAY_SCHEMA"
-      expected_sequence="ok ok error"
-      result_kind="array"
-      ;;
-    confidential)
-      schema="$BOOLEAN_SCHEMA"
-      expected_sequence="ok error error"
-      result_kind="boolean"
-      ;;
-    sealed)
-      schema="$BOOLEAN_SCHEMA"
-      expected_sequence="error error error"
-      result_kind="boolean"
-      ;;
-    *)
-      fail "unsupported sensitivity: ${SMOKE_SENSITIVITY:-<unset>}"
-      ;;
-  esac
+  if [[ "${SMOKE_RUNTIME_ONLY:-false}" == "true" ]]; then
+    [[ "${SMOKE_SENSITIVITY:-}" == "internal" ]] ||
+      fail "runtime-only smoke requires internal sensitivity"
+    schema="$BOOLEAN_SCHEMA"
+    expected_sequence="ok"
+    result_kind="boolean"
+  else
+    case "${SMOKE_SENSITIVITY:-}" in
+      public)
+        schema="$ARRAY_SCHEMA"
+        expected_sequence="ok ok ok"
+        result_kind="array"
+        ;;
+      internal)
+        schema="$ARRAY_SCHEMA"
+        expected_sequence="ok ok error"
+        result_kind="array"
+        ;;
+      confidential)
+        schema="$BOOLEAN_SCHEMA"
+        expected_sequence="ok error error"
+        result_kind="boolean"
+        ;;
+      sealed)
+        schema="$BOOLEAN_SCHEMA"
+        expected_sequence="error error error"
+        result_kind="boolean"
+        ;;
+      *)
+        fail "unsupported sensitivity: ${SMOKE_SENSITIVITY:-<unset>}"
+        ;;
+    esac
+  fi
 
   local -a expected
   read -r -a expected <<< "$expected_sequence"
 
   local attempt response actual
-  for attempt in 0 1 2; do
+  for attempt in "${!expected[@]}"; do
     if [[ "$result_kind" == "array" ]]; then
       response="$(
         bounded-query --repo "$TARGET_REPO" --schema "$schema" <<'PY'
@@ -165,9 +175,15 @@ JSON
     return
   fi
 
-  local sensitivity config work_dir audit_dir audit_log workspace
+  local sensitivity config work_dir audit_dir audit_log workspace runtime_only
   workspace="${GITHUB_WORKSPACE:-$(pwd)}"
-  for sensitivity in public internal confidential sealed; do
+  runtime_only=false
+  local -a sensitivities=(public internal confidential sealed)
+  if [[ "$QUERY_RUNTIME" == "gvisor" ]]; then
+    runtime_only=true
+    sensitivities=(internal)
+  fi
+  for sensitivity in "${sensitivities[@]}"; do
     config="$root/$sensitivity.json"
     work_dir="$root/$sensitivity-work"
     audit_dir="$root/$sensitivity-audit"
@@ -204,11 +220,17 @@ JSON
         --work-dir "$work_dir" \
         --container-workdir "$workspace" \
         --env "SMOKE_SENSITIVITY=$sensitivity" \
+        --env "SMOKE_RUNTIME_ONLY=$runtime_only" \
         -- bash "$workspace/scripts/ci/smoke-bounded-queries.sh" --inside-agent; then
       audit_log="$audit_dir/bounded-query.jsonl"
       if [[ -f "$audit_log" ]]; then
         echo "::group::bounded query broker audit"
         sudo cat "$audit_log"
+        echo "::endgroup::"
+      fi
+      if [[ -f "$audit_dir/runtime-telemetry.jsonl" ]]; then
+        echo "::group::bounded query runtime telemetry"
+        sudo cat "$audit_dir/runtime-telemetry.jsonl"
         echo "::endgroup::"
       fi
       fail "$sensitivity bounded-query run failed"

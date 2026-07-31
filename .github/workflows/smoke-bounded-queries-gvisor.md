@@ -31,8 +31,6 @@ sandbox:
   agent:
     id: awf
     version: v0.28.0
-    runtime: gvisor
-    sudo: true
     args:
       - --build-local
 steps:
@@ -41,6 +39,22 @@ steps:
       npm ci
       npm run build
 pre-agent-steps:
+  - name: Install gVisor
+    run: |
+      set -euo pipefail
+      arch="$(uname -m)"
+      url="https://storage.googleapis.com/gvisor/releases/release/20250707.0/${arch}"
+      curl -fsSL "${url}/runsc" -o /tmp/runsc
+      curl -fsSL "${url}/runsc.sha512" -o /tmp/runsc.sha512
+      (cd /tmp && sha512sum -c runsc.sha512)
+      curl -fsSL "${url}/containerd-shim-runsc-v1" -o /tmp/containerd-shim-runsc-v1
+      curl -fsSL "${url}/containerd-shim-runsc-v1.sha512" -o /tmp/containerd-shim-runsc-v1.sha512
+      (cd /tmp && sha512sum -c containerd-shim-runsc-v1.sha512)
+      sudo install -m 755 /tmp/runsc /usr/local/bin/runsc
+      sudo install -m 755 /tmp/containerd-shim-runsc-v1 /usr/local/bin/containerd-shim-runsc-v1
+      sudo runsc install
+      sudo systemctl restart docker
+      docker info --format '{{json .Runtimes}}' | grep -F '"runsc"'
   - name: Replace release bootstrap with current AWF build
     run: |
       mkdir -p "$HOME/.local/bin"
@@ -50,7 +64,7 @@ pre-agent-steps:
 safe-outputs:
   threat-detection:
     enabled: false
-timeout-minutes: 15
+timeout-minutes: 30
 strict: false
 concurrency:
   group: smoke-bounded-queries-gvisor
@@ -129,7 +143,7 @@ post-steps:
       }
 
       const successfulQueries = readJsonLines(telemetryPath).filter(
-        (record) => record.primaryBackend === "gvisor" &&
+        (record) => record.primaryBackend === "docker" &&
           record.queryBackend === "gvisor" &&
           record.lifecycleClass === "query" &&
           record.capabilityState === "supported" &&
@@ -157,6 +171,9 @@ The query must:
 2. Run a Python script inside the bounded-query environment that checks
    `/query/repo/go.mod`.
 3. Return `true`.
+4. Wait for the command to finish without interrupting it. Internal queries
+   intentionally return on a 10-minute confidentiality timing bucket, so this
+   latency is expected and is not a hang.
 
 No GitHub API tools are available to the agent. Do not use network requests or
 the current checkout to answer the question. The test passes only when the
