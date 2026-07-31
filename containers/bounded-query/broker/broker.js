@@ -11,7 +11,6 @@ const {
 const { createLedger } = require('./ledger');
 const { createRealClock, waitForBucket } = require('./scheduler');
 const defaultWorkspace = require('./workspace');
-const defaultRunner = require('./query-runner');
 
 /**
  * The trusted bounded-query broker (protocol v2).
@@ -51,12 +50,16 @@ const defaultRunner = require('./query-runner');
 function createBroker(params) {
   const { config, seedMap, runId, audit } = params;
   const workspace = params.workspace || defaultWorkspace;
-  const runner = params.runner || defaultRunner;
+  if (!params.runner) {
+    throw new Error('createBroker requires a trusted QueryRunner');
+  }
+  const runner = params.runner;
   const clock = params.clock || createRealClock();
   const ledger = params.ledger || createLedger(seedMap);
 
   let invocationsUsed = 0;
   let tail = Promise.resolve();
+  let accepting = true;
 
   /**
    * Executes one request and reports its canonical result through
@@ -200,6 +203,11 @@ function createBroker(params) {
   }
 
   return {
+    /** Stops admitting new invocations while letting admitted work drain. */
+    close() {
+      accepting = false;
+    },
+
     /**
      * Handles one request. `respond` is called exactly once with the
      * canonical result JSON, as soon as it is ready to send (which, for any
@@ -218,6 +226,11 @@ function createBroker(params) {
         responded = true;
         respond(json);
       };
+
+      if (!accepting) {
+        safeRespond(CANONICAL_ERROR_JSON);
+        return Promise.resolve();
+      }
 
       // The invocation-count cap is operational and independent of the bit
       // ledger: it is consumed per *response*, not per launch, so every
@@ -239,6 +252,11 @@ function createBroker(params) {
         () => undefined,
       );
       return queued;
+    },
+
+    /** Resolves when every admitted invocation has finished broker-side work. */
+    drain() {
+      return tail;
     },
 
     /** @internal Exposed for tests. */

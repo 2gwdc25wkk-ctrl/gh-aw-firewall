@@ -162,7 +162,7 @@ describe('bounded-query broker', () => {
       queryScriptPath: '/awf/query-script.py',
       querySeccompPath: '/opt/awf/query-seccomp.json',
       queryImage: 'ghcr.io/example/bounded-query:1',
-      dockerRuntime: '',
+      queryBackend: 'docker',
       memoryLimit: '512m',
       timeoutSeconds: 30,
       maxInvocations: 3,
@@ -265,6 +265,19 @@ describe('bounded-query broker', () => {
     await invoke(broker, validRequest());
 
     expect(fs.readdirSync(String(config.workDir))).toEqual([]);
+  });
+
+  it('rejects new invocations after shutdown starts without consuming budget or launching', async () => {
+    const runner = queryRunner(() => {
+      throw new Error('query must not launch');
+    });
+    const { broker } = build(runner);
+
+    broker.close();
+
+    expect(await invoke(broker, validRequest())).toBe(CANONICAL_ERROR);
+    expect(broker.invocationsUsed).toBe(0);
+    expect(runner.seen).toEqual([]);
   });
 
   it('never exposes another repository or the seed parent to a query', async () => {
@@ -681,18 +694,18 @@ describe('query container arguments', () => {
     queryScriptPath: '/awf/query-script.py',
     querySeccompPath: '/opt/awf/query-seccomp.json',
     queryImage: 'ghcr.io/example/bounded-query:1',
-    dockerRuntime: '',
+    queryBackend: 'docker',
     memoryLimit: '256m',
     queryUid: 65534,
     queryGid: 65534,
   };
 
-  function args(overrides: Record<string, unknown> = {}): string[] {
+  function args(overrides: Record<string, unknown> = {}, runtimeName?: string): string[] {
     return buildQueryArgs({
       config: { ...config, ...overrides },
       runId: 'run-1',
       invocationId: 'inv-1',
-      containerName: 'awf-query-inv-1',
+      runtimeName,
     });
   }
 
@@ -763,9 +776,9 @@ describe('query container arguments', () => {
     expect(args().join(' ')).toContain('--label awf.bounded-query.run=run-1');
   });
 
-  it('passes an explicit OCI runtime only when one is configured', () => {
+  it('passes an explicit OCI runtime only when selected by the trusted runner', () => {
     expect(args().includes('--runtime')).toBe(false);
-    expect(args({ dockerRuntime: 'runsc' }).join(' ')).toContain('--runtime runsc');
+    expect(args({}, 'runsc').join(' ')).toContain('--runtime runsc');
   });
 
   it('normalizes fractional monotonic durations for Node child-process timeouts', () => {
