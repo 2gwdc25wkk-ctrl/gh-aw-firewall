@@ -26,9 +26,6 @@ export function resolvePathThroughExistingAncestor(candidate: string): string {
   let existing = path.resolve(candidate);
   while (!fs.existsSync(existing)) {
     const parent = path.dirname(existing);
-    if (parent === existing) {
-      throw new Error(`Bounded-query mount policy could not resolve an existing ancestor: ${candidate}`);
-    }
     missing.unshift(path.basename(existing));
     existing = parent;
   }

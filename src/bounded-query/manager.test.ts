@@ -320,4 +320,57 @@ describe('teardownBoundedQueries', () => {
       fs.rmSync(workDir, { recursive: true, force: true });
     }
   });
+
+  it('repairs rootless private-state permissions and retries cleanup', () => {
+    const paths = resolveBoundedQueryPaths('/tmp/rootless-cleanup');
+    const permissionError = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    const removeTree = jest.fn()
+      .mockImplementationOnce(() => { throw permissionError; })
+      .mockImplementation(() => undefined);
+    const repairPermissions = jest.fn();
+
+    managerTestHelpers.removePrivateState(
+      buildConfig('/tmp/rootless-cleanup'),
+      paths,
+      { removeTree, repairPermissions },
+    );
+
+    expect(repairPermissions).toHaveBeenCalledWith(
+      [paths.root, paths.ingressRoot],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+    expect(removeTree).toHaveBeenCalledTimes(3);
+  });
+
+  it('surfaces cleanup failures after rootless permission repair', () => {
+    const paths = resolveBoundedQueryPaths('/tmp/rootless-retry-failure');
+    const permissionError = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    const removeTree = jest.fn()
+      .mockImplementationOnce(() => { throw permissionError; })
+      .mockImplementationOnce(() => { throw new Error('still denied'); });
+
+    expect(() => managerTestHelpers.removePrivateState(
+      buildConfig('/tmp/rootless-retry-failure'),
+      paths,
+      { removeTree, repairPermissions: jest.fn() },
+    )).not.toThrow();
+  });
+
+  it('surfaces non-permission cleanup failures without attempting repair', () => {
+    const paths = resolveBoundedQueryPaths('/tmp/private-cleanup-failure');
+    const repairPermissions = jest.fn();
+
+    expect(() => managerTestHelpers.removePrivateState(
+      buildConfig('/tmp/private-cleanup-failure'),
+      paths,
+      {
+        removeTree: () => { throw new Error('I/O failure'); },
+        repairPermissions,
+      },
+    )).not.toThrow();
+    expect(repairPermissions).not.toHaveBeenCalled();
+  });
 });

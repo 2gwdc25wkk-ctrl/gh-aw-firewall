@@ -101,6 +101,37 @@ describe('bounded-query private-root mount policy', () => {
     ).toThrow(/agent session-state directory/);
   });
 
+  it('rejects malformed custom mounts instead of ignoring their source', () => {
+    const paths = resolveBoundedQueryPaths(workDir, privateBase);
+    expect(() =>
+      assertBoundedQueryPrivateRootIsolated(config(workDir, ['named-volume:/data:ro']), paths),
+    ).toThrow(/could not parse custom bind mount/);
+  });
+
+  it('rejects a chroot binaries source containing the private root', () => {
+    const paths = resolveBoundedQueryPaths(workDir, privateBase);
+    expect(() =>
+      assertBoundedQueryPrivateRootIsolated(
+        { ...config(workDir), chrootBinariesSourcePath: testRoot },
+        paths,
+      ),
+    ).toThrow(/chroot binaries source/);
+  });
+
+  it('rejects an agent-visible Docker socket path inside the private root', () => {
+    const paths = resolveBoundedQueryPaths(workDir, privateBase);
+    expect(() =>
+      assertBoundedQueryPrivateRootIsolated(
+        {
+          ...config(workDir),
+          enableDind: true,
+          awfDockerHost: `unix://${path.join(paths.root, 'docker.sock')}`,
+        },
+        paths,
+      ),
+    ).toThrow(/agent Docker socket/);
+  });
+
   it('resolves a missing suffix through a symlinked ancestor', () => {
     const target = path.join(testRoot, 'target');
     const alias = path.join(testRoot, 'alias');
@@ -108,5 +139,10 @@ describe('bounded-query private-root mount policy', () => {
     fs.symlinkSync(target, alias);
     expect(resolvePathThroughExistingAncestor(path.join(alias, 'missing', 'leaf')))
       .toBe(path.join(target, 'missing', 'leaf'));
+  });
+
+  it('rejects relative paths before filesystem resolution', () => {
+    expect(() => resolvePathThroughExistingAncestor('../private'))
+      .toThrow(/requires an absolute path/);
   });
 });

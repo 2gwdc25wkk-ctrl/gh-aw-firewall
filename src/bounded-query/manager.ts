@@ -53,13 +53,7 @@ function ensureModeDirectory(target: string, mode: number): void {
  */
 function prepareDirectories(paths: BoundedQueryPaths): void {
   fs.mkdirSync(paths.root, { mode: 0o700 });
-  if (fs.lstatSync(paths.root).isSymbolicLink()) {
-    throw new Error(`Refusing to use symlink as bounded-query private root: ${paths.root}`);
-  }
   fs.mkdirSync(paths.ingressRoot, { mode: 0o700 });
-  if (fs.lstatSync(paths.ingressRoot).isSymbolicLink()) {
-    throw new Error(`Refusing to use symlink as bounded-query ingress root: ${paths.ingressRoot}`);
-  }
   ensureModeDirectory(paths.seedsDir, 0o700);
   ensureModeDirectory(paths.workDir, 0o700);
   ensureModeDirectory(paths.controlDir, 0o700);
@@ -72,6 +66,46 @@ function prepareDirectories(paths: BoundedQueryPaths): void {
   } catch {
     // Non-root host (e.g. network-isolation mode): the broker chowns/chmods
     // the socket itself once it is bound.
+  }
+
+  interface RemovePrivateStateDeps {
+    removeTree?: (target: string) => void;
+    repairPermissions?: typeof fixArtifactPermissionsForRootless;
+  }
+
+  function removePrivateState(
+    config: WrapperConfig,
+    paths: BoundedQueryPaths,
+    deps: RemovePrivateStateDeps = {},
+  ): void {
+    const removeTree = deps.removeTree ?? ((target: string) => {
+      fs.rmSync(target, { recursive: true, force: true });
+    });
+    const repairPermissions = deps.repairPermissions ?? fixArtifactPermissionsForRootless;
+
+    try {
+      removeTree(paths.root);
+      removeTree(paths.ingressRoot);
+    } catch (error: unknown) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'EACCES') {
+        logger.debug('Bounded queries: repairing rootless private-state permissions before cleanup');
+        repairPermissions(
+          [paths.root, paths.ingressRoot],
+          config.dockerHostPathPrefix,
+          config.imageRegistry,
+          config.imageTag,
+          config.agentImage,
+        );
+        try {
+          removeTree(paths.root);
+          removeTree(paths.ingressRoot);
+        } catch (retryError) {
+          logger.warn('Bounded queries: failed to remove private state after permission repair', retryError);
+        }
+        return;
+      }
+      logger.warn('Bounded queries: failed to remove private state during cleanup', error);
+    }
   }
 }
 
@@ -254,30 +288,7 @@ export async function teardownBoundedQueries(config: WrapperConfig): Promise<voi
     logger.warn('Bounded queries: failed to restore seed permissions before cleanup', error);
   }
 
-  try {
-    fs.rmSync(paths.root, { recursive: true, force: true });
-    fs.rmSync(paths.ingressRoot, { recursive: true, force: true });
-  } catch (error: unknown) {
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'EACCES') {
-      logger.debug('Bounded queries: repairing rootless private-state permissions before cleanup');
-      fixArtifactPermissionsForRootless(
-        [paths.root, paths.ingressRoot],
-        config.dockerHostPathPrefix,
-        config.imageRegistry,
-        config.imageTag,
-        config.agentImage,
-      );
-      try {
-        fs.rmSync(paths.root, { recursive: true, force: true });
-        fs.rmSync(paths.ingressRoot, { recursive: true, force: true });
-        return;
-      } catch (retryError) {
-        logger.warn('Bounded queries: failed to remove private state after permission repair', retryError);
-        return;
-      }
-    }
-    logger.warn('Bounded queries: failed to remove private state during cleanup', error);
-  }
+  removePrivateState(config, paths);
 }
 
 /** @internal Exported for focused unit tests. */
@@ -287,4 +298,5 @@ export const managerTestHelpers = {
   writeSeedMap,
   readRunId,
   removeOrphanQueryContainers,
+  removePrivateState,
 };
