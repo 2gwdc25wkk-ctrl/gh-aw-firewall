@@ -49,7 +49,7 @@ function mountSource(volume: string): string | undefined {
 
 function daemonVisiblePath(source: string, prefix: string | undefined): string {
   const translated = applyHostPathPrefixToVolumes([`${source}:/awf-mount-policy:ro`], prefix)[0];
-  return mountSource(translated) ?? source;
+  return translated.split(':', 1)[0];
 }
 
 /**
