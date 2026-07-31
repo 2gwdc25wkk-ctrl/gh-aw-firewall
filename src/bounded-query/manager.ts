@@ -67,45 +67,45 @@ function prepareDirectories(paths: BoundedQueryPaths): void {
     // Non-root host (e.g. network-isolation mode): the broker chowns/chmods
     // the socket itself once it is bound.
   }
+}
 
-  interface RemovePrivateStateDeps {
-    removeTree?: (target: string) => void;
-    repairPermissions?: typeof fixArtifactPermissionsForRootless;
-  }
+interface RemovePrivateStateDeps {
+  removeTree?: (target: string) => void;
+  repairPermissions?: typeof fixArtifactPermissionsForRootless;
+}
 
-  function removePrivateState(
-    config: WrapperConfig,
-    paths: BoundedQueryPaths,
-    deps: RemovePrivateStateDeps = {},
-  ): void {
-    const removeTree = deps.removeTree ?? ((target: string) => {
-      fs.rmSync(target, { recursive: true, force: true });
-    });
-    const repairPermissions = deps.repairPermissions ?? fixArtifactPermissionsForRootless;
+function removePrivateState(
+  config: WrapperConfig,
+  paths: BoundedQueryPaths,
+  deps: RemovePrivateStateDeps = {},
+): void {
+  const removeTree = deps.removeTree ?? ((target: string) => {
+    fs.rmSync(target, { recursive: true, force: true });
+  });
+  const repairPermissions = deps.repairPermissions ?? fixArtifactPermissionsForRootless;
 
-    try {
-      removeTree(paths.root);
-      removeTree(paths.ingressRoot);
-    } catch (error: unknown) {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'EACCES') {
-        logger.debug('Bounded queries: repairing rootless private-state permissions before cleanup');
-        repairPermissions(
-          [paths.root, paths.ingressRoot],
-          config.dockerHostPathPrefix,
-          config.imageRegistry,
-          config.imageTag,
-          config.agentImage,
-        );
-        try {
-          removeTree(paths.root);
-          removeTree(paths.ingressRoot);
-        } catch (retryError) {
-          logger.warn('Bounded queries: failed to remove private state after permission repair', retryError);
-        }
-        return;
+  try {
+    removeTree(paths.root);
+    removeTree(paths.ingressRoot);
+  } catch (error: unknown) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'EACCES') {
+      logger.debug('Bounded queries: repairing rootless private-state permissions before cleanup');
+      repairPermissions(
+        [paths.root, paths.ingressRoot],
+        config.dockerHostPathPrefix,
+        config.imageRegistry,
+        config.imageTag,
+        config.agentImage,
+      );
+      try {
+        removeTree(paths.root);
+        removeTree(paths.ingressRoot);
+      } catch (retryError) {
+        logger.warn('Bounded queries: failed to remove private state after permission repair', retryError);
       }
-      logger.warn('Bounded queries: failed to remove private state during cleanup', error);
+      return;
     }
+    logger.warn('Bounded queries: failed to remove private state during cleanup', error);
   }
 }
 
