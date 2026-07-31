@@ -1837,7 +1837,9 @@ runs a trusted host-side staging phase (`src/bounded-query/staging.ts`):
 1. resolves the staging credential from `GH_TOKEN` or `GITHUB_TOKEN`;
 2. clones each configured repository from an AWF-constructed
    `https://github.com/<owner>/<repo>.git` URL into a run-unique, opaque seed
-   directory under `<workDir>/bounded-queries/seeds/`. The credential is passed
+   directory under a dedicated per-run private root outside `/tmp`, the
+   workspace, mounted home/tool directories, and configured agent mounts. The
+   credential is passed
    only through a `GIT_ASKPASS` helper reading it from the child process
    environment — never in argv, never in the URL, never in a log line, and
    never in the generated compose file;
@@ -1906,7 +1908,7 @@ Query stdout/stderr is capped and discarded — never parsed, never returned,
 never logged in a form reachable by the agent. Failure reasons (with
 protected detail, e.g. `repo-not-allowed`, `bit-budget-exhausted`,
 `invalid-request`, `query-launch-failed`, `timing-bucket-overflow`,
-`cleanup-failed`) are written only to `<workDir>/bounded-queries/audit/`,
+`cleanup-failed`) are written only below the dedicated broker-private root,
 which is mounted into the broker alone.
 
 ### 14.8 Agent Interface
@@ -1934,7 +1936,7 @@ responsibilities are enforcing the fixed CLI shape, base64url-encoding the
 schema into a request header, transporting the script body unmodified, and
 passing the broker's response through unmodified.
 
-The generated `SKILL.md` is written under `<workDir>/bounded-queries/agent/` and
+The generated `SKILL.md` is written under the run-specific ingress root and
 mounted read-only at `/run/awf-bounded-query-skill/SKILL.md`. It documents,
 per configured repository, its sensitivity and run budget (e.g. `` `octo/alpha`
 — 64 bits/run (`internal`) ``), the finite schema DSL, the bit-charge
@@ -1945,6 +1947,18 @@ does **not** mount it into `$HOME/.copilot/skills` or the workspace's
 or inside the checked-out workspace. Agents therefore discover it through
 `AWF_BOUNDED_QUERY_SKILL` rather than through automatic skill discovery. This
 is a documented limitation, not an oversight.
+
+All seeds, invocation workspaces, the seed map, broker control state, and
+protected audit data live below
+`/var/tmp/awf-bounded-query-private-<uid>-<workDir digest>/`. Only the disjoint
+`/var/tmp/awf-bounded-query-ingress-<uid>-<workDir digest>/run/` and generated
+skill directory are agent-visible through explicit bind mounts. Before
+credential-bearing staging, AWF resolves each path through
+its longest existing ancestor (following symlinks) and rejects any private-root
+overlap with the union of Docker, gVisor, and sbx agent-visible mounts,
+including `/tmp`, the workspace, custom volumes, and whitelisted home tool
+directories. Docker-in-Docker host-path translation is checked and applied to
+the private broker mounts and ingress mounts symmetrically.
 
 For the same reason, a microVM primary agent runtime (`sbx`) is rejected at
 preflight: it does not receive Compose bind mounts, so the socket and skill

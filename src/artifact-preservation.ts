@@ -5,6 +5,7 @@ import execa from 'execa';
 import { logger } from './logger';
 import { fixArtifactPermissionsForRootless } from './artifact-permissions';
 import { getLocalDockerEnv } from './host-env';
+import { resolveBoundedQueryPaths } from './bounded-query/paths';
 
 const BOUNDED_QUERY_AUDIT_CONTAINER_PATH =
   'awf-bounded-query-broker:/var/log/awf-bounded-query/bounded-query.jsonl';
@@ -16,7 +17,7 @@ const BOUNDED_QUERY_AUDIT_CONTAINER_PATH =
  */
 export function preserveIptablesAudit(workDir: string, auditDir?: string): void {
   const iptablesAuditSrc = path.join(workDir, 'init-signal', 'iptables-audit.txt');
-  const boundedQueryRoot = path.join(workDir, 'bounded-queries');
+  const boundedQueryRoot = resolveBoundedQueryPaths(workDir).root;
   const targetAuditDir = auditDir || path.join(workDir, 'audit');
   if (!fs.existsSync(targetAuditDir)) return;
 

@@ -2,6 +2,7 @@ import { preserveIptablesAudit } from './artifact-preservation';
 import { collectDiagnosticLogs } from './diagnostic-collector';
 import * as fs from 'fs';
 import * as path from 'path';
+import { resolveBoundedQueryPaths } from './bounded-query/paths';
 
 import { mockExecaFn, mockExecaSync } from './test-helpers/mock-execa.test-utils';
 import { useTempDir } from './test-helpers/docker-test-fixtures.test-utils';
@@ -161,7 +162,7 @@ describe('docker-manager diagnostics', () => {
     });
 
     it('should copy the bounded-query broker audit before work directory cleanup', () => {
-      const brokerAuditDir = path.join(getDir(), 'bounded-queries', 'audit');
+      const brokerAuditDir = resolveBoundedQueryPaths(getDir()).auditDir;
       fs.mkdirSync(brokerAuditDir, { recursive: true });
       fs.writeFileSync(
         path.join(brokerAuditDir, 'bounded-query.jsonl'),
@@ -182,6 +183,7 @@ describe('docker-manager diagnostics', () => {
         ],
         expect.objectContaining({ reject: false }),
       );
+      fs.rmSync(resolveBoundedQueryPaths(getDir()).root, { recursive: true, force: true });
     });
   });
 });

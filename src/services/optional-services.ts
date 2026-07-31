@@ -77,9 +77,9 @@ function filterAgentVolumesForSysroot(
     const source = parts[0];
     const target = parts[1];
 
-    // Bounded-query mounts are sourced from workDir but are mandatory: dropping
-    // them would leave bounded queries half-enabled (wrapper present, broker
-    // unreachable) instead of failing loudly.
+    // Bounded-query ingress mounts are mandatory: dropping them would leave
+    // bounded queries half-enabled (wrapper present, broker unreachable)
+    // instead of failing loudly.
     if (isBoundedQueryAgentMount(volume)) return true;
 
     // Drop sysroot-shadowed targets (system binaries provided by volume)

@@ -31,7 +31,7 @@ The system is orchestrated by `src/cli.ts` and managed by `src/docker-manager.ts
 **4. Bounded-Query Broker (optional)** — `containers/bounded-query/`, no network
 - Enabled via `boundedQueries.enabled` in the AWF config file (config-only; there is no CLI flag family)
 - The only AWF service with `network_mode: none`: no `awf-net`, no external bridge, no DNS, no Squid, no host gateway
-- Reachable only through one Unix socket in `<workDir>/bounded-queries/run/`, bind-mounted into the agent at `/run/awf-bounded-query/broker.sock`
+- Reachable only through one Unix socket in a run-specific `/var/tmp` ingress root, bind-mounted into the agent at `/run/awf-bounded-query/broker.sock`; all seeds, workspaces, maps, control state, and audits live in a disjoint broker-private `/var/tmp` root
 - Receives the resolved Docker socket so it can launch per-invocation query containers; that path never enters the agent's env or volumes
 - The broker (`bounded-query-broker`) and query sandbox (`bounded-query`) are separate published images; a one-shot networkless Compose service pulls the sandbox image before broker startup so the broker (which has no network) can launch query containers
 - Queries run `python3` with `--network none`, `--read-only`, non-root, `--cap-drop ALL`, `no-new-privileges`, a seccomp profile, and time/memory/CPU/PID/file-size bounds

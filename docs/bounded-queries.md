@@ -263,7 +263,7 @@ Failures are indistinguishable from each other by design: the agent cannot infer
 
 `maxInvocations` counts **every** response, including rejected requests. It is a separate operational limit unrelated to per-repository bit budgets. Once exhausted, all further requests return `{"status":"error"}` without consulting the bit ledger.
 
-Failure details (with protected labels such as `repo-not-allowed`, `bit-budget-exhausted`, `invalid-request`, `launch-failed`, `timing-bucket-overflow`, and `cleanup-failed`) are written only to the protected audit log at `<workDir>/bounded-queries/audit/`. They are never returned to the agent.
+Failure details (with protected labels such as `repo-not-allowed`, `bit-budget-exhausted`, `invalid-request`, `launch-failed`, `timing-bucket-overflow`, and `cleanup-failed`) are written only below the dedicated broker-private root (`/var/tmp/awf-bounded-query-private-<uid>-<digest>/audit/`). The root is rejected before staging if realpath-aware preflight finds any overlap with a Compose, gVisor, or sbx agent mount. They are never returned to the agent.
 
 ## Security limitations
 

@@ -113,7 +113,8 @@ async function main() {
   await listenOnSocket(server, config, audit);
 
   // Write the ready file AFTER the socket is accepting connections. The
-  // compose healthcheck polls this file in the broker-only audit mount.
+  // compose healthcheck polls this file in the broker-only control mount.
+  fs.mkdirSync(config.controlDir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(config.readyPath, '', { mode: 0o644 });
 
   audit.lifecycle('listening', {
