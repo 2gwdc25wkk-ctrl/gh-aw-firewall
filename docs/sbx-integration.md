@@ -280,8 +280,14 @@ and, when true, substitutes two functions into the shared workflow runner:
      mounts only its skill/wrapper directory (plus the socket directory when
      Unix passthrough was proven), and probes reachability before agent startup.
   4. Calls `createSandbox({ workspaceDir, squidIp: SQUID_IP, extraMounts })`.
-  5. Polls api-proxy health (via `host.docker.internal:10000/health`) since
-     there is no compose `depends_on` gate across the VM boundary.
+  5. When the api-proxy is enabled, runs `assertSbxApiProxyReflect`: creates a
+     private `HOSTALIASES` resolver file mapping `api-proxy` to a loopback HTTP
+     bridge. The bridge forwards to `host.docker.internal:10000` with the host
+     header expected by docker-sbx, then AWF probes
+     `http://api-proxy:10000/reflect` with Node's built-in `fetch` and up to 30
+     retries. Startup **aborts** (fail-closed) if the endpoint is
+     unreachable after all retries, because an isolated runtime that cannot reach
+     `/reflect` cannot do model auto-resolution or credit accounting.
   6. Runs a Squid connectivity diagnostic (`curl --proxy ... https://api.github.com`).
 - **`sbxRunAgentCommand`** runs the actual agent command with `execInSandbox`,
   honoring the agent timeout, workdir, TTY, and computed environment, and dumps

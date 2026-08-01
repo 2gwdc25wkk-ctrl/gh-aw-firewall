@@ -582,6 +582,76 @@ export async function assertSbxBoundedQueryIngress(
 }
 
 /**
+ * Adds a resolver alias for the published API proxy and proves that the
+ * hard-coded gh-aw reflection endpoint is reachable before the agent starts.
+ */
+export async function assertSbxApiProxyReflect(
+  name: string,
+  environment: Record<string, string>,
+  workDir?: string,
+): Promise<void> {
+  environment.HOSTALIASES = '/tmp/awf-hostaliases';
+  const bridgeSource = [
+    'const http = require("node:http");',
+    'const upstreamHost = "host.docker.internal";',
+    'http.createServer((request, response) => {',
+    'const upstream = http.request({',
+    'hostname: upstreamHost,',
+    'port: 10000,',
+    'method: request.method,',
+    'path: request.url,',
+    'headers: { ...request.headers, host: `${upstreamHost}:10000` },',
+    '}, upstreamResponse => {',
+    'response.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.headers);',
+    'upstreamResponse.pipe(response);',
+    '});',
+    'upstream.on("error", error => {',
+    'if (!response.headersSent) response.writeHead(502);',
+    'response.end(error.message);',
+    '});',
+    'request.pipe(upstream);',
+    '}).listen(10000, "127.0.0.1");',
+  ].join('\n');
+  const encodedBridge = Buffer.from(bridgeSource).toString('base64');
+  const command = [
+    'umask 077',
+    'printf "api-proxy localhost\\n" > "$HOSTALIASES"',
+    `printf %s ${encodedBridge} | base64 --decode > /tmp/awf-reflect-bridge.cjs`,
+    '{ nohup node /tmp/awf-reflect-bridge.cjs >/tmp/awf-reflect-bridge.log 2>&1 & }',
+    [
+      '{',
+      'for attempt in $(seq 1 30); do',
+      'if AWF_REFLECT_ATTEMPT="$attempt" node -e',
+      '\'fetch("http://api-proxy:10000/reflect", { signal: AbortSignal.timeout(500) }).then(',
+      'async response => {',
+      'if (!response.ok && process.env.AWF_REFLECT_ATTEMPT === "30")',
+      'console.error(`HTTP ${response.status}: ${await response.text()}`);',
+      'process.exit(response.ok ? 0 : 1);',
+      '}',
+      ').catch(error => {',
+      'if (process.env.AWF_REFLECT_ATTEMPT === "30") console.error(error, error.cause);',
+      'process.exit(1);',
+      '})\'',
+      '; then exit 0; fi;',
+      'sleep 1;',
+      'done;',
+      'cat /tmp/awf-reflect-bridge.log >&2 || true;',
+      'exit 1;',
+      '}',
+    ].join(' '),
+  ].join(' && ');
+
+  const result = await execInSandbox(name, command, {
+    timeoutMinutes: 1,
+    workDir,
+    environment,
+  });
+  if (result.exitCode !== 0) {
+    throw new Error('sbx sandbox cannot reach the API proxy /reflect endpoint');
+  }
+}
+
+/**
  * Stops and removes the sandbox.
  */
 export async function removeSandbox(name: string): Promise<void> {

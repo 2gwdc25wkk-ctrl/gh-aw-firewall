@@ -664,7 +664,7 @@ describe('ai-credits-guard', () => {
       expect(sonnet5).toBeNull();
     });
 
-    it('rejects the Copilot auto selector when runtime pricing cannot be proven', () => {
+    it('rejects the auto selector when runtime pricing cannot be proven', () => {
       process.env.AWF_MAX_AI_CREDITS = '10';
       resetAiCreditsGuardForTests();
 
