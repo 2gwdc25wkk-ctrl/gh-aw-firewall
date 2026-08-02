@@ -52,10 +52,10 @@
 #   - github/gh-aw-actions/setup@fd783ac87efde5e0c0e05d593f1906ea25b5d92e # v0.84.2
 #
 # Container images used:
-#   -@sha256:04e2d1987a565000a8f114b89d806ae7a3864dd4f944be65275b28c93d8690e6
-#   -@sha256:d85f57975af5ea23af4996e41ed73fbc8f5b4a47402472bfe82e508f352cb0c1
+#   -
+#   -
 #   - ghcr.io/github/gh-aw-firewall/cli-proxy:0.27.43@sha256:65c45ea2967984d0024f3df61bc71335658a77ede96c8d9665da7a5f33a795ab
-#   -@sha256:26be5e0b8c8f4c41c8a59126b29bb5d80b07253597472ded2a16bdd75abcbf9d
+#   -
 #   - ghcr.io/github/gh-aw-mcpg:v0.4.7@sha256:7545220a9aca134b71e51193ee0eaf4c50756ebf8fbd25a63ae7556e62815c00
 #   - ghcr.io/github/gh-aw-node@sha256:529d02eb970b1161aa25c593a9c3df57fdfad5a8add328cb3b6eccef66f3183b
 #   - ghcr.io/github/github-mcp-server:v1.8.0@sha256:d5a18c04b92714c309eb46a2305087e91a4dbd80420f6e462656699f95093520
@@ -651,7 +651,7 @@ jobs:
           GH_AW_SKILL_DIR: ".codex/skills"
         run: bash "${RUNNER_TEMP}/gh-aw/actions/restore_inline_skills.sh"
       - name: Download container images
-        run: bash "${RUNNER_TEMP}/gh-aw/actions/download_docker_images.sh"@sha256:04e2d1987a565000a8f114b89d806ae7a3864dd4f944be65275b28c93d8690e6@sha256:d85f57975af5ea23af4996e41ed73fbc8f5b4a47402472bfe82e508f352cb0c1 ghcr.io/github/gh-aw-firewall/cli-proxy:0.27.43@sha256:65c45ea2967984d0024f3df61bc71335658a77ede96c8d9665da7a5f33a795ab@sha256:26be5e0b8c8f4c41c8a59126b29bb5d80b07253597472ded2a16bdd75abcbf9d ghcr.io/github/gh-aw-mcpg:v0.4.7@sha256:7545220a9aca134b71e51193ee0eaf4c50756ebf8fbd25a63ae7556e62815c00 ghcr.io/github/gh-aw-node@sha256:529d02eb970b1161aa25c593a9c3df57fdfad5a8add328cb3b6eccef66f3183b ghcr.io/github/github-mcp-server:v1.8.0@sha256:d5a18c04b92714c309eb46a2305087e91a4dbd80420f6e462656699f95093520 mcr.microsoft.com/playwright/mcp@sha256:3d871c22ea2d4cca0966e2cfb1860e1cb03eb7353725a3d6cffd133296fb04eb
+        run: bash "${RUNNER_TEMP}/gh-aw/actions/download_docker_images.sh" ghcr.io/github/gh-aw-firewall/cli-proxy:0.27.43@sha256:65c45ea2967984d0024f3df61bc71335658a77ede96c8d9665da7a5f33a795ab ghcr.io/github/gh-aw-mcpg:v0.4.7@sha256:7545220a9aca134b71e51193ee0eaf4c50756ebf8fbd25a63ae7556e62815c00 ghcr.io/github/gh-aw-node@sha256:529d02eb970b1161aa25c593a9c3df57fdfad5a8add328cb3b6eccef66f3183b ghcr.io/github/github-mcp-server:v1.8.0@sha256:d5a18c04b92714c309eb46a2305087e91a4dbd80420f6e462656699f95093520 mcr.microsoft.com/playwright/mcp@sha256:3d871c22ea2d4cca0966e2cfb1860e1cb03eb7353725a3d6cffd133296fb04eb
       - name: Generate Safe Outputs Config
         run: |
           mkdir -p "${RUNNER_TEMP}/gh-aw/safeoutputs"
