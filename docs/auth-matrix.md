@@ -7,6 +7,8 @@ description: Provider-by-provider reference for static keys, OIDC federation, he
 
 This document describes every authentication combination supported by AWF's api-proxy sidecar, including how each provider's auth works, what configuration is required, and how the proxy transforms credentials before forwarding to upstream APIs.
 
+The [Auth Doctor Updater workflow](../.github/workflows/auth-doctor-updater.md) periodically compares this matrix with current default-branch implementation, recent issues and pull requests, and official provider guidance. It opens a deduplicated, file-bounded pull request only when an evidence-backed documentation correction is needed.
+
 ## Table of Contents
 
 - [Dimensions Overview](#dimensions-overview)
@@ -276,6 +278,8 @@ This adapter exists to support the [Gemini CLI](https://geminicli.com/)'s `GOOGL
 All OIDC flows require GitHub Actions runtime tokens:
 - `ACTIONS_ID_TOKEN_REQUEST_URL` — endpoint to mint OIDC JWTs
 - `ACTIONS_ID_TOKEN_REQUEST_TOKEN` — auth token for the OIDC endpoint
+
+Documentation audits treat both as non-observable credentials: they verify `id-token: write` and sidecar configuration but never request or print either value, a minted JWT, or exchanged cloud credentials.
 
 AWF forwards these variables only to the api-proxy sidecar in `github-oidc` mode and excludes them from the agent container. GitHub Agentic Workflows independently passes them from its runner-owned **Start MCP Gateway** step directly to the MCP gateway when a remote HTTP MCP server uses `auth.type: github-oidc`; AWF does not launch or configure that gateway. See [github/gh-aw#50053](https://github.com/github/gh-aw/issues/50053) for lock-file compatibility tracking.
 

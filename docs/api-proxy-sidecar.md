@@ -622,6 +622,8 @@ and are normalized to dollars per million tokens inside the proxy.
 
 ## Troubleshooting
 
+The [Auth Doctor Updater workflow](../.github/workflows/auth-doctor-updater.md) periodically audits this guide against current implementation, recent repository changes, and official provider guidance. It opens file-bounded documentation pull requests without probing credentials, exchanging tokens, or calling inference APIs.
+
 ### Gemini proxy returns 503
 
 When `GEMINI_API_KEY` is provided to the AWF runner, `GOOGLE_GEMINI_BASE_URL`, `GEMINI_API_BASE_URL`, and a placeholder `GEMINI_API_KEY` are injected into the agent container. If the real `GEMINI_API_KEY` was not set in the AWF runner environment, the Gemini routing vars are never set and the api-proxy Gemini listener (port 10003) responds with **503** to any requests that do reach it.
@@ -705,6 +707,8 @@ AWF supports OIDC-based credential exchange with multiple cloud providers via Gi
 | `AWF_AUTH_OIDC_AUDIENCE` | No | Override the OIDC audience (provider-specific defaults apply) |
 | `ACTIONS_ID_TOKEN_REQUEST_URL` | ✅ | Provided automatically by the GitHub Actions runtime |
 | `ACTIONS_ID_TOKEN_REQUEST_TOKEN` | ✅ | Provided automatically by the GitHub Actions runtime |
+
+Never print or inspect either Actions OIDC variable. Documentation audits should verify the `id-token: write` permission and the presence/consistency of non-secret provider configuration instead.
 
 :::note[OIDC request capability is sidecar-only]
 AWF forwards `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN` only to the api-proxy sidecar when `AWF_AUTH_TYPE=github-oidc`. The variables are excluded from the agent even when `--env-all`, `--env-file`, or explicit `--env` options request them. The minted GitHub JWT and exchanged provider credentials also remain inside the sidecar.

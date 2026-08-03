@@ -617,8 +617,9 @@ AWF keeps the Actions OIDC request capability, minted GitHub JWT, and exchanged 
 │ 172.30.0.20                 │     │ 172.30.0.30                           │
 │                             │     │                                       │
 │ Environment:                │     │ Environment:                          │
-│ ✗ No ACTIONS_ID_TOKEN_*     │     │ ✓ ACTIONS_ID_TOKEN_REQUEST_URL        │
-│ ✗ No cloud credentials      │     │ ✓ ACTIONS_ID_TOKEN_REQUEST_TOKEN      │
+│ ✗ No Actions OIDC request   │     │ ✓ ACTIONS_ID_TOKEN_REQUEST_URL        │
+│   capability                │     │ ✓ ACTIONS_ID_TOKEN_REQUEST_TOKEN      │
+│ ✗ No cloud credentials      │     │ ✓ Provider-specific configuration     │
 │ ✗ No API keys               │     │ ✓ AWF_AUTH_TYPE=github-oidc           │
 │ ✓ OPENAI_BASE_URL=          │     │ ✓ AWF_AUTH_PROVIDER=azure|aws|gcp|anthropic │
 │   http://172.30.0.30:10000  │     │ ✓ Provider-specific config            │
@@ -748,6 +749,12 @@ For Anthropic bearer requests, AWF merges the OAuth beta with client-supplied `a
 `AwsOidcTokenProvider` keeps `AccessKeyId`, `SecretAccessKey`, and `SessionToken` inside the sidecar. After all URL and body transforms, the request layer signs the method, canonical path/query, final body hash, regional Bedrock Runtime host, and `bedrock-runtime` service with Node's built-in cryptography. Retries are re-signed, expired or unavailable credentials produce `503` without contacting upstream, and signing is restricted to `bedrock-runtime.<region>.amazonaws.com` (or the corresponding China endpoint).
 :::
 
+### MCP gateway OIDC is a separate trust path
+
+For an HTTP MCP server configured with `auth.type: github-oidc`, gh-aw starts mcpg in a runner-owned workflow step. The runner supplies the Actions OIDC variables directly to that gateway; the gateway mints an audience-bound JWT and injects it into the remote MCP request. AWF does not launch or configure mcpg, and its API proxy is not involved in that flow.
+
+The generated gateway configuration should contain only auth type/audience metadata, never the Actions request URL/token values. Do not expose those variables to the AWF agent as an MCP authentication workaround. See [github/gh-aw#50053](https://github.com/github/gh-aw/issues/50053) for compatibility validation and rollout status.
+
 ### Comparison: static keys vs OIDC
 
 | Property | Static API keys | OIDC federation |
@@ -806,6 +813,7 @@ This architecture provides **transparent operation** (SDKs work without code cha
 
 ## Related documentation
 
+- [Auth Doctor Updater workflow](../.github/workflows/auth-doctor-updater.md) — recurring audit of authentication and API-proxy documentation against implementation and official guidance
 - [Auth Matrix](./auth-matrix.md) — per-provider auth combination reference (static keys, OIDC, custom headers)
 - [API Proxy Sidecar](./api-proxy-sidecar.md) — user-facing guide for enabling the API proxy
 - [Security](./security.md) — overall security model
