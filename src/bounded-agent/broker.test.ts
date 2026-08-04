@@ -23,6 +23,7 @@ const config = {
   seedsDir: '/srv/awf/seeds',
   hostWorkDir: '/var/tmp/private/work',
   hostSeedsDir: '/var/tmp/private/seeds',
+  auditDir: '/var/log/awf-bounded-agent',
   enclaveImage: 'ghcr.io/github/gh-aw-firewall/bounded-agent:latest',
   enclaveSeccompPath: '/opt/awf/enclave-seccomp.json',
   enclaveMountDir: '/agent',
@@ -32,9 +33,10 @@ const config = {
   enclaveUid: 65534,
   enclaveGid: 65534,
   backend: 'docker',
+  engine: 'copilot',
   profile: 'openai',
   model: 'gpt-4o-mini',
-  apiEndpoint: 'http://172.31.0.30:10000',
+  apiEndpoint: 'http://172.31.0.30:10002',
   network: 'awf-bounded-agent',
   timeoutSeconds: 120,
   memoryLimit: '512m',
@@ -82,6 +84,7 @@ interface WorkspaceStub {
   createInvocationWorkspace: (params: Record<string, unknown>) => Record<string, unknown>;
   readEnclaveOutput: (outPath: string, maxOutputBytes: number) => string | undefined;
   destroyInvocationWorkspace: (workDir: string, invocationId: string) => void;
+  preserveInvocationSession: (sessionLogPath: string, auditDir: string, invocationId: string) => boolean;
 }
 
 function makeWorkspace(output: string | undefined = 'true'): WorkspaceStub {
@@ -91,12 +94,16 @@ function makeWorkspace(output: string | undefined = 'true'): WorkspaceStub {
     output,
     createInvocationWorkspace: (params) => {
       stub.created.push(params.invocationId as string);
-      return { outPath: `/srv/awf/work/${params.invocationId}/out` };
+      return {
+        outPath: `/srv/awf/work/${params.invocationId}/out`,
+        sessionLogPath: `/srv/awf/work/${params.invocationId}/session.jsonl`,
+      };
     },
     readEnclaveOutput: () => stub.output,
     destroyInvocationWorkspace: (_workDir, invocationId) => {
       stub.destroyed.push(invocationId);
     },
+    preserveInvocationSession: () => true,
   };
   return stub;
 }
@@ -202,6 +209,35 @@ describe('bounded-agent broker', () => {
     expect(await invoke(broker, request())).toBe(CANONICAL_ERROR_JSON);
     expect(audit.records).toEqual([
       expect.objectContaining({ kind: 'failure', reason: 'non-zero-exit' }),
+    ]);
+    expect(audit.records[0]).not.toHaveProperty('exitCode');
+    expect(audit.records[0].detail).toBeUndefined();
+  });
+
+  it.each([
+    [10, 'enclave-configuration-invalid'],
+    [11, 'enclave-input-invalid'],
+    [20, 'enclave-deadline-exceeded'],
+    [21, 'enclave-provider-http-error'],
+    [22, 'enclave-provider-transport-error'],
+    [23, 'enclave-provider-response-invalid'],
+    [30, 'enclave-result-write-failed'],
+    [31, 'enclave-model-loop-exhausted'],
+  ])('records fixed diagnostic category for enclave exit %i', async (exitCode, reason) => {
+    const audit = makeAudit();
+    const broker = createBroker({
+      config,
+      seedMap: seedMap(),
+      runId: RUN_ID,
+      audit,
+      runner: makeRunner({ runEnclaveContainer: async () => ({ exitCode, timedOut: false }) }),
+      workspace: makeWorkspace('true'),
+      clock: makeClock(),
+    });
+
+    expect(await invoke(broker, request())).toBe(CANONICAL_ERROR_JSON);
+    expect(audit.records).toEqual([
+      expect.objectContaining({ kind: 'failure', reason }),
     ]);
     expect(audit.records[0]).not.toHaveProperty('exitCode');
     expect(audit.records[0].detail).toBeUndefined();
@@ -429,12 +465,13 @@ describe('bounded-agent enclave container spec', () => {
     expect(args).toContain('--read-only');
   });
 
-  it('mounts the task and schema read-only and the result file read-write', () => {
+  it('mounts inputs read-only and result/session files read-write', () => {
     const volumes = flagValues('-v');
     expect(volumes).toContain(`/var/tmp/private/work/${'c'.repeat(24)}/task.txt:/awf/task.txt:ro`);
     expect(volumes).toContain(`/var/tmp/private/work/${'c'.repeat(24)}/schema.json:/awf/schema.json:ro`);
     expect(volumes).toContain(`/var/tmp/private/work/${'c'.repeat(24)}/out:/agent/out:rw`);
-    expect(volumes).toHaveLength(4);
+    expect(volumes).toContain(`/var/tmp/private/work/${'c'.repeat(24)}/session.jsonl:/agent/session.jsonl:rw`);
+    expect(volumes).toHaveLength(5);
   });
 
   it('never mounts the Docker socket, the workspace, or host state into the enclave', () => {
@@ -479,23 +516,32 @@ describe('bounded-agent enclave container spec', () => {
 
   it('passes only the fixed trusted enclave environment', () => {
     expect(flagValues('--env').sort()).toEqual([
-      'AWF_BOUNDED_AGENT_API_ENDPOINT=http://172.31.0.30:10000',
+      'AWF_BOUNDED_AGENT_API_ENDPOINT=http://172.31.0.30:10002',
       'AWF_BOUNDED_AGENT_DEADLINE_SECONDS=120',
+      'AWF_BOUNDED_AGENT_ENGINE=copilot',
       'AWF_BOUNDED_AGENT_MAX_MODEL_REQUESTS=8',
       'AWF_BOUNDED_AGENT_MAX_MODEL_TOKENS=1024',
       'AWF_BOUNDED_AGENT_MAX_OUTPUT_BYTES=8192',
       'AWF_BOUNDED_AGENT_MODEL=gpt-4o-mini',
       'AWF_BOUNDED_AGENT_PROFILE=openai',
-      'HOME=/tmp',
+      'COPILOT_API_URL=http://172.31.0.30:10002',
+      'COPILOT_GITHUB_TOKEN=******',
+      'COPILOT_HOME=/agent/copilot',
+      'COPILOT_MODEL=gpt-4o-mini',
+      'COPILOT_OFFLINE=true',
+      'COPILOT_PROVIDER_BASE_URL=http://172.31.0.30:10002',
+      'COPILOT_TOKEN=******',
+      'HOME=/agent/home',
       'PYTHONDONTWRITEBYTECODE=1',
       'PYTHONUNBUFFERED=1',
     ]);
   });
 
-  it('never leaks a credential, token, or proxy setting into the enclave environment', () => {
-    const envNames = flagValues('--env').map((entry) => entry.split('=')[0]);
-    for (const name of envNames) {
-      expect(name).not.toMatch(/API_KEY|_TOKEN$|^GH_|^GITHUB_|AUTHORIZATION|SECRET|CREDENTIAL/i);
+  it('never leaks a real credential or general proxy setting into the enclave environment', () => {
+    for (const entry of flagValues('--env')) {
+      const [name, value] = entry.split('=');
+      if (/_TOKEN$/.test(name)) expect(value).toBe('******');
+      expect(entry).not.toMatch(/github_pat_|gh[opsu]_|sk-|AUTHORIZATION|SECRET|CREDENTIAL/i);
       expect(name).not.toMatch(/^(?:HTTP|HTTPS|NO)_PROXY$/i);
     }
   });

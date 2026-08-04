@@ -12,6 +12,18 @@ const { createLedger } = require('./ledger');
 const { createRealClock, waitForBucket } = require('./scheduler');
 const defaultWorkspace = require('./workspace');
 
+const ENCLAVE_EXIT_CATEGORIES = Object.freeze({
+  10: 'enclave-configuration-invalid',
+  11: 'enclave-input-invalid',
+  20: 'enclave-deadline-exceeded',
+  21: 'enclave-provider-http-error',
+  22: 'enclave-provider-transport-error',
+  23: 'enclave-provider-response-invalid',
+  24: 'enclave-engine-failed',
+  30: 'enclave-result-write-failed',
+  31: 'enclave-model-loop-exhausted',
+});
+
 /**
  * The trusted bounded-agent broker.
  *
@@ -146,7 +158,7 @@ function createBroker(params) {
           if (run.timedOut) {
             failureReason = ['timeout'];
           } else if (run.exitCode !== 0) {
-            failureReason = ['non-zero-exit'];
+            failureReason = [ENCLAVE_EXIT_CATEGORIES[run.exitCode] || 'non-zero-exit'];
           } else {
             const raw = workspace.readEnclaveOutput(layout.outPath, config.maxOutputBytes);
             if (raw === undefined) {
@@ -170,6 +182,13 @@ function createBroker(params) {
 
     // Teardown is part of the observable operation and must complete before the
     // timing bucket is chosen.
+    if (layout) {
+      workspace.preserveInvocationSession(
+        layout.sessionLogPath,
+        config.auditDir,
+        invocationId,
+      );
+    }
     if (!safeDestroy(invocationId)) {
       failureReason = ['cleanup-failed'];
       canonicalResult = undefined;

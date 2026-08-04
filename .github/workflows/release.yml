@@ -448,7 +448,7 @@ jobs:
             --type spdxjson \
             ghcr.io/${{ github.repository }}/bounded-query-broker@${{ steps.build_bounded_query_broker.outputs.digest }}
 
-  # Build the minimal bounded-agent enclave and its trusted broker from separate
+  # Build the native Copilot bounded-agent enclave and its trusted broker from separate
   # Dockerfile targets. The build context is ./containers (not
   # ./containers/bounded-agent) because the broker reuses the shared
   # bounded-execution foundation and sandbox seccomp profile that live under

@@ -200,9 +200,7 @@ export function buildAgentService(params: AgentServiceParams): any {
  *
  * Priority: GHCR preset images > local build (when requested or non-preset) > custom image passthrough
  *
- * Returns either `{ image: string }` (pull from registry) or
- * `{ build: { context, dockerfile, args } }` (local build), suitable for
- * spreading onto a Docker Compose service object.
+ * Returns either an image reference or a local build definition.
  */
 function resolveAgentImageConfig(
   config: WrapperConfig,

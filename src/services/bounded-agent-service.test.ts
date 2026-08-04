@@ -53,7 +53,7 @@ describe('bounded-agent broker in generated Docker Compose', () => {
   const enabled = (overrides: Partial<BoundedAgentsConfig> = {}): WrapperConfig => ({
     ...mockConfig,
     enableApiProxy: true,
-    openaiApiKey: 'sk-real',
+    copilotGithubToken: 'github-token',
     boundedAgents: { ...boundedAgents, ...overrides },
   });
 
@@ -140,10 +140,10 @@ describe('bounded-agent broker in generated Docker Compose', () => {
       );
       const proxy = result.services['bounded-agent-api-proxy'] as unknown as Record<string, unknown>;
       const env = proxy.environment as Record<string, string>;
-      expect(env.OPENAI_API_KEY).toBe('sk-real');
+      expect(env.COPILOT_GITHUB_TOKEN).toBe('gh-unused');
       for (const forbidden of [
+        'OPENAI_API_KEY',
         'ANTHROPIC_API_KEY',
-        'COPILOT_GITHUB_TOKEN',
         'GEMINI_API_KEY',
         'ACTIONS_ID_TOKEN_REQUEST_URL',
         'ACTIONS_ID_TOKEN_REQUEST_TOKEN',
@@ -225,10 +225,11 @@ describe('bounded-agent broker in generated Docker Compose', () => {
       const env = broker.environment as Record<string, string>;
 
       expect(env.AWF_BOUNDED_AGENT_BACKEND).toBe('docker');
+      expect(env.AWF_BOUNDED_AGENT_ENGINE).toBe('copilot');
       expect(env.AWF_BOUNDED_AGENT_NETWORK).toBe(BOUNDED_AGENT_NETWORK);
       expect(env.AWF_BOUNDED_AGENT_PROFILE).toBe('openai');
       expect(env.AWF_BOUNDED_AGENT_MODEL).toBe('gpt-4o-mini');
-      expect(env.AWF_BOUNDED_AGENT_API_ENDPOINT).toBe(`http://${BOUNDED_AGENT_API_PROXY_IP}:10000`);
+      expect(env.AWF_BOUNDED_AGENT_API_ENDPOINT).toBe(`http://${BOUNDED_AGENT_API_PROXY_IP}:10002`);
       expect(env.AWF_BOUNDED_AGENT_TIMEOUT).toBe('120');
       expect(env.AWF_BOUNDED_AGENT_MAX_INVOCATIONS).toBe('8');
       expect(env.AWF_BOUNDED_AGENT_MAX_MODEL_REQUESTS).toBe('8');
@@ -237,7 +238,7 @@ describe('bounded-agent broker in generated Docker Compose', () => {
       expect(env.AWF_BOUNDED_AGENT_MAX_TASK_BYTES).toBe('4096');
     });
 
-    it('routes the anthropic profile to the Anthropic API-proxy port', () => {
+    it('routes the Copilot engine to its API-proxy port independently of the legacy profile', () => {
       const result = generateDockerCompose(
         {
           ...enabled({ profile: 'anthropic', model: 'claude-sonnet-4' }),
@@ -247,7 +248,7 @@ describe('bounded-agent broker in generated Docker Compose', () => {
       );
       const broker = result.services['bounded-agent-broker'] as unknown as Record<string, unknown>;
       const env = broker.environment as Record<string, string>;
-      expect(env.AWF_BOUNDED_AGENT_API_ENDPOINT).toBe(`http://${BOUNDED_AGENT_API_PROXY_IP}:10001`);
+      expect(env.AWF_BOUNDED_AGENT_API_ENDPOINT).toBe(`http://${BOUNDED_AGENT_API_PROXY_IP}:10002`);
     });
 
     it('selects the gvisor backend without changing any other wiring', () => {
@@ -277,7 +278,7 @@ describe('buildBoundedAgentService guards', () => {
   const imageConfig = {
     useGHCR: true,
     registry: 'ghcr.io/github/gh-aw-firewall',
-    parsedTag: { tag: 'latest' } as never,
+    parsedTag: { tag: 'latest', digests: {} },
     projectRoot: '/repo',
   };
 
@@ -315,9 +316,9 @@ describe('buildBoundedAgentService guards', () => {
     ).toThrow(/require the API proxy/);
   });
 
-  it('builds both images from the shared containers context when building locally', () => {
+  it('builds the standard bounded-agent image and broker locally', () => {
     const { service, enclaveImageService } = buildBoundedAgentService({
-      config: { ...mockConfig, enableApiProxy: true, boundedAgents },
+      config: { ...mockConfig, buildLocal: true, enableApiProxy: true, boundedAgents },
       imageConfig: { ...imageConfig, useGHCR: false },
       networkConfig,
     });
@@ -326,11 +327,24 @@ describe('buildBoundedAgentService guards', () => {
       dockerfile: 'bounded-agent/Dockerfile',
       target: 'enclave',
     });
+    expect((enclaveImageService as Record<string, unknown>).image).toBe('awf-bounded-agent:local');
     expect((service as Record<string, unknown>).build).toEqual({
       context: '/repo/containers',
       dockerfile: 'bounded-agent/Dockerfile',
       target: 'broker',
     });
+  });
+
+  it('uses the published standard bounded-agent image for the enclave', () => {
+    const { enclaveImageService } = buildBoundedAgentService({
+      config: { ...mockConfig, enableApiProxy: true, boundedAgents },
+      imageConfig,
+      networkConfig,
+    });
+    expect((enclaveImageService as Record<string, unknown>).image).toBe(
+      'ghcr.io/github/gh-aw-firewall/bounded-agent:latest',
+    );
+    expect((enclaveImageService as Record<string, unknown>).build).toBeUndefined();
   });
 
   it('uses a host-gateway-only broker ingress for an sbx primary', () => {
@@ -357,7 +371,8 @@ describe('buildBoundedAgentService guards', () => {
 
 describe('resolveBoundedAgentApiPort', () => {
   it('maps each profile to its API-proxy port', () => {
-    expect(resolveBoundedAgentApiPort('openai')).toBe(10000);
-    expect(resolveBoundedAgentApiPort('anthropic')).toBe(10001);
+    expect(resolveBoundedAgentApiPort('copilot', 'openai')).toBe(10002);
+    expect(resolveBoundedAgentApiPort('codex', 'openai')).toBe(10000);
+    expect(resolveBoundedAgentApiPort('claude', 'anthropic')).toBe(10001);
   });
 });

@@ -5,7 +5,7 @@ import {
   BOUNDED_AGENT_API_PROXY_CONTAINER_NAME,
   BOUNDED_AGENT_BROKER_CONTAINER_NAME,
 } from '../constants';
-import type { WrapperConfig } from '../types';
+import type { BoundedAgentEngine, WrapperConfig } from '../types';
 import { API_PROXY_PORTS } from '../types/ports';
 import {
   AGENT_SKILL_DIR,
@@ -69,13 +69,13 @@ import {
 /** Local image tag used when building the bounded-agent broker image from source. */
 const LOCAL_BOUNDED_AGENT_BROKER_IMAGE = 'awf-bounded-agent-broker:local';
 
-/** Local image tag used when building the bounded-agent enclave image from source. */
+/** Local image tag used for the standard bounded-agent enclave. */
 const LOCAL_BOUNDED_AGENT_IMAGE = 'awf-bounded-agent:local';
 
 /** Broker image name published to the container registry. */
 const BOUNDED_AGENT_BROKER_IMAGE_NAME = 'bounded-agent-broker';
 
-/** Enclave image name published to the container registry. */
+/** Standard bounded-agent enclave image name published to the registry. */
 const BOUNDED_AGENT_IMAGE_NAME = 'bounded-agent';
 
 interface BoundedAgentServiceParams {
@@ -98,50 +98,49 @@ interface BoundedAgentBuildResult {
 }
 
 /**
- * Resolves the image references for the broker and enclave separately.
- *
- * Two images keep the enclave environment minimal (Python 3 only — no Node, no
- * docker-cli) while still guaranteeing the enclave image is local when the
- * broker starts: the release workflow pushes both, and compose pulls the broker
- * image behind a one-shot dependency on the enclave image.
+ * Resolves the self-contained bounded-agent enclave and separate broker images.
  *
  * Local builds use the `containers/` build context because the broker reuses
  * the shared PR1 bounded-execution foundation and the audited sandbox seccomp
  * profile that live under `containers/bounded-query/`.
  */
-function resolveBoundedAgentImages(imageConfig: ImageBuildConfig): {
+function resolveBoundedAgentImages(
+  imageConfig: ImageBuildConfig,
+  engine: BoundedAgentEngine = 'copilot',
+): {
   enclaveImageRef: string;
   enclaveSource: Record<string, unknown>;
   brokerSource: Record<string, unknown>;
 } {
+  if (engine !== 'copilot') {
+    throw new Error(`No bounded-agent enclave image is implemented for engine "${engine}"`);
+  }
   const { useGHCR, registry, parsedTag, projectRoot } = imageConfig;
 
-  if (useGHCR) {
-    return {
-      enclaveImageRef: buildRuntimeImageRef(registry, BOUNDED_AGENT_IMAGE_NAME, parsedTag),
-      enclaveSource: { image: buildRuntimeImageRef(registry, BOUNDED_AGENT_IMAGE_NAME, parsedTag) },
-      brokerSource: { image: buildRuntimeImageRef(registry, BOUNDED_AGENT_BROKER_IMAGE_NAME, parsedTag) },
-    };
-  }
-
   return {
-    enclaveImageRef: LOCAL_BOUNDED_AGENT_IMAGE,
-    enclaveSource: {
-      image: LOCAL_BOUNDED_AGENT_IMAGE,
-      build: {
-        context: `${projectRoot}/containers`,
-        dockerfile: 'bounded-agent/Dockerfile',
-        target: 'enclave',
-      },
-    },
-    brokerSource: {
-      image: LOCAL_BOUNDED_AGENT_BROKER_IMAGE,
-      build: {
-        context: `${projectRoot}/containers`,
-        dockerfile: 'bounded-agent/Dockerfile',
-        target: 'broker',
-      },
-    },
+    enclaveImageRef: useGHCR
+      ? buildRuntimeImageRef(registry, BOUNDED_AGENT_IMAGE_NAME, parsedTag)
+      : LOCAL_BOUNDED_AGENT_IMAGE,
+    enclaveSource: useGHCR
+      ? { image: buildRuntimeImageRef(registry, BOUNDED_AGENT_IMAGE_NAME, parsedTag) }
+      : {
+          image: LOCAL_BOUNDED_AGENT_IMAGE,
+          build: {
+            context: `${projectRoot}/containers`,
+            dockerfile: 'bounded-agent/Dockerfile',
+            target: 'enclave',
+          },
+        },
+    brokerSource: useGHCR
+      ? { image: buildRuntimeImageRef(registry, BOUNDED_AGENT_BROKER_IMAGE_NAME, parsedTag) }
+      : {
+          image: LOCAL_BOUNDED_AGENT_BROKER_IMAGE,
+          build: {
+            context: `${projectRoot}/containers`,
+            dockerfile: 'bounded-agent/Dockerfile',
+            target: 'broker',
+          },
+        },
   };
 }
 
@@ -158,7 +157,11 @@ function toDaemonVisiblePath(hostPath: string, dockerHostPathPrefix: string | un
 }
 
 /** Resolves the API-proxy port the enclave's configured profile speaks to. */
-export function resolveBoundedAgentApiPort(profile: 'openai' | 'anthropic'): number {
+export function resolveBoundedAgentApiPort(
+  engine: 'copilot' | 'claude' | 'codex' | 'gemini',
+  profile: 'openai' | 'anthropic',
+): number {
+  if (engine === 'copilot') return API_PROXY_PORTS.COPILOT;
   return profile === 'anthropic' ? API_PROXY_PORTS.ANTHROPIC : API_PROXY_PORTS.OPENAI;
 }
 
@@ -186,9 +189,10 @@ export function buildBoundedAgentService(params: BoundedAgentServiceParams): Bou
   }
 
   const paths = resolveBoundedAgentPaths(config.workDir);
-  const { enclaveImageRef, enclaveSource, brokerSource } = resolveBoundedAgentImages(imageConfig);
+  const { enclaveImageRef, enclaveSource, brokerSource } =
+    resolveBoundedAgentImages(imageConfig, boundedAgents.engine);
   const dockerSocketPath = resolveDockerSocketPath(config);
-  const apiPort = resolveBoundedAgentApiPort(boundedAgents.profile);
+  const apiPort = resolveBoundedAgentApiPort(boundedAgents.engine, boundedAgents.profile);
   const ingressTransport = config.boundedAgentIngressTransport
     ?? (runtimeUsesComposeAgent(config.containerRuntime) ? 'unix' : 'sbx-http');
   const sbxIngressHostIp = ingressTransport === 'sbx-http' ? resolveDockerHostGateway() : undefined;
@@ -225,9 +229,11 @@ export function buildBoundedAgentService(params: BoundedAgentServiceParams): Bou
   ]) {
     delete proxyEnv[key];
   }
-  const unusedProviderCredentials = boundedAgents.profile === 'openai'
-    ? [ANTHROPIC_ENV.KEY, COPILOT_ENV.GITHUB_TOKEN, COPILOT_ENV.PROVIDER_API_KEY, GEMINI_ENV.KEY, VERTEX_ENV.KEY]
-    : [OPENAI_ENV.KEY, COPILOT_ENV.GITHUB_TOKEN, COPILOT_ENV.PROVIDER_API_KEY, GEMINI_ENV.KEY, VERTEX_ENV.KEY];
+  const unusedProviderCredentials = boundedAgents.engine === 'copilot'
+    ? [OPENAI_ENV.KEY, ANTHROPIC_ENV.KEY, GEMINI_ENV.KEY, VERTEX_ENV.KEY]
+    : boundedAgents.profile === 'openai'
+      ? [ANTHROPIC_ENV.KEY, COPILOT_ENV.GITHUB_TOKEN, COPILOT_ENV.PROVIDER_API_KEY, GEMINI_ENV.KEY, VERTEX_ENV.KEY]
+      : [OPENAI_ENV.KEY, COPILOT_ENV.GITHUB_TOKEN, COPILOT_ENV.PROVIDER_API_KEY, GEMINI_ENV.KEY, VERTEX_ENV.KEY];
   for (const key of unusedProviderCredentials) delete proxyEnv[key];
 
   // Compose must pull/build the enclave target before starting the offline
@@ -277,6 +283,7 @@ export function buildBoundedAgentService(params: BoundedAgentServiceParams): Bou
       AWF_BOUNDED_AGENT_PRIMARY_BACKEND: resolveBoundedAgentPrimaryBackend(config.containerRuntime),
       AWF_BOUNDED_AGENT_NETWORK: BOUNDED_AGENT_NETWORK,
       AWF_BOUNDED_AGENT_API_ENDPOINT: `http://${BOUNDED_AGENT_API_PROXY_IP}:${apiPort}`,
+      AWF_BOUNDED_AGENT_ENGINE: boundedAgents.engine,
       AWF_BOUNDED_AGENT_PROFILE: boundedAgents.profile,
       AWF_BOUNDED_AGENT_MODEL: boundedAgents.model,
       AWF_BOUNDED_AGENT_TIMEOUT: String(boundedAgents.timeout),
@@ -343,7 +350,8 @@ export function buildBoundedAgentService(params: BoundedAgentServiceParams): Bou
 
   logger.info(
     `Bounded agents enabled - enclave runtime: ${boundedAgents.runtime}, ` +
-    `profile: ${boundedAgents.profile}, enclave network: ${BOUNDED_AGENT_NETWORK} (API proxy only), ` +
+    `engine: ${boundedAgents.engine}, profile: ${boundedAgents.profile}, ` +
+    `enclave network: ${BOUNDED_AGENT_NETWORK} (API proxy only), ` +
     `broker ingress transport: ${ingressTransport}`,
   );
 
