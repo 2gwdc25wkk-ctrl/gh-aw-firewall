@@ -7,6 +7,36 @@ import { logger } from './logger';
 import { applyHostPathPrefixToVolumes } from './services/host-path-prefix';
 import { getLocalDockerEnv } from './docker-host';
 
+export function isBenignArtifactPermissionError(error: unknown): boolean {
+  const details: string[] = [];
+  if (typeof error === 'string') {
+    details.push(error);
+  } else if (error && typeof error === 'object') {
+    const errorLike = error as {
+      stderr?: unknown;
+      stdout?: unknown;
+      shortMessage?: unknown;
+      message?: unknown;
+      code?: unknown;
+    };
+    for (const value of [
+      errorLike.stderr,
+      errorLike.stdout,
+      errorLike.shortMessage,
+      errorLike.message,
+      errorLike.code,
+    ]) {
+      if (typeof value === 'string') {
+        details.push(value);
+      }
+    }
+  }
+
+  return /(?:^|\n)(?:chown|chmod):.*(?:operation not permitted|permission denied|\bEPERM\b|\bEACCES\b)/i.test(
+    details.join('\n'),
+  );
+}
+
 function resolvePermFixerImageRef(imageRegistry?: string, imageTag?: string, agentImage?: string): string {
   try {
     const registry = imageRegistry || 'ghcr.io/github/gh-aw-firewall';
@@ -90,10 +120,8 @@ export function fixArtifactPermissionsForRootless(
         // producing "Operation not permitted" / "Permission denied". Those are
         // expected and non-fatal, so log them at debug to avoid alarming users
         // who otherwise see a scary WARN for a benign, non-blocking condition.
-        const isBenignPermissionError =
-          !!errorDetail && /(?:^|\n)(?:chown|chmod):.*(?:operation not permitted|permission denied|EPERM|EACCES)/i.test(errorDetail);
         const detail = `for ${dir} (exit ${result.exitCode})` + (errorDetail ? `: ${errorDetail}` : '');
-        if (isBenignPermissionError) {
+        if (isBenignArtifactPermissionError(errorDetail)) {
           logger.debug(
             `Rootless artifact permission repair skipped ${detail}. ` +
               `This is expected on restricted runners and does not affect the run.`,

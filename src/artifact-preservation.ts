@@ -3,7 +3,10 @@ import * as path from 'path';
 import * as os from 'os';
 import execa from 'execa';
 import { logger } from './logger';
-import { fixArtifactPermissionsForRootless } from './artifact-permissions';
+import {
+  fixArtifactPermissionsForRootless,
+  isBenignArtifactPermissionError,
+} from './artifact-permissions';
 import { getLocalDockerEnv } from './host-env';
 import { resolveBoundedQueryPaths } from './bounded-query/paths';
 
@@ -89,7 +92,14 @@ function preserveDirectory({
         execa.sync('chmod', ['-R', 'a+rX', targetDir]);
         logger.info(`${availableLabel} available at: ${targetDir}`);
       } catch (error) {
-        logger.warn(permissionErrorMessage, error);
+        if (isBenignArtifactPermissionError(error)) {
+          logger.debug(
+            `${permissionErrorMessage} Permission repair was denied for ${targetDir}; ` +
+              'this is expected on restricted runners and does not affect the run.',
+          );
+        } else {
+          logger.warn(permissionErrorMessage, error);
+        }
       }
     }
     return;
