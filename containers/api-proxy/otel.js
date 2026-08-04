@@ -46,6 +46,7 @@ const {
 } = require('@opentelemetry/api');
 const { parseOtlpHeaders, buildResourceSpans } = require('./otel-serialization');
 const { ProxyAwareOtlpExporter, FileSpanExporter, FanOutSpanExporter } = require('./otel-exporters');
+const { createOtlpWorkloadIdentity } = require('./otel-workload-identity');
 
 // ── Environment variables ─────────────────────────────────────────────────────
 const OTLP_ENDPOINTS_JSON = (process.env.GH_AW_OTLP_ENDPOINTS || '').trim();
@@ -55,6 +56,7 @@ const SERVICE_NAME     = (process.env.OTEL_SERVICE_NAME               || 'awf-ap
 const PARENT_TRACE_ID  = (process.env.GITHUB_AW_OTEL_TRACE_ID        || '').trim();
 const PARENT_SPAN_ID   = (process.env.GITHUB_AW_OTEL_PARENT_SPAN_ID  || '').trim();
 const HTTPS_PROXY_URL  = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+const OTLP_WORKLOAD_IDENTITY = (process.env.GH_AW_OTLP_WORKLOAD_IDENTITY || '').trim();
 
 const SCOPE_NAME     = 'awf-api-proxy';
 const OTEL_LOG_FILE  = '/var/log/api-proxy/otel.jsonl';
@@ -63,6 +65,7 @@ const OTEL_LOG_FILE  = '/var/log/api-proxy/otel.jsonl';
 let _provider = null;
 let _tracer   = null;
 let _enabled  = false;
+let _workloadIdentity = null;
 
 // ── SDK initialisation ────────────────────────────────────────────────────────
 
@@ -104,6 +107,7 @@ function _parseEndpoints() {
 
 function _init() {
   const resource = new Resource({ [ATTR_SERVICE_NAME]: SERVICE_NAME });
+  _workloadIdentity = createOtlpWorkloadIdentity(OTLP_WORKLOAD_IDENTITY);
 
   let exporter;
   const endpoints = _parseEndpoints();
@@ -115,6 +119,7 @@ function _init() {
       headers: ep.headers || {},
       httpsProxy: HTTPS_PROXY_URL || null,
       resource,
+      headerProvider: _workloadIdentity,
     }));
     exporter = new FanOutSpanExporter(exporters);
   } else if (endpoints.length === 1) {
@@ -123,6 +128,7 @@ function _init() {
       headers: endpoints[0].headers || {},
       httpsProxy: HTTPS_PROXY_URL || null,
       resource,
+      headerProvider: _workloadIdentity,
     });
   } else if (OTLP_ENDPOINT) {
     // Legacy single-endpoint fallback
@@ -131,6 +137,7 @@ function _init() {
       headers:    parseOtlpHeaders(OTLP_HEADERS_RAW),
       httpsProxy: HTTPS_PROXY_URL || null,
       resource,
+      headerProvider: _workloadIdentity,
     });
   } else {
     exporter = new FileSpanExporter(OTEL_LOG_FILE);
@@ -338,6 +345,7 @@ async function shutdown() {
   try {
     await _provider.shutdown();
   } catch { /* best-effort */ }
+  _workloadIdentity?.shutdown();
 }
 
 /**
@@ -361,4 +369,5 @@ module.exports = {
   _parseEndpoints,
   _parseOtlpHeaders: parseOtlpHeaders,
   _buildResourceSpans: buildResourceSpans,
+  _createOtlpWorkloadIdentity: createOtlpWorkloadIdentity,
 };
