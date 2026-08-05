@@ -98,6 +98,36 @@ describe('createMainAction', () => {
         expect.stringContaining('No command specified')
       );
     });
+
+    it('runs the reflection endpoint when --reflect is set', async () => {
+      const action = createMainAction(getOptionValueSource);
+      await action([], { reflect: true });
+      expect(mockedValidateOptions.validateOptions).toHaveBeenCalledWith(
+        expect.anything(),
+        'curl --fail --silent --show-error --noproxy "*" http://api-proxy:10000/reflect'
+      );
+      expect(mockedOptionParsers.joinShellArgs).not.toHaveBeenCalled();
+      expect(mockedCliWorkflow.runMainWorkflow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          additionalEnv: expect.objectContaining({
+            AWF_COMMAND_STDOUT_ONLY: '1',
+          }),
+        }),
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('when --reflect is used with a command', () => {
+    it('exits with code 1 and prints a usage error', async () => {
+      const action = createMainAction(getOptionValueSource);
+      await expect(action(['echo hi'], { reflect: true })).rejects.toThrow('process.exit: 1');
+      expect(processExitSpy).toHaveBeenCalledWith(1);
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('--reflect cannot be used with a command')
+      );
+    });
   });
 
   describe('when single arg is provided', () => {
