@@ -29,7 +29,8 @@ const {
  * }|{
  *   kind: 'provider_not_configured',
  *   message: string,
- *   statusCode?: number
+ *   statusCode?: number,
+ *   retryable?: boolean
  * }} spec
  * @returns {import('./providers/index').UnconfiguredResponse}
  */
@@ -37,7 +38,9 @@ function buildUnconfiguredResponse(provider, port, spec) {
   if (spec.kind === 'plain_error') {
     return { statusCode: spec.statusCode, body: { error: spec.message } };
   }
-  const response = makeProviderNotConfiguredResponse(provider, port, spec.message);
+  const response = makeProviderNotConfiguredResponse(provider, port, spec.message, {
+    retryable: spec.retryable === true,
+  });
   if (spec.statusCode !== undefined) {
     response.statusCode = spec.statusCode;
   }
@@ -310,7 +313,8 @@ function createOidcAwareProviderAdapter({
  * }|{
  *   kind: 'provider_not_configured',
  *   message: string,
- *   statusCode?: number
+ *   statusCode?: number,
+ *   retryable?: boolean
  * }} [opts.missingCredentialResponse] - Declarative default request-time not-configured response
  * @param {(() => ({
  *   kind: 'plain_error',
@@ -319,7 +323,8 @@ function createOidcAwareProviderAdapter({
  * }|{
  *   kind: 'provider_not_configured',
  *   message: string,
- *   statusCode?: number
+ *   statusCode?: number,
+ *   retryable?: boolean
  * }|null))} [opts.unconfiguredResponseWhen] - Optional override callback for request-time not-configured response
  * @param {(() => import('./providers/index').UnconfiguredResponse)} [opts.getUnconfiguredHealthResponse] - Optional explicit not-configured /health response (takes precedence over declarative metadata)
  * @param {string}  [opts.healthServiceName]        - Service name for auto-generated /health response (e.g. 'awf-api-proxy-gemini'); requires missingCredentialMessage
