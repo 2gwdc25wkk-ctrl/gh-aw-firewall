@@ -67,7 +67,22 @@ function readBody(req) {
   });
 }
 
+function createSingleToolAdmission() {
+  let active = false;
+  return () => {
+    if (active) return undefined;
+    active = true;
+    return () => {
+      active = false;
+    };
+  };
+}
+
 function createMcpServer(deps) {
+  const dispatchDeps = {
+    ...deps,
+    tryAcquireToolCall: createSingleToolAdmission(),
+  };
   const server = http.createServer({ maxHeaderSize: 8 * 1024 }, async (req, res) => {
     const authorizationHeaders = req.rawHeaders.filter(
       (_value, index) => index % 2 === 0 && req.rawHeaders[index].toLowerCase() === 'authorization',
@@ -105,7 +120,7 @@ function createMcpServer(deps) {
 
     let response;
     try {
-      response = await dispatchJsonRpc(message, deps);
+      response = await dispatchJsonRpc(message, dispatchDeps);
     } catch {
       jsonResponse(res, 200, {
         jsonrpc: '2.0',
@@ -128,20 +143,10 @@ function createMcpServer(deps) {
   return server;
 }
 
-function listenOnSocket(server, config) {
-  fs.rmSync(config.socketPath, { force: true });
-  fs.mkdirSync(config.socketDir, { recursive: true, mode: 0o700 });
+function listenOnPrivateNetwork(server, config) {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(config.socketPath, () => {
-      try {
-        fs.chownSync(config.socketPath, config.socketUid, config.socketGid);
-        fs.chmodSync(config.socketPath, 0o660);
-        resolve();
-      } catch (error) {
-        reject(error);
-      }
-    });
+    server.listen(config.listenPort, config.listenHost, resolve);
   });
 }
 
@@ -234,7 +239,7 @@ async function main() {
     maxScriptBytes,
     maxPromptBytes,
   });
-  await listenOnSocket(server, serverConfig);
+  await listenOnPrivateNetwork(server, serverConfig);
   fs.mkdirSync(serverConfig.controlDir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(serverConfig.readyPath, '', { mode: 0o600 });
   audit.lifecycle('listening', { executors });
@@ -283,6 +288,7 @@ if (require.main === module) {
 module.exports = {
   MAX_HTTP_BODY_BYTES,
   createMcpServer,
-  listenOnSocket,
+  createSingleToolAdmission,
+  listenOnPrivateNetwork,
   safeCapabilityEquals,
 };
