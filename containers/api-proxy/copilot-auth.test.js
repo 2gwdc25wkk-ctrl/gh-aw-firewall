@@ -309,10 +309,24 @@ describe('copilotTargetRequiresGitHubTokenPrefix', () => {
     expect(copilotTargetRequiresGitHubTokenPrefix('api.githubcopilot.com', {})).toBe(false);
   });
 
-  it('returns false for a *.ghe.com (GHEC) Copilot target', () => {
+  it('returns true for a GHEC data-residency Copilot target', () => {
     expect(copilotTargetRequiresGitHubTokenPrefix('copilot-api.myorg.ghe.com', {
       GITHUB_SERVER_URL: 'https://myorg.ghe.com',
-    })).toBe(false);
+    })).toBe(true);
+  });
+
+  it('returns true for a GHEC data-residency Copilot target with AWF_PLATFORM_TYPE=ghec', () => {
+    expect(copilotTargetRequiresGitHubTokenPrefix('copilot-api.myorg.ghe.com', {
+      AWF_PLATFORM_TYPE: 'ghec',
+      GITHUB_SERVER_URL: 'https://myorg.ghe.com',
+    })).toBe(true);
+  });
+
+  it('returns false for malformed or non-canonical GHEC data-residency target shapes', () => {
+    const env = { GITHUB_SERVER_URL: 'https://myorg.ghe.com' };
+    expect(copilotTargetRequiresGitHubTokenPrefix('copilot-api..ghe.com', env)).toBe(false);
+    expect(copilotTargetRequiresGitHubTokenPrefix('copilot-api.a.b.ghe.com', env)).toBe(false);
+    expect(copilotTargetRequiresGitHubTokenPrefix('copilot-api.myorg.ghe.com.evil.com', env)).toBe(false);
   });
 
   it('returns false when no token-prefix indicators are present', () => {
