@@ -27,6 +27,7 @@ required_functions=(
   determine_capabilities_to_drop
   log_execution_context
   mount_host_procfs
+  mount_host_cgroupfs
   copy_preload_libs
   copy_agent_helper_scripts
   copy_dind_runner_binary
@@ -111,6 +112,7 @@ COPY_SYSTEM_CA_BUNDLE_BLOCK="$(awk '
 
 chroot_helpers=(
   'mount_host_procfs'
+  'mount_host_cgroupfs'
   'check_chroot_prereqs'
   'copy_preload_libs'
   'copy_agent_helper_scripts'
@@ -135,6 +137,13 @@ for helper in "${chroot_helpers[@]}"; do
   last_helper_line="${helper_line}"
   pass "run_chroot_command() calls ${helper} in order"
 done
+
+if grep -Fq 'umount /host/sys/fs/cgroup' "${ENTRYPOINT}" && \
+   grep -Fq 'Could not remove writable cgroup mount; refusing to start sandbox command' "${ENTRYPOINT}"; then
+  pass "mount_host_cgroupfs() removes a mount that cannot be made read-only"
+else
+  fail "mount_host_cgroupfs() may leave a writable cgroup mount behind"
+fi
 
 if printf '%s\n' "${COPY_SYSTEM_CA_BUNDLE_BLOCK}" | grep -Fq 'if [ "${AWF_SSL_BUMP_ENABLED}" = "true" ]'; then
   pass "copy_system_ca_bundle() keys SSL Bump handling off AWF_SSL_BUMP_ENABLED"
