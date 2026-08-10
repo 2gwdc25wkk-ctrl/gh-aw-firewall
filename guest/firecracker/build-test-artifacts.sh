@@ -86,9 +86,9 @@ make -C "$BUILD/linux-${LINUX_VERSION}" \
   KBUILD_BUILD_USER=awf \
   KBUILD_BUILD_HOST=github \
   LOCALVERSION=-awf-firecracker \
-  bzImage
+  vmlinux
 install -m 0644 \
-  "$BUILD/linux-${LINUX_VERSION}/arch/x86/boot/bzImage" \
+  "$BUILD/linux-${LINUX_VERSION}/vmlinux" \
   "$OUTPUT/vmlinux.bin"
 
 busybox_tar="$BUILD/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2"

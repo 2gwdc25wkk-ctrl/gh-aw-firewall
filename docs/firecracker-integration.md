@@ -327,7 +327,7 @@ retry.
 |----------|---------|-------------|-------------|
 | Firecracker binary | `--firecracker-binary` | `--firecracker-binary-sha256` | Firecracker VMM binary, **must be v1.16.1** |
 | Jailer binary | `--firecracker-jailer-binary` | `--firecracker-jailer-sha256` | Jailer binary, same version as Firecracker binary |
-| Guest kernel | `--firecracker-kernel` | `--firecracker-kernel-sha256` | A KVM-compatible Linux bzImage |
+| Guest kernel | `--firecracker-kernel` | `--firecracker-kernel-sha256` | A KVM-compatible uncompressed Linux ELF kernel |
 | Guest rootfs | `--firecracker-rootfs` | `--firecracker-rootfs-sha256` | Ext4 base image; staged as a private writable copy per run |
 | Guest supervisor | `--firecracker-supervisor` | `--firecracker-supervisor-sha256` | AWF vsock supervisor binary |
 
@@ -371,7 +371,7 @@ This tarball contains:
 |------|-------------|
 | `firecracker` | Firecracker v1.16.1 binary (extracted from upstream release, SHA-256 verified) |
 | `jailer` | Jailer v1.16.1 binary |
-| `vmlinux.bin` | Linux 6.1.141 bzImage built from upstream source with a pinned kernel config |
+| `vmlinux.bin` | Uncompressed Linux 6.1.141 ELF kernel built from upstream source with a pinned kernel config |
 | `rootfs.ext4` | Minimal BusyBox + supervisor rootfs image |
 | `awf-firecracker-supervisor` | AWF guest supervisor binary |
 | `SHA256SUMS` | SHA-256 digests for all five files |

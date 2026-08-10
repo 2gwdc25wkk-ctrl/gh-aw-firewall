@@ -25,7 +25,7 @@ done
 
 "$ARTIFACT_DIR/firecracker" --version | grep -F '1.16.1'
 "$ARTIFACT_DIR/jailer" --version | grep -F '1.16.1'
-file "$ARTIFACT_DIR/vmlinux.bin" | grep -E 'Linux kernel|boot executable'
+file "$ARTIFACT_DIR/vmlinux.bin" | grep -F 'ELF 64-bit LSB executable'
 e2fsck -f -n "$ARTIFACT_DIR/rootfs.ext4"
 debugfs -R 'stat /sbin/awf-supervisor' "$ARTIFACT_DIR/rootfs.ext4" 2>&1 \
   | grep -F 'Type: regular'
