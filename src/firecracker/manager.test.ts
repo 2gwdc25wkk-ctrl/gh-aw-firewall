@@ -5,6 +5,7 @@ import {
   FirecrackerManager,
   buildSupervisorBootArgs,
   createFirecrackerRunPaths,
+  firecrackerManagerTestHelpers,
   type FirecrackerManagerDependencies,
   type FirecrackerManagerNetworkConfig,
 } from './manager';
@@ -14,6 +15,17 @@ import type {
 } from './network';
 import type { FirecrackerVsockClient } from './vsock-client';
 import type { FirecrackerWorkspaceImage } from './workspace-image';
+import type { FirecrackerHostToolPaths } from './preflight';
+
+const hostTools: FirecrackerHostToolPaths = {
+  ip: '/usr/bin/ip',
+  nft: '/usr/sbin/nft',
+  sysctl: '/usr/sbin/sysctl',
+  mke2fs: '/usr/sbin/mke2fs',
+  debugfs: '/usr/sbin/debugfs',
+  e2fsck: '/usr/sbin/e2fsck',
+  rsync: '/usr/bin/rsync',
+};
 
 function config(overrides: Partial<FirecrackerOptions> = {}): FirecrackerOptions {
   return {
@@ -22,6 +34,7 @@ function config(overrides: Partial<FirecrackerOptions> = {}): FirecrackerOptions
     jailerBinary: '/opt/jailer',
     kernelPath: '/opt/vmlinux',
     rootfsPath: '/opt/rootfs.ext4',
+    supervisorPath: '/opt/awf-supervisor',
     vcpuCount: 2,
     memoryMib: 512,
     apiTimeoutMs: 1,
@@ -79,6 +92,7 @@ function dependencies(
       jailerBinary: '/opt/jailer',
       kernelPath: '/opt/vmlinux',
       rootfsPath: '/opt/rootfs.ext4',
+      tools: hostTools,
     }),
     launch: jest.fn().mockReturnValue(processMock()),
     mkdir: jest.fn().mockResolvedValue(undefined),
@@ -98,6 +112,40 @@ function dependencies(
 }
 
 describe('FirecrackerManager', () => {
+  it('constructs the default host adapters and jailer identity', async () => {
+    const defaults = firecrackerManagerTestHelpers.defaultDependencies;
+    const child = defaults.launch(process.execPath, ['-e', ''], {
+      reject: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+    });
+    await expect(child).resolves.toMatchObject({ exitCode: 0 });
+    await expect(defaults.sleep(0)).resolves.toBeUndefined();
+    expect(defaults.createClient('/tmp/firecracker.socket', 100)).toBeDefined();
+    expect(defaults.createNetwork({} as FirecrackerNetworkPlan, hostTools)).toBeDefined();
+    expect(defaults.createWorkspaceImage({
+      runId: 'adapter-test',
+      workDir: '/tmp/awf',
+      workspacePath: '/workspace',
+      homePath: '/home/runner',
+      baseRootfsPath: '/opt/rootfs',
+      supervisorBinaryPath: '/opt/supervisor',
+      supervisorSha256: 'a'.repeat(64),
+      uid: 1000,
+      gid: 1000,
+    }, hostTools)).toBeDefined();
+    expect(defaults.createVsockClient('/tmp/vsock.socket', 52, 100)).toBeDefined();
+
+    process.env.SUDO_UID = '2001';
+    process.env.SUDO_GID = '2002';
+    expect(firecrackerManagerTestHelpers.resolveJailerIdentity()).toEqual({
+      uid: 2001,
+      gid: 2002,
+    });
+    delete process.env.SUDO_UID;
+    delete process.env.SUDO_GID;
+  });
+
   it('constructs unique, contained jail paths', () => {
     const first = createFirecrackerRunPaths('/tmp/awf', '/opt/firecracker');
     const second = createFirecrackerRunPaths('/tmp/awf', '/opt/firecracker');
@@ -162,11 +210,14 @@ describe('FirecrackerManager', () => {
       .mock.calls[0][0] as { guest_mac: string };
     expect(configuredNetwork.guest_mac.split(':')).toHaveLength(6);
     expect(configuredNetwork.guest_mac.startsWith('02:')).toBe(true);
-    expect(deps.createNetwork).toHaveBeenCalledWith(expect.objectContaining({
-      infrastructureBridge: 'awfbr0',
-      jailerUid: 1000,
-      jailerGid: 1000,
-    }));
+    expect(deps.createNetwork).toHaveBeenCalledWith(
+      expect.objectContaining({
+        infrastructureBridge: 'awfbr0',
+        jailerUid: 1000,
+        jailerGid: 1000,
+      }),
+      hostTools,
+    );
     const lifecycle = (deps.createNetwork as jest.Mock).mock.results[0]
       .value as FirecrackerNetworkLifecycle;
     expect(lifecycle.setup).toHaveBeenCalledTimes(1);
@@ -352,6 +403,118 @@ describe('FirecrackerManager', () => {
         '/tmp/awf/firecracker-jailer/firecracker/guest/root/workspace.ext4',
       );
       expect(order).toEqual(['extract']);
+  });
+
+  it('delegates guest cancellation, stdin, and resize only after readiness', async () => {
+      const cold = new FirecrackerManager(
+        config(),
+        '/tmp/awf',
+        dependencies(),
+        'cold-guest',
+        networkConfig(),
+      );
+      await expect(cold.cancel()).rejects.toThrow(/supervisor is not ready/);
+      await expect(cold.writeStdin(Buffer.from('input'))).rejects.toThrow(/supervisor is not ready/);
+      await expect(cold.endStdin()).rejects.toThrow(/supervisor is not ready/);
+      await expect(cold.resize(80, 24)).rejects.toThrow(/supervisor is not ready/);
+
+      const guestClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        execute: jest.fn(),
+        cancel: jest.fn().mockResolvedValue(undefined),
+        writeStdin: jest.fn().mockResolvedValue(undefined),
+        endStdin: jest.fn().mockResolvedValue(undefined),
+        resize: jest.fn().mockResolvedValue(undefined),
+        shutdown: jest.fn().mockResolvedValue(undefined),
+        destroy: jest.fn(),
+      } as unknown as FirecrackerVsockClient;
+      const workspace = {
+        prepare: jest.fn().mockResolvedValue({
+          workspaceImagePath: '/tmp/workspace.ext4',
+          rootfsImagePath: '/tmp/rootfs.ext4',
+          imageBytes: 1024,
+          originalManifest: new Map(),
+        }),
+        extractAfterStop: jest.fn().mockResolvedValue(undefined),
+        cleanup: jest.fn().mockResolvedValue(undefined),
+      } as unknown as FirecrackerWorkspaceImage;
+      const deps = dependencies({
+        createVsockClient: jest.fn().mockReturnValue(guestClient),
+        createWorkspaceImage: jest.fn().mockReturnValue(workspace),
+      });
+      const manager = new FirecrackerManager(
+        config(),
+        '/tmp/awf',
+        deps,
+        'ready-guest',
+        networkConfig(),
+        {
+          workspacePath: '/workspace',
+          homePath: '/home/runner',
+          supervisorBinaryPath: '/opt/supervisor',
+          supervisorSha256: 'a'.repeat(64),
+        },
+      );
+      await manager.start();
+      await manager.startInstance();
+      await manager.cancel('test', 'request');
+      await manager.writeStdin(Buffer.from('input'), 'request');
+      await manager.endStdin('request');
+      await manager.resize(80, 24, 'request');
+
+      expect(guestClient.cancel).toHaveBeenCalledWith('test', 'request');
+      expect(guestClient.writeStdin).toHaveBeenCalledWith(Buffer.from('input'), 'request');
+      expect(guestClient.endStdin).toHaveBeenCalledWith('request');
+      expect(guestClient.resize).toHaveBeenCalledWith(80, 24, 'request');
+      await manager.stop();
+  });
+
+  it('quiesces and copies back while preserving jail, images, and network in keep mode', async () => {
+      const child = processMock();
+      const workspace = {
+        prepare: jest.fn().mockResolvedValue({
+          workspaceImagePath: '/tmp/prepared-workspace.ext4',
+          rootfsImagePath: '/tmp/prepared-rootfs.ext4',
+          imageBytes: 1024,
+          originalManifest: new Map(),
+        }),
+        extractAfterStop: jest.fn().mockResolvedValue(undefined),
+        cleanup: jest.fn().mockResolvedValue(undefined),
+      } as unknown as FirecrackerWorkspaceImage;
+      const guestClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        shutdown: jest.fn().mockResolvedValue(undefined),
+        destroy: jest.fn(),
+      } as unknown as FirecrackerVsockClient;
+      const deps = dependencies({
+        launch: jest.fn().mockReturnValue(child),
+        createWorkspaceImage: jest.fn().mockReturnValue(workspace),
+        createVsockClient: jest.fn().mockReturnValue(guestClient),
+      });
+      const manager = new FirecrackerManager(
+        config(),
+        '/tmp/awf',
+        deps,
+        'keep',
+        networkConfig(),
+        {
+          workspacePath: '/workspace',
+          homePath: '/home/runner',
+          supervisorBinaryPath: '/opt/awf-supervisor',
+          supervisorSha256: 'a'.repeat(64),
+        },
+      );
+      await manager.start();
+      await manager.startInstance();
+
+      await manager.stop({ preserve: true });
+
+      const lifecycle = (deps.createNetwork as jest.Mock).mock.results[0]
+        .value as FirecrackerNetworkLifecycle;
+      expect(workspace.extractAfterStop).toHaveBeenCalledTimes(1);
+      expect(lifecycle.cleanup).not.toHaveBeenCalled();
+      expect(workspace.cleanup).not.toHaveBeenCalled();
+      expect(deps.rm).not.toHaveBeenCalled();
   });
 
   it('builds explicit supervisor boot networking without widening policy', () => {

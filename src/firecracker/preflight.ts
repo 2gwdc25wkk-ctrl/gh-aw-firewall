@@ -20,7 +20,21 @@ export interface FirecrackerPreflightDependencies {
   }>;
   runVersion(binaryPath: string): Promise<string>;
   sha256(filePath: string): Promise<string>;
+  assertToolAvailable(tool: string): Promise<string>;
 }
+
+export type FirecrackerHostToolPaths = Readonly<{
+  ip: string;
+  nft: string;
+  sysctl: string;
+  mke2fs: string;
+  debugfs: string;
+  e2fsck: string;
+  rsync: string;
+}>;
+const FIRECRACKER_HOST_TOOLS: (keyof FirecrackerHostToolPaths)[] = [
+  'ip', 'nft', 'sysctl', 'mke2fs', 'debugfs', 'e2fsck', 'rsync',
+];
 
 const defaultDependencies: FirecrackerPreflightDependencies = {
   platform: process.platform,
@@ -42,7 +56,24 @@ const defaultDependencies: FirecrackerPreflightDependencies = {
     return `${result.stdout}\n${result.stderr}`.trim();
   },
   sha256: calculateSha256,
+  assertToolAvailable: async (tool) => {
+    const searchPath = process.env.PATH ?? '';
+    for (const directory of searchPath.split(path.delimiter)) {
+      if (!directory) continue;
+      try {
+        const candidate = path.join(directory, tool);
+        await assertTrustedHostTool(tool, candidate);
+        return candidate;
+      } catch {
+        // Continue searching the bounded host PATH.
+      }
+    }
+    throw new Error(`required trusted host tool "${tool}" was not found on PATH`);
+  },
 };
+
+/** @internal Exposed only for focused host-probe tests. */
+export const firecrackerPreflightTestHelpers = { defaultDependencies };
 
 export interface FirecrackerPreflightResult {
   version: string;
@@ -50,6 +81,34 @@ export interface FirecrackerPreflightResult {
   jailerBinary: string;
   kernelPath: string;
   rootfsPath: string;
+  supervisorPath: string;
+  tools: FirecrackerHostToolPaths;
+}
+
+async function assertTrustedHostTool(label: string, filePath: string): Promise<void> {
+  if (!path.isAbsolute(filePath)) {
+    throw new Error(`host tool "${label}" path must be absolute: ${filePath}`);
+  }
+  const { root } = path.parse(filePath);
+  const segments = filePath.slice(root.length).split('/').filter(Boolean);
+  let ancestor = root;
+  for (const segment of segments.slice(0, -1)) {
+    ancestor = path.join(ancestor, segment);
+    const stat = await fs.lstat(ancestor);
+    if (stat.isSymbolicLink() || (stat.mode & 0o022) !== 0 || stat.uid !== 0) {
+      throw new Error(`host tool "${label}" has an untrusted parent directory: ${ancestor}`);
+    }
+  }
+  const stat = await fs.lstat(filePath);
+  if (
+    stat.isSymbolicLink() ||
+    !stat.isFile() ||
+    (stat.mode & 0o022) !== 0 ||
+    stat.uid !== 0
+  ) {
+    throw new Error(`host tool "${label}" must be a root-owned non-writable regular file: ${filePath}`);
+  }
+  await fs.access(filePath, constants.X_OK);
 }
 
 export function parseFirecrackerVersion(output: string): string {
@@ -178,8 +237,10 @@ export async function runFirecrackerPreflight(
       `Firecracker supports only x86_64 and aarch64; found Node architecture ${dependencies.arch}`,
     );
   }
-  if (!config.kernelPath || !config.rootfsPath) {
-    throw new Error('Firecracker requires both guest kernel and rootfs artifact paths');
+  if (!config.kernelPath || !config.rootfsPath || !config.supervisorPath) {
+    throw new Error(
+      'Firecracker requires guest kernel, rootfs, and supervisor artifact paths',
+    );
   }
 
   try {
@@ -196,6 +257,18 @@ export async function runFirecrackerPreflight(
     constants.R_OK | constants.X_OK,
     dependencies,
   );
+
+  const tools = {} as Record<keyof FirecrackerHostToolPaths, string>;
+  for (const tool of FIRECRACKER_HOST_TOOLS) {
+    try {
+      tools[tool] = await dependencies.assertToolAvailable(tool);
+    } catch (error) {
+      throw new Error(
+        `Firecracker requires host tool "${tool}": ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   await assertTrustedRegularFile(
     'Firecracker jailer binary',
     config.jailerBinary,
@@ -211,6 +284,12 @@ export async function runFirecrackerPreflight(
   await assertTrustedRegularFile(
     'Firecracker rootfs',
     config.rootfsPath,
+    constants.R_OK,
+    dependencies,
+  );
+  await assertTrustedRegularFile(
+    'Firecracker guest supervisor',
+    config.supervisorPath,
     constants.R_OK,
     dependencies,
   );
@@ -256,6 +335,12 @@ export async function runFirecrackerPreflight(
     config.sha256?.rootfs,
     dependencies,
   );
+  await assertDigest(
+    'Firecracker guest supervisor',
+    config.supervisorPath,
+    config.sha256?.supervisor,
+    dependencies,
+  );
 
   return {
     version: firecrackerVersion,
@@ -263,5 +348,7 @@ export async function runFirecrackerPreflight(
     jailerBinary: config.jailerBinary,
     kernelPath: config.kernelPath,
     rootfsPath: config.rootfsPath,
+    supervisorPath: config.supervisorPath,
+    tools,
   };
 }

@@ -5,6 +5,7 @@ import execa, { type ExecaChildProcess } from 'execa';
 import type { FirecrackerOptions } from '../types/runtime-options';
 import { FirecrackerApiClient } from './api-client';
 import {
+  FirecrackerLinuxNetworkCommands,
   FirecrackerNetworkManager,
   assertSafeFirecrackerRunId,
   createFirecrackerNetworkPlan,
@@ -13,6 +14,7 @@ import {
   type FirecrackerNetworkPlan,
 } from './network';
 import { runFirecrackerPreflight } from './preflight';
+import type { FirecrackerHostToolPaths } from './preflight';
 import {
   FirecrackerVsockClient,
   type FirecrackerGuestExecutionRequest,
@@ -63,8 +65,8 @@ export interface FirecrackerManagerDependencies {
   rm(directory: string, options: { recursive: true; force: true }): Promise<void>;
   sleep(milliseconds: number): Promise<void>;
   createClient(socketPath: string, timeoutMs: number): FirecrackerApiClient;
-  createNetwork(plan: FirecrackerNetworkPlan): FirecrackerNetworkLifecycle;
-  createWorkspaceImage(config: FirecrackerWorkspaceImageConfig): FirecrackerWorkspaceImage;
+  createNetwork(plan: FirecrackerNetworkPlan, tools: FirecrackerHostToolPaths): FirecrackerNetworkLifecycle;
+  createWorkspaceImage(config: FirecrackerWorkspaceImageConfig, tools: FirecrackerHostToolPaths): FirecrackerWorkspaceImage;
   createVsockClient(socketPath: string, guestPort: number, timeoutMs: number): FirecrackerVsockClient;
   resolveIdentity(): { uid: number; gid: number };
 }
@@ -82,6 +84,7 @@ export interface FirecrackerManagerGuestConfig {
   readonly supervisorSha256: string;
   readonly maxWorkspaceImageBytes?: number;
   readonly vsockPort?: number;
+  readonly identity?: { uid: number; gid: number };
 }
 
 const defaultDependencies: FirecrackerManagerDependencies = {
@@ -95,8 +98,11 @@ const defaultDependencies: FirecrackerManagerDependencies = {
   rm: fs.rm,
   sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   createClient: (socketPath, timeoutMs) => new FirecrackerApiClient({ socketPath, timeoutMs }),
-  createNetwork: (plan) => new FirecrackerNetworkManager(plan),
-  createWorkspaceImage: (config) => new FirecrackerWorkspaceImage(config),
+  createNetwork: (plan, tools) => new FirecrackerNetworkManager(
+    plan,
+    new FirecrackerLinuxNetworkCommands(undefined, tools),
+  ),
+  createWorkspaceImage: (config, tools) => new FirecrackerWorkspaceImage(config, undefined, tools),
   createVsockClient: (socketPath, guestPort, timeoutMs) => new FirecrackerVsockClient({
     socketPath,
     guestPort,
@@ -105,6 +111,12 @@ const defaultDependencies: FirecrackerManagerDependencies = {
     writeTimeoutMs: timeoutMs,
   }),
   resolveIdentity: resolveJailerIdentity,
+};
+
+/** @internal Exposed only for focused host-adapter tests. */
+export const firecrackerManagerTestHelpers = {
+  defaultDependencies,
+  resolveJailerIdentity,
 };
 
 function parsePositiveIdentity(value: string | undefined): number | undefined {
@@ -158,7 +170,16 @@ export class FirecrackerManager {
   private network: FirecrackerNetworkLifecycle | undefined;
   private workspace: FirecrackerWorkspaceImage | undefined;
   private guestClient: FirecrackerVsockClient | undefined;
+  private networkPlan: FirecrackerNetworkPlan | undefined;
   private instanceStarted = false;
+
+  get guestIp(): string | undefined {
+    return this.networkPlan?.guestIp;
+  }
+
+  get networkNamespace(): string | undefined {
+    return this.networkPlan?.namespaceName;
+  }
 
   constructor(
     private readonly config: FirecrackerOptions,
@@ -181,13 +202,14 @@ export class FirecrackerManager {
     let startupError: unknown;
     try {
       const artifacts = await this.dependencies.preflight(this.config);
-      const identity = this.dependencies.resolveIdentity();
+      const identity = this.guestConfig?.identity ?? this.dependencies.resolveIdentity();
       const networkPlan = createFirecrackerNetworkPlan(this.paths.runId, {
         ...this.networkConfig,
         jailerUid: identity.uid,
         jailerGid: identity.gid,
       });
-      this.network = this.dependencies.createNetwork(networkPlan);
+      this.networkPlan = networkPlan;
+      this.network = this.dependencies.createNetwork(networkPlan, artifacts.tools);
       await this.network.setup();
       let rootfsSource = artifacts.rootfsPath;
       let workspaceSource: string | undefined;
@@ -205,7 +227,7 @@ export class FirecrackerManager {
             : { maxImageBytes: this.guestConfig.maxWorkspaceImageBytes }),
           uid: identity.uid,
           gid: identity.gid,
-        });
+        }, artifacts.tools);
         const preparation = await this.workspace.prepare();
         rootfsSource = preparation.rootfsImagePath;
         workspaceSource = preparation.workspaceImagePath;
@@ -313,7 +335,35 @@ export class FirecrackerManager {
     return this.guestClient.execute(request);
   }
 
-  async stop(): Promise<void> {
+  cancel(reason = 'host cancellation', requestId?: string): Promise<void> {
+    if (!this.guestClient) {
+      return Promise.reject(new Error('Firecracker guest supervisor is not ready'));
+    }
+    return this.guestClient.cancel(reason, requestId);
+  }
+
+  writeStdin(data: Buffer, requestId?: string): Promise<void> {
+    if (!this.guestClient) {
+      return Promise.reject(new Error('Firecracker guest supervisor is not ready'));
+    }
+    return this.guestClient.writeStdin(data, requestId);
+  }
+
+  endStdin(requestId?: string): Promise<void> {
+    if (!this.guestClient) {
+      return Promise.reject(new Error('Firecracker guest supervisor is not ready'));
+    }
+    return this.guestClient.endStdin(requestId);
+  }
+
+  resize(columns: number, rows: number, requestId?: string): Promise<void> {
+    if (!this.guestClient) {
+      return Promise.reject(new Error('Firecracker guest supervisor is not ready'));
+    }
+    return this.guestClient.resize(columns, rows, requestId);
+  }
+
+  async stop(options: { preserve?: boolean } = {}): Promise<void> {
     const errors: unknown[] = [];
     const instanceWasStarted = this.instanceStarted;
     let guestShutdownAcknowledged = false;
@@ -322,7 +372,12 @@ export class FirecrackerManager {
         await this.guestClient.shutdown();
         guestShutdownAcknowledged = true;
       } catch (error) {
-        errors.push(error);
+        if (
+          !(error instanceof Error) ||
+          error.message !== 'Cannot shut down Firecracker guest while a request is running'
+        ) {
+          errors.push(error);
+        }
         this.guestClient.destroy();
       }
     }
@@ -382,9 +437,20 @@ export class FirecrackerManager {
     }
     this.instanceStarted = false;
 
+    if (options.preserve) {
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) {
+        throw new Error(
+          `Firecracker preservation failed: ${errors.map(formatError).join('; ')}`,
+        );
+      }
+      return;
+    }
+
     try {
       await this.network?.cleanup();
       this.network = undefined;
+      this.networkPlan = undefined;
     } catch (error) {
       errors.push(error);
     }
