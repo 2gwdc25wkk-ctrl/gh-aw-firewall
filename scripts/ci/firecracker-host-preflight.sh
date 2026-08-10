@@ -31,6 +31,12 @@ sudo -n true || fail "Passwordless sudo is required for jailer and netns setup."
 docker info >/dev/null || fail "A host-visible Docker Engine is required."
 docker compose version >/dev/null || fail "Docker Compose v2 is required."
 
+[ -x "$ARTIFACT_DIR/firecracker" ] \
+  || fail "The Firecracker artifact must be executable."
+[ -x "$ARTIFACT_DIR/jailer" ] \
+  || fail "The jailer artifact must be executable."
+[ -x "$ARTIFACT_DIR/awf-firecracker-supervisor" ] \
+  || fail "The guest supervisor artifact must be executable."
 "$ARTIFACT_DIR/firecracker" --version | grep -Fq '1.16.1' \
   || fail "Firecracker v1.16.1 is required."
 "$ARTIFACT_DIR/jailer" --version | grep -Fq '1.16.1' \

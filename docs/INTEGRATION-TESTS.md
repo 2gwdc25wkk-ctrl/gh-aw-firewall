@@ -210,9 +210,11 @@ supervisor — from pinned, SHA-256 verified sources. Attests provenance. Upload
 as a 7-day workflow artifact.
 
 **Live job** (`ubuntu-24.04`): Runs on a GitHub-hosted x64 runner, downloads the
-build artifact, verifies all five SHA-256 digests, and runs the live
-smoke/security suite. The preflight requires usable KVM and fails closed if
-`/dev/kvm` or another required host capability is unavailable.
+build artifact, restores executable modes stripped by artifact transport,
+grants the workflow user access to `/dev/kvm`, verifies all five SHA-256
+digests, and runs the live smoke/security suite. The preflight requires usable
+KVM and fails closed if `/dev/kvm` or another required host capability is
+unavailable.
 
 Live assertions (see `scripts/ci/firecracker-live-smoke.sh`):
 

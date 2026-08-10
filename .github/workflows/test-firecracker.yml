@@ -98,6 +98,13 @@ jobs:
           name: firecracker-test-x86_64
           path: ${{ runner.temp }}/firecracker-test-x86_64
 
+      - name: Restore executable artifact modes
+        run: |
+          chmod 755 \
+            "$RUNNER_TEMP/firecracker-test-x86_64/firecracker" \
+            "$RUNNER_TEMP/firecracker-test-x86_64/jailer" \
+            "$RUNNER_TEMP/firecracker-test-x86_64/awf-firecracker-supervisor"
+
       - name: Grant workflow user access to KVM
         run: |
           if [ -e /dev/kvm ]; then

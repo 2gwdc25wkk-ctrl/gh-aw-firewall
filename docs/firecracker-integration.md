@@ -948,16 +948,18 @@ host capability.
 
 It:
 
-1. Downloads the `firecracker-test-x86_64` artifact from the build job
-2. Runs `scripts/ci/firecracker-host-preflight.sh` — verifies Linux, x86_64,
+1. Downloads the `firecracker-test-x86_64` artifact from the build job and
+   restores executable modes stripped by GitHub artifact transport
+2. Grants the workflow user access to the hosted runner's `/dev/kvm`
+3. Runs `scripts/ci/firecracker-host-preflight.sh` — verifies Linux, x86_64,
    `/dev/kvm`, required tools, Firecracker/jailer version strings, and all five
    SHA-256 digests via `sha256sum --check --strict SHA256SUMS`
-3. Installs NPM dependencies, builds the AWF distribution, and builds the
+4. Installs NPM dependencies, builds the AWF distribution, and builds the
    Squid and API proxy container images locally
-4. Runs `scripts/ci/firecracker-live-smoke.sh` — the live test suite
-5. Collects redacted diagnostics (audit, proxy-logs, stdout/stderr) and scans
+5. Runs `scripts/ci/firecracker-live-smoke.sh` — the live test suite
+6. Collects redacted diagnostics (audit, proxy-logs, stdout/stderr) and scans
    for the secret sentinel before uploading
-6. Enforces final residue cleanup of all `awffc-*` network namespaces
+7. Enforces final residue cleanup of all `awffc-*` network namespaces
 
 ### Live smoke test assertions
 
