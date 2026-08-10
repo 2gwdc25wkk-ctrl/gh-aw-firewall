@@ -102,7 +102,7 @@ run_case dns-denial 0 \
 run_case metadata-denial 0 \
   'unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy; ! wget -T 3 -qO- http://169.254.169.254/latest/meta-data/'
 run_case api-proxy-reflect 0 \
-  'wget -qO /tmp/reflect http://172.30.0.30:10000/reflect && grep -q "providers" /tmp/reflect && ! env | grep -F "awf-firecracker-real-secret-do-not-expose"'
+  'wget -qO /tmp/reflect http://172.30.0.30:10000/reflect && grep -q "providers" /tmp/reflect && ! env | grep -F "awf-firecracker-real-secret-do-not-""expose"'
 
 run_case workspace-copyback 0 \
   'printf changed > .hidden && mkdir -p bin && printf "#!/bin/sh\necho ok\n" > bin/run && chmod 755 bin/run && ln -s bin/run run-link'
