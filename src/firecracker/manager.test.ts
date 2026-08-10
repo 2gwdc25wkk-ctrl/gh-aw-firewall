@@ -102,6 +102,8 @@ function dependencies(
     }),
     launch: jest.fn().mockReturnValue(processMock()),
     mkdir: jest.fn().mockResolvedValue(undefined),
+    mkdtemp: jest.fn().mockResolvedValue('/tmp/awf-fc-sockets-test'),
+    symlink: jest.fn().mockResolvedValue(undefined),
     copyFile: jest.fn().mockResolvedValue(undefined),
     chmod: jest.fn().mockResolvedValue(undefined),
     chown: jest.fn().mockResolvedValue(undefined),
@@ -408,7 +410,7 @@ describe('FirecrackerManager', () => {
       });
       await manager.startInstance();
       expect(deps.createVsockClient).toHaveBeenCalledWith(
-        '/tmp/awf/firecracker-jailer/firecracker/guest/root/run/awf-vsock.socket',
+        '/tmp/awf-fc-sockets-test/run/awf-vsock.socket',
         52,
         1,
       );
@@ -538,7 +540,10 @@ describe('FirecrackerManager', () => {
       expect(workspace.extractAfterStop).toHaveBeenCalledTimes(1);
       expect(lifecycle.cleanup).not.toHaveBeenCalled();
       expect(workspace.cleanup).not.toHaveBeenCalled();
-      expect(deps.rm).not.toHaveBeenCalled();
+      expect(deps.rm).toHaveBeenCalledWith(
+        '/tmp/awf-fc-sockets-test',
+        { recursive: true, force: true },
+      );
   });
 
   it('builds explicit supervisor boot networking without widening policy', () => {

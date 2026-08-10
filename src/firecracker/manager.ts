@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import { constants, promises as fs } from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import execa, { type ExecaChildProcess } from 'execa';
 import {
@@ -67,6 +68,8 @@ export interface FirecrackerManagerDependencies {
     },
   ): ExecaChildProcess<string>;
   mkdir(directory: string, options: { recursive: true; mode: number }): Promise<unknown>;
+  mkdtemp(prefix: string): Promise<string>;
+  symlink(target: string, path: string, type: 'dir'): Promise<void>;
   copyFile(source: string, destination: string, flags: number): Promise<void>;
   chmod(filePath: string, mode: number): Promise<void>;
   chown(filePath: string, uid: number, gid: number): Promise<void>;
@@ -117,6 +120,8 @@ const defaultDependencies: FirecrackerManagerDependencies = {
   preflight: runFirecrackerPreflight,
   launch: (command, args, options) => execa(command, args, options),
   mkdir: fs.mkdir,
+  mkdtemp: fs.mkdtemp,
+  symlink: fs.symlink,
   copyFile: fs.copyFile,
   chmod: fs.chmod,
   chown: fs.chown,
@@ -213,6 +218,9 @@ export class FirecrackerManager {
   private workspace: FirecrackerWorkspaceImage | undefined;
   private guestClient: FirecrackerVsockClient | undefined;
   private networkPlan: FirecrackerNetworkPlan | undefined;
+  private socketBridgeDirectory: string | undefined;
+  private apiSocketPath: string | undefined;
+  private vsockSocketPath: string | undefined;
   private instanceStarted = false;
   private readonly stdoutCapture = new BoundedOutputCapture(FIRECRACKER_CAPTURE_LIMIT_BYTES);
   private readonly stderrCapture = new BoundedOutputCapture(FIRECRACKER_CAPTURE_LIMIT_BYTES);
@@ -280,6 +288,19 @@ export class FirecrackerManager {
         recursive: true,
         mode: 0o700,
       });
+      this.socketBridgeDirectory = await this.dependencies.mkdtemp(
+        path.join(os.tmpdir(), 'awf-fc-sockets-'),
+      );
+      const socketBridgeRunDirectory = path.join(this.socketBridgeDirectory, 'run');
+      await this.dependencies.symlink(
+        path.join(this.paths.jailRoot, 'run'),
+        socketBridgeRunDirectory,
+        'dir',
+      );
+      const apiSocketPath = path.join(socketBridgeRunDirectory, API_SOCKET_NAME);
+      const vsockSocketPath = path.join(socketBridgeRunDirectory, VSOCK_SOCKET_NAME);
+      this.apiSocketPath = apiSocketPath;
+      this.vsockSocketPath = vsockSocketPath;
 
       this.process = this.dependencies.launch(
         this.config.jailerBinary,
@@ -307,7 +328,7 @@ export class FirecrackerManager {
         this.stderrCapture.append(chunk);
       });
 
-      await this.waitForApiSocket();
+      await this.waitForApiSocket(apiSocketPath);
       await this.stageArtifact(artifacts.kernelPath, this.paths.kernelPath, 0o400, identity);
       await this.stageArtifact(rootfsSource, this.paths.rootfsPath, 0o600, identity);
       if (workspaceSource) {
@@ -315,7 +336,7 @@ export class FirecrackerManager {
       }
 
       this.client = this.dependencies.createClient(
-        this.paths.apiSocketPath,
+        apiSocketPath,
         this.config.apiTimeoutMs,
       );
       await this.stageDiagnosticFile(this.paths.logPath, identity);
@@ -380,7 +401,7 @@ export class FirecrackerManager {
     this.instanceStarted = true;
     if (this.guestConfig) {
       this.guestClient = this.dependencies.createVsockClient(
-        this.paths.vsockSocketPath,
+        this.vsockSocketPath ?? this.paths.vsockSocketPath,
         this.guestConfig.vsockPort ?? FIRECRACKER_GUEST_VSOCK_PORT,
         this.config.apiTimeoutMs,
       );
@@ -489,6 +510,20 @@ export class FirecrackerManager {
     }
     this.process = undefined;
     this.client = undefined;
+
+    if (this.socketBridgeDirectory) {
+      try {
+        await this.dependencies.rm(
+          this.socketBridgeDirectory,
+          { recursive: true, force: true },
+        );
+        this.socketBridgeDirectory = undefined;
+        this.apiSocketPath = undefined;
+        this.vsockSocketPath = undefined;
+      } catch (error) {
+        errors.push(error);
+      }
+    }
 
     if (this.workspace && instanceWasStarted) {
       try {
@@ -599,7 +634,7 @@ export class FirecrackerManager {
     );
   }
 
-  private async waitForApiSocket(): Promise<void> {
+  private async waitForApiSocket(apiSocketPath: string): Promise<void> {
     const deadline = Date.now() + this.config.apiTimeoutMs;
     while (Date.now() < deadline) {
       if (this.process && (this.process.exitCode != null || this.process.signalCode != null)) {
@@ -609,7 +644,7 @@ export class FirecrackerManager {
         );
       }
       try {
-        await this.dependencies.access(this.paths.apiSocketPath);
+        await this.dependencies.access(apiSocketPath);
         return;
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
@@ -619,7 +654,7 @@ export class FirecrackerManager {
     }
     throw new Error(
       `Firecracker API socket was not ready after ${this.config.apiTimeoutMs}ms: ` +
-      this.paths.apiSocketPath,
+      apiSocketPath,
     );
   }
 
