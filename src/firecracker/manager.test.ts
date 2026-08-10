@@ -434,7 +434,9 @@ describe('FirecrackerManager', () => {
   it('retries while the booting guest has not started listening on vsock', async () => {
       const firstClient = {
         connect: jest.fn().mockRejectedValue(
-          new Error('Firecracker guest disconnected before readiness'),
+          Object.assign(new Error('connect ECONNREFUSED /tmp/awf-vsock.socket'), {
+            code: 'ECONNREFUSED',
+          }),
         ),
         destroy: jest.fn(),
       } as unknown as FirecrackerVsockClient;

@@ -137,7 +137,7 @@ func mountWorkspace(config bootConfig) error {
 	if err := os.MkdirAll(config.WorkspaceMount, 0755); err != nil {
 		return fmt.Errorf("create workspace mount: %w", err)
 	}
-	if err := syscall.Mount(config.WorkspaceDevice, config.WorkspaceMount, "", 0, ""); err != nil {
+	if err := syscall.Mount(config.WorkspaceDevice, config.WorkspaceMount, "ext4", 0, ""); err != nil {
 		return fmt.Errorf("mount workspace: %w", err)
 	}
 	return nil

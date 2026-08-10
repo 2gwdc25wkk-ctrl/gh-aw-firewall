@@ -733,6 +733,7 @@ function formatError(error: unknown): string {
 }
 
 function isRetryableGuestConnectError(error: unknown): boolean {
+  if ((error as NodeJS.ErrnoException)?.code === 'ECONNREFUSED') return true;
   const message = formatError(error);
   return message === 'Firecracker guest disconnected before readiness' ||
     /^Firecracker vsock CONNECT failed: ERR 111(?:\D|$)/.test(message);
