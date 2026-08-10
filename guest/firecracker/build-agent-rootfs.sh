@@ -83,12 +83,26 @@ mkdir -p "$rootfs_tree"
 cat >"$BUILD/install-packages.sh" <<EOF
 #!/bin/sh
 set -eu
+# The snapshot archive is fetched over HTTP on purpose: the digest-pinned base
+# ships no ca-certificates, so an HTTPS index could not be verified at all here
+# (that is the very package this stage installs). Integrity does not rest on
+# transport: apt verifies the snapshot's detached OpenPGP signature against the
+# debian-archive-keyring baked into the digest-pinned base image, and the
+# snapshot timestamp pins exactly which signed index is accepted. Insecure and
+# unauthenticated repositories are refused explicitly below, so a stripped
+# signature fails the build rather than silently downgrading.
 cat >/etc/apt/sources.list <<SOURCES
-deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ ${DEBIAN_SUITE} main
-deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ ${DEBIAN_SUITE}-security main
+deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ ${DEBIAN_SUITE} main
+deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ ${DEBIAN_SUITE}-security main
 SOURCES
 rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-echo 'Acquire::Check-Valid-Until "false";' >/etc/apt/apt.conf.d/99-awf-snapshot
+cat >/etc/apt/apt.conf.d/99-awf-snapshot <<APTCONF
+Acquire::Check-Valid-Until "false";
+Acquire::AllowInsecureRepositories "false";
+Acquire::AllowDowngradeToInsecureRepositories "false";
+APT::Get::AllowUnauthenticated "false";
+APTCONF
+test -s /usr/share/keyrings/debian-archive-keyring.gpg
 export DEBIAN_FRONTEND=noninteractive
 apt-get -o Acquire::Retries=3 update
 apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \\
@@ -148,9 +162,18 @@ download_verified \
   "$node_tar"
 mkdir -p "$rootfs_tree/opt/node"
 tar --extract --xz --file "$node_tar" --directory "$rootfs_tree/opt/node" --strip-components=1
-ln -sf ../../opt/node/bin/node "$rootfs_tree/usr/local/bin/node"
-ln -sf ../../opt/node/bin/npm "$rootfs_tree/usr/local/bin/npm"
-ln -sf ../../opt/node/bin/npx "$rootfs_tree/usr/local/bin/npx"
+# /usr/local/bin needs three levels to reach /, not two.
+mkdir -p "$rootfs_tree/usr/local/bin"
+ln -sf ../../../opt/node/bin/node "$rootfs_tree/usr/local/bin/node"
+ln -sf ../../../opt/node/bin/npm "$rootfs_tree/usr/local/bin/npm"
+ln -sf ../../../opt/node/bin/npx "$rootfs_tree/usr/local/bin/npx"
+for link in node npm npx; do
+  test -x "$rootfs_tree/usr/local/bin/$link" ||
+    {
+      echo "node runtime link is dangling: /usr/local/bin/$link" >&2
+      exit 1
+    }
+done
 
 # --- CA bundle, pinned by checksum ------------------------------------------
 ca_bundle="$BUILD/downloads/cacert-${CA_BUNDLE_DATE}.pem"
@@ -339,5 +362,19 @@ tar \
   manifest.json \
   packages.tsv \
   sbom.spdx.json
+
+# The build must run as root for ownership fidelity, but `umask 077` then leaves
+# the artifacts unreadable to the invoking user. CI checksums, attests and
+# uploads them unprivileged, so hand the output tree back to the real caller.
+output_parent=$(dirname -- "$OUTPUT")
+if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
+  chown -R "$SUDO_UID:$SUDO_GID" "$OUTPUT"
+  chown "$SUDO_UID:$SUDO_GID" "$output_parent" 2>/dev/null || true
+fi
+# The parent is created by this script under the same umask, so it needs to be
+# traversable too or the artifacts stay unreachable regardless of their own mode.
+chmod 0755 "$output_parent" "$OUTPUT"
+find "$OUTPUT" -type f -exec chmod 0644 {} +
+chmod 0755 "$OUTPUT/awf-firecracker-supervisor"
 
 echo "agent rootfs written to $OUTPUT"

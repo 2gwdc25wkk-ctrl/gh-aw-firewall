@@ -260,3 +260,87 @@ describe('FirecrackerExchangeImage', () => {
     await expect(image.extractAfterStop()).rejects.toThrow(/must not traverse a symlink/);
   });
 });
+
+describe('FirecrackerExchangeImage failure and ownership handling', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await makeTempRoot('awf-exchange-fail-');
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  async function makeImage(
+    overrides: Partial<FirecrackerSafeOutputsOptions> = {},
+    write?: (destination: string) => Promise<void>,
+  ) {
+    const runDirectory = path.join(root, 'run');
+    await fs.mkdir(runDirectory, { recursive: true, mode: 0o700 });
+    const hostDirectory = path.join(root, 'outputs');
+    const plan = resolveFirecrackerExchangePlan(
+      safeOutputs({ hostDirectory, maxTotalBytes: 4096, maxFileBytes: 2048, ...overrides }),
+    );
+    const image = new FirecrackerExchangeImage(
+      {
+        runId: 'run-1',
+        runDirectory,
+        plan,
+        uid: process.getuid?.() ?? 0,
+        gid: process.getgid?.() ?? 0,
+      },
+      {
+        runTool: async (command) => {
+          if (command === 'mke2fs') {
+            await fs.writeFile(path.join(runDirectory, 'exchange.ext4'), 'image');
+          }
+          if (command === 'debugfs') {
+            const destination = image.extractionDirectory;
+            const outputs = path.join(destination, FIRECRACKER_EXCHANGE_OUTPUT_DIRNAME);
+            await fs.mkdir(outputs, { recursive: true });
+            await fs.writeFile(path.join(destination, FIRECRACKER_EXCHANGE_MARKER), '{}');
+            if (write) await write(outputs);
+            else await fs.writeFile(path.join(outputs, 'outputs.jsonl'), '{}\n');
+          }
+        },
+      },
+    );
+    return { image, hostDirectory };
+  }
+
+  it('publishes nothing when the copy-back breaches a cap', async () => {
+    // A truncated run directory is indistinguishable from a complete result.
+    const { image, hostDirectory } = await makeImage(
+      { maxFileBytes: 8, maxTotalBytes: 8 },
+      async (outputs) => {
+        await fs.writeFile(path.join(outputs, 'a.jsonl'), 'x'.repeat(4));
+        await fs.writeFile(path.join(outputs, 'b.jsonl'), 'y'.repeat(4096));
+      },
+    );
+    await image.prepare();
+
+    await expect(image.extractAfterStop()).rejects.toThrow();
+
+    const published = await fs.readdir(path.join(hostDirectory, 'run-1')).catch(() => undefined);
+    expect(published).toBeUndefined();
+  });
+
+  it('refuses a pre-existing safe-output root that other users can write', async () => {
+    const hostDirectory = path.join(root, 'outputs');
+    await fs.mkdir(hostDirectory, { recursive: true, mode: 0o700 });
+    await fs.chmod(hostDirectory, 0o777);
+    const { image } = await makeImage();
+    await image.prepare();
+
+    await expect(image.extractAfterStop()).rejects.toThrow(/group- or world-writable/);
+  });
+
+  it('creates the per-run destination exclusively', async () => {
+    const { image, hostDirectory } = await makeImage();
+    await image.prepare();
+    await fs.mkdir(path.join(hostDirectory, 'run-1'), { recursive: true, mode: 0o700 });
+
+    await expect(image.extractAfterStop()).rejects.toThrow();
+  });
+});

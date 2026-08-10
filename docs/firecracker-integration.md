@@ -1250,8 +1250,10 @@ absolute, canonical, traversal-free path. A root that is configured explicitly
 and does not exist is a hard error (it is almost always a typo); a root that was
 merely defaulted and does not exist is skipped with a warning.
 
-An absent `gh-aw` subtree under a present root is also skipped — a repository
-that does not use gh-aw stages nothing and boots normally.
+An absent `gh-aw` subtree under a present root is skipped. If *no* root yields a
+`gh-aw` subtree the run fails instead of booting: staging was asked for
+explicitly, so an empty result means the caller would otherwise get a guest that
+fails mysteriously partway through the agent rather than at configuration time.
 
 ### Guest layout
 
@@ -1267,7 +1269,7 @@ that does not use gh-aw stages nothing and boots normally.
 /workspace            the only writable filesystem that is copied back to the host
 ```
 
-The supervisor mounts the runtime device `ro,nosuid,nodev,noexec` and re-applies
+The supervisor mounts the runtime device `ro,nosuid,nodev` and re-applies
 `MS_RDONLY` to each bind so a read-write remount inside the guest cannot make it
 writable. Device letters are computed host-side from drive-registration order;
 each device carries a marker file, and the supervisor fails closed if the marker
@@ -1290,8 +1292,15 @@ present when `--firecracker-safe-outputs-dir` is supplied.
 
 Every staged and copied-back byte passes through one bounded copier:
 
-- Directory traversal opens each component with `O_NOFOLLOW`; a symlink
-  encountered as a path component is a hard failure, not a silent skip.
+- Traversal is descriptor-pinned: each directory is opened `O_DIRECTORY|O_NOFOLLOW`
+  and its children are reached through that open descriptor, never by
+  re-resolving a pathname. `O_NOFOLLOW` alone would only protect the final
+  component, so swapping an intermediate directory for a symlink mid-walk could
+  otherwise redirect the copy outside the approved tree. A symlink encountered
+  as a path component is a hard failure, not a silent skip.
+- Destination roots must be exclusively created, mode `0700`, and owned by AWF
+  or the target user; a group- or world-writable root is refused so it cannot be
+  substituted after creation.
 - Regular files are copied with an exclusive `O_CREAT|O_EXCL` `0600` create
   (directories `0700`), so an attacker cannot pre-create the destination.
 - The source is `fstat`-ed before and after the copy; a size, inode, device, or
@@ -1447,4 +1456,11 @@ Inside the guest the agent reads its compiler assets from
 `/awf/runner-temp/gh-aw` and `/tmp/gh-aw` (read-only), writes safe outputs to
 `$GITHUB_AW_SAFE_OUTPUTS`, and does all other work in `/workspace`. After the VM
 stops, `/workspace` is copied back to the host workspace and the safe outputs
-appear in `$RUNNER_TEMP/awf-safe-outputs`.
+appear in a per-run subdirectory, `$RUNNER_TEMP/awf-safe-outputs/<runId>`, which
+is created exclusively so one run can never merge into or overwrite another's
+results.
+
+If the copy-back fails — a cap breach, for example — nothing is published under
+that subdirectory, and the exchange image is deliberately left in the jail so
+the run's results can still be recovered by hand. The error names the retained
+path.

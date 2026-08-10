@@ -99,6 +99,37 @@ describe('Firecracker agent rootfs build contract', () => {
     expect(verifier).toMatch(/special filesystem inode in image/);
   });
 
+  it('does not need CA certificates before it can install them', () => {
+    // The pinned Debian base ships no ca-certificates, so an HTTPS apt index
+    // could never be verified at this stage. Integrity comes from apt's OpenPGP
+    // signature check instead, which must stay mandatory.
+    expect(builder).not.toMatch(/deb .*https:\/\/snapshot\.debian\.org/);
+    expect(builder).toMatch(/deb .*http:\/\/snapshot\.debian\.org/);
+    expect(builder).toContain('AllowInsecureRepositories "false"');
+    expect(builder).toContain('AllowUnauthenticated "false"');
+    expect(builder).toContain('debian-archive-keyring.gpg');
+  });
+
+  it('links the Node runtime with a path that actually resolves', () => {
+    // /usr/local/bin needs three levels to reach /, not two.
+    expect(builder).not.toMatch(/ln -sf \.\.\/\.\.\/opt\/node/);
+    expect(builder).toMatch(/ln -sf \.\.\/\.\.\/\.\.\/opt\/node\/bin\/node/);
+    expect(builder).toMatch(/dangling/);
+  });
+
+  it('hands the artifacts back to the invoking user', () => {
+    // The build must run as root, but CI checksums, attests and uploads
+    // unprivileged, and umask 077 would otherwise make that impossible.
+    expect(builder).toContain('SUDO_UID');
+    expect(builder).toMatch(/chmod 0755 "\$output_parent" "\$OUTPUT"/);
+  });
+
+  it('does not let its own cleanup trap fail a successful verification', () => {
+    // Under `set -e` the trap's last command becomes the exit status.
+    expect(verifier).not.toMatch(/^\s*\[ -n "\$extracted" \] && rm/m);
+    expect(verifier).toMatch(/return 0/);
+  });
+
   it('verifies the published image without ever writing to it', () => {
     expect(builder).toContain('verify-agent-rootfs.sh');
     expect(verifier).toContain('rdump /');

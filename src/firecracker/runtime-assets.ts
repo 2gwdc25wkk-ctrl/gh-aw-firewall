@@ -393,6 +393,7 @@ export function firecrackerForbiddenStagingBasenames(): readonly string[] {
     '.ssh', '.aws', '.azure', '.kube', '.gnupg', '.docker', '.gcloud',
     '.netrc', '_netrc', '.git-credentials', '.npmrc', '.dockercfg', '.pypirc',
     'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa',
+    'credentials.json',
   ]);
   for (const entry of CREDENTIAL_ENTRIES) {
     const top = entry.path.split('/')[0];

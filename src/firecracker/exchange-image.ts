@@ -197,7 +197,7 @@ export class FirecrackerExchangeImage {
       }
       await fs.chmod(outputs, 0o700);
       const destination = await this.prepareHostDirectory();
-      const totals = await copyBoundedTree(
+      const totals = await this.copyOrDiscard(destination, () => copyBoundedTree(
         {
           sourceRoot: outputs,
           destinationRoot: destination,
@@ -211,14 +211,35 @@ export class FirecrackerExchangeImage {
           maxTotalBytes: this.config.plan.maxTotalBytes,
           maxFileCount: this.config.plan.maxFileCount,
         }),
-      );
+      ));
       // Handed to the invoking user only after the bounded copy has finished
       // proving the destination was AWF-owned for the whole copy-back.
       await this.applyOwnership(destination);
       this.extracted = true;
       return totals;
     } finally {
-      await fs.rm(this.extractionDirectory, { recursive: true, force: true });
+      // Never let cleanup replace a real extraction failure.
+      await fs.rm(this.extractionDirectory, { recursive: true, force: true })
+        .catch(() => undefined);
+    }
+  }
+
+  /**
+   * Publishes nothing on failure.
+   *
+   * A cap breach part-way through would otherwise leave a truncated run
+   * directory that looks like a complete result, and the caller has no way to
+   * tell the two apart.
+   */
+  private async copyOrDiscard(
+    destination: string,
+    copy: () => Promise<BoundedCopyTotals>,
+  ): Promise<BoundedCopyTotals> {
+    try {
+      return await copy();
+    } catch (error) {
+      await fs.rm(destination, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
     }
   }
 
@@ -242,7 +263,10 @@ export class FirecrackerExchangeImage {
     }
     // A pre-existing root that another user can write lets them substitute the
     // run directory after AWF creates it, so refuse it outright.
-    await assertPrivateHostDirectory(root, 'safe-output directory');
+    await assertPrivateHostDirectory(root, 'safe-output directory', [this.config.uid]);
+    // A root this process just created as root would otherwise be untraversable
+    // by the user the outputs belong to.
+    await this.applyOwnership(root);
     const destination = path.join(root, this.config.runId);
     assertContained(root, destination, 'safe-output destination');
     await fs.mkdir(destination, { mode: 0o700 });

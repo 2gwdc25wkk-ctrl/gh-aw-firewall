@@ -212,9 +212,12 @@ describe('firecrackerForbiddenStagingBasenames', () => {
     for (const name of ['.ssh', '.aws', '.docker', '.netrc', '.git-credentials', 'id_rsa']) {
       expect(forbidden).toContain(name);
     }
-    for (const name of ['config', 'config.json', 'credentials.json', 'package.json']) {
+    for (const name of ['config', 'config.json', 'package.json']) {
       expect(forbidden).not.toContain(name);
     }
+    // Fails closed: a gh-aw asset that genuinely needs this name would abort the
+    // run with a clear message rather than silently shipping a credential store.
+    expect(forbidden).toContain('credentials.json');
   });
 });
 

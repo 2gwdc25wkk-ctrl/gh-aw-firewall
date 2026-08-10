@@ -123,31 +123,54 @@ func mountProc() error {
 
 func shutdownGuest(config bootConfig) error {
 	syscall.Sync()
-	// Unmount in reverse dependency order so every device is flushed and
-	// detached before the host is allowed to read any of them back.
-	for i := len(config.RuntimeBinds) - 1; i >= 0; i-- {
-		if err := syscall.Unmount(config.RuntimeBinds[i].Target, 0); err != nil {
-			return fmt.Errorf("unmount runtime bind %s: %w", config.RuntimeBinds[i].Target, err)
+	// Mount order is workspace, runtime assets, runtime binds, exchange, so the
+	// exact reverse detaches each device only once nothing is layered over it.
+	//
+	// Every unmount is attempted even after one fails, and errors are collected
+	// rather than returned early: giving up partway would leave the writable
+	// exchange mounted and skip the power-off entirely, so the host would either
+	// hang waiting for the VM or read back a filesystem that was never flushed.
+	var problems []error
+	for _, step := range unmountPlan(config) {
+		if err := syscall.Unmount(step.Target, 0); err != nil {
+			problems = append(problems, fmt.Errorf("unmount %s: %w", step.Label, err))
 		}
 	}
-	if config.RuntimeMount != "" {
-		if err := syscall.Unmount(config.RuntimeMount, 0); err != nil {
-			return fmt.Errorf("unmount runtime assets: %w", err)
-		}
-	}
-	if config.ExchangeMount != "" {
-		if err := syscall.Unmount(config.ExchangeMount, 0); err != nil {
-			return fmt.Errorf("unmount exchange: %w", err)
-		}
-	}
-	if err := syscall.Unmount(config.WorkspaceMount, 0); err != nil {
-		return fmt.Errorf("unmount workspace: %w", err)
-	}
+
+	// Flush unconditionally: a device that refused to unmount still has dirty
+	// pages the host is about to read.
 	syscall.Sync()
 	if err := syscall.Reboot(syscall.LINUX_REBOOT_CMD_POWER_OFF); err != nil {
-		return fmt.Errorf("power off guest: %w", err)
+		problems = append(problems, fmt.Errorf("power off guest: %w", err))
 	}
-	return nil
+	return errors.Join(problems...)
+}
+
+// unmountStep is one entry in the shutdown order.
+type unmountStep struct {
+	Target string
+	Label  string
+}
+
+// unmountPlan returns the exact reverse of the mount order, skipping devices
+// that were never attached. Kept separate from the syscalls so the ordering
+// itself is testable.
+func unmountPlan(config bootConfig) []unmountStep {
+	var plan []unmountStep
+	add := func(target string, label string) {
+		if target == "" {
+			return
+		}
+		plan = append(plan, unmountStep{Target: target, Label: label})
+	}
+
+	add(config.ExchangeMount, "exchange")
+	for i := len(config.RuntimeBinds) - 1; i >= 0; i-- {
+		add(config.RuntimeBinds[i].Target, "runtime bind "+config.RuntimeBinds[i].Target)
+	}
+	add(config.RuntimeMount, "runtime assets")
+	add(config.WorkspaceMount, "workspace")
+	return plan
 }
 
 const (
@@ -162,6 +185,8 @@ func mountRuntimeAssets(config bootConfig) error {
 	if config.RuntimeMount == "" {
 		return nil
 	}
+	// Deliberately not MS_NOEXEC: staged gh-aw engine and MCP executables are
+	// meant to run from here. MS_RDONLY plus MS_NOSUID is what keeps that safe.
 	const flags = syscall.MS_RDONLY | syscall.MS_NOSUID | syscall.MS_NODEV
 	if err := mountBlockDevice(config.RuntimeDevice, config.RuntimeMount, flags, 0555); err != nil {
 		return fmt.Errorf("mount runtime assets: %w", err)

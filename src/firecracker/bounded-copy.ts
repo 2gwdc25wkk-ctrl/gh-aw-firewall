@@ -380,6 +380,7 @@ async function assertExclusivelyCreatedDirectory(
 export async function assertPrivateHostDirectory(
   directory: string,
   label: string,
+  allowedOwnerUids: number[] = [],
 ): Promise<void> {
   const pinned = await pinDirectory(directory, directory, label);
   try {
@@ -390,10 +391,18 @@ export async function assertPrivateHostDirectory(
         `0${(stat.mode & 0o777).toString(8)}: ${directory}`,
       );
     }
-    const uid = process.getuid?.();
-    if (uid !== undefined && stat.uid !== uid) {
+    const self = process.getuid?.();
+    // Under sudo the directory legitimately belongs to the invoking user rather
+    // than to root, and that user is the one the outputs are destined for. Any
+    // other owner is a third party who could swap the directory out from under
+    // a privileged write.
+    const owners = new Set(
+      [self, ...allowedOwnerUids].filter((uid): uid is number => uid !== undefined),
+    );
+    if (owners.size > 0 && !owners.has(stat.uid)) {
       throw new Error(
-        `Firecracker ${label} must be owned by the AWF process: ${directory}`,
+        `Firecracker ${label} must be owned by the AWF process or the target ` +
+        `user, found uid ${stat.uid}: ${directory}`,
       );
     }
   } finally {

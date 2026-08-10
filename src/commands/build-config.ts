@@ -331,6 +331,25 @@ function buildFirecrackerGhAwRuntime(
   ].some((key) => options[key] !== undefined);
   if (!touched) return undefined;
 
+  // A subordinate flag without its enabler is almost always a typo or a stale
+  // command line, and silently ignoring it means the run appears to stage
+  // assets or collect outputs when it does neither.
+  if (!enabled) {
+    throw new Error(
+      'gh-aw runtime staging flags require --firecracker-gh-aw-runtime',
+    );
+  }
+  const orphanedSafeOutputFlags = [
+    ['firecrackerSafeOutputsMaxFileBytes', '--firecracker-safe-outputs-max-file-bytes'],
+    ['firecrackerSafeOutputsMaxTotalBytes', '--firecracker-safe-outputs-max-total-bytes'],
+    ['firecrackerSafeOutputsMaxFiles', '--firecracker-safe-outputs-max-files'],
+  ].filter(([key]) => options[key] !== undefined).map(([, flag]) => flag);
+  if (safeOutputsDirectory === undefined && orphanedSafeOutputFlags.length > 0) {
+    throw new Error(
+      `${orphanedSafeOutputFlags.join(', ')} require --firecracker-safe-outputs-dir`,
+    );
+  }
+
   return {
     enabled,
     runnerTempPath: options.firecrackerGhAwRunnerTemp as string | undefined,

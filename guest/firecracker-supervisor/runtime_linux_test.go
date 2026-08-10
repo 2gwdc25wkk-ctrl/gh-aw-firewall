@@ -28,3 +28,40 @@ func TestResolveCommandRejectsRelativeExecutablePath(t *testing.T) {
 		t.Fatal("expected relative executable path to fail")
 	}
 }
+
+func TestUnmountPlanIsExactReverseOfMountOrder(t *testing.T) {
+	config := bootConfig{
+		WorkspaceMount: "/workspace",
+		RuntimeMount:   "/awf/runtime",
+		ExchangeMount:  "/awf/exchange",
+		RuntimeBinds: []runtimeBind{
+			{ID: "runner-temp", Target: "/awf/runner-temp/gh-aw"},
+			{ID: "compiler-tmp", Target: "/tmp/gh-aw"},
+		},
+	}
+
+	want := []string{
+		"/awf/exchange",
+		"/tmp/gh-aw",
+		"/awf/runner-temp/gh-aw",
+		"/awf/runtime",
+		"/workspace",
+	}
+	plan := unmountPlan(config)
+	if len(plan) != len(want) {
+		t.Fatalf("unmount plan length = %d, want %d", len(plan), len(want))
+	}
+	for i, step := range plan {
+		if step.Target != want[i] {
+			t.Fatalf("unmount plan[%d] = %q, want %q", i, step.Target, want[i])
+		}
+	}
+}
+
+func TestUnmountPlanSkipsAbsentOptionalDevices(t *testing.T) {
+	// A workspace-only guest must still produce a valid, workspace-last plan.
+	plan := unmountPlan(bootConfig{WorkspaceMount: "/workspace"})
+	if len(plan) != 1 || plan[0].Target != "/workspace" {
+		t.Fatalf("unmount plan = %+v, want workspace only", plan)
+	}
+}

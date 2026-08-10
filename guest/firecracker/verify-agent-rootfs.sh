@@ -19,7 +19,13 @@ image=
 extracted=
 
 cleanup() {
-  [ -n "$extracted" ] && rm -rf -- "$extracted"
+  # Must end in a success status: under `set -e` the trap's last command becomes
+  # the script's exit status, so a bare `[ -n "$extracted" ] && rm` would fail
+  # every tree-mode verification.
+  if [ -n "$extracted" ]; then
+    rm -rf -- "$extracted"
+  fi
+  return 0
 }
 trap cleanup EXIT
 

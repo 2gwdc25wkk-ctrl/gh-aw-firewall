@@ -623,11 +623,12 @@ describe('Firecracker gh-aw runtime staging configuration', () => {
     });
   });
 
-  it('records explicit caps and paths without enabling staging implicitly', () => {
+  it('records explicit caps and paths when staging is enabled', () => {
     const config = buildConfig(makeInputs({
       options: {
         ...makeInputs().options,
         containerRuntime: 'firecracker',
+        firecrackerGhAwRuntime: true,
         firecrackerGhAwRunnerTemp: '/runner/_temp',
         firecrackerGhAwCompilerTmp: '/var/tmp',
         firecrackerGhAwMaxFileBytes: '1024',
@@ -637,7 +638,7 @@ describe('Firecracker gh-aw runtime staging configuration', () => {
     }));
 
     expect(config.firecracker?.ghAwRuntime).toEqual({
-      enabled: false,
+      enabled: true,
       runnerTempPath: '/runner/_temp',
       compilerTmpPath: '/var/tmp',
       maxFileBytes: 1024,
@@ -645,6 +646,28 @@ describe('Firecracker gh-aw runtime staging configuration', () => {
       maxFileCount: 12,
       safeOutputs: undefined,
     });
+  });
+
+  it('rejects staging flags that are given without the enabling flag', () => {
+    // Accepting these silently would report a staged run that staged nothing.
+    expect(() => buildConfig(makeInputs({
+      options: {
+        ...makeInputs().options,
+        containerRuntime: 'firecracker',
+        firecrackerGhAwRunnerTemp: '/runner/_temp',
+      },
+    }))).toThrow('--firecracker-gh-aw-runtime');
+  });
+
+  it('rejects safe-output caps that are given without a safe-output directory', () => {
+    expect(() => buildConfig(makeInputs({
+      options: {
+        ...makeInputs().options,
+        containerRuntime: 'firecracker',
+        firecrackerGhAwRuntime: true,
+        firecrackerSafeOutputsMaxFiles: '5',
+      },
+    }))).toThrow('--firecracker-safe-outputs-dir');
   });
 
   it('builds the safe-output exchange only when a host directory is given', () => {

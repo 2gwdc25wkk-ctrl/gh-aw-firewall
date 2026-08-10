@@ -589,10 +589,12 @@ export class FirecrackerManager {
         errors.push(error);
       }
     }
+    let exchangeExtractionFailed = false;
     if (this.exchange && instanceWasStarted) {
       try {
         await this.exchange.extractAfterStop(this.paths.exchangePath);
       } catch (error) {
+        exchangeExtractionFailed = true;
         errors.push(error);
       }
     }
@@ -616,7 +618,12 @@ export class FirecrackerManager {
       errors.push(error);
     }
 
-    if (!instanceWasStarted || terminationConfirmed) {
+
+    // The jail holds the exchange image. If safe outputs could not be read out
+    // of it, deleting it destroys the only copy of the run's results, so keep
+    // it for manual recovery and let the surfaced error explain why.
+    const jailHoldsUnrecoveredOutputs = exchangeExtractionFailed;
+    if ((!instanceWasStarted || terminationConfirmed) && !jailHoldsUnrecoveredOutputs) {
       try {
         await this.dependencies.rm(
           path.join(
@@ -631,26 +638,28 @@ export class FirecrackerManager {
       }
     }
 
+    // Each reference is dropped only once its own cleanup succeeded, so a caller
+    // that retries stop() can still reach an image directory that leaked.
     try {
       await this.workspace?.cleanup(!instanceWasStarted);
+      this.workspace = undefined;
     } catch (error) {
       errors.push(error);
     }
-    this.workspace = undefined;
 
     try {
       await this.runtimeAssets?.cleanup();
+      this.runtimeAssets = undefined;
     } catch (error) {
       errors.push(error);
     }
-    this.runtimeAssets = undefined;
 
     try {
       await this.exchange?.cleanup();
+      this.exchange = undefined;
     } catch (error) {
       errors.push(error);
     }
-    this.exchange = undefined;
 
     if (errors.length === 1) throw errors[0];
     if (errors.length > 1) {

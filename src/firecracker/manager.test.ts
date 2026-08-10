@@ -902,6 +902,31 @@ describe('FirecrackerManager gh-aw runtime staging', () => {
     expect(exchange.extractAfterStop).not.toHaveBeenCalled();
   });
 
+  it('keeps the jail when safe outputs could not be copied back', async () => {
+    // The jail holds the exchange image, which is the only remaining copy of the
+    // run's results once extraction has failed.
+    const { manager, deps, exchange } = stagedManager();
+    (exchange.extractAfterStop as jest.Mock).mockRejectedValue(new Error('cap exceeded'));
+
+    await manager.start();
+    await manager.startInstance();
+    await expect(manager.stop()).rejects.toThrow('cap exceeded');
+
+    const removed = (deps.rm as jest.Mock).mock.calls.map((call) => String(call[0]));
+    expect(removed.some((target) => /firecracker\/[^/]+$/.test(target))).toBe(false);
+  });
+
+  it('removes the jail on a clean stop', async () => {
+    const { manager, deps } = stagedManager();
+
+    await manager.start();
+    await manager.startInstance();
+    await manager.stop();
+
+    const removed = (deps.rm as jest.Mock).mock.calls.map((call) => String(call[0]));
+    expect(removed.some((target) => /firecracker\/[^/]+$/.test(target))).toBe(true);
+  });
+
   function networkPlan(): FirecrackerNetworkPlan {
     return {
       runId: 'run',
