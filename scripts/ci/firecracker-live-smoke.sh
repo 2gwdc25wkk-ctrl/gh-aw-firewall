@@ -172,19 +172,19 @@ test -d "$keep_work/firecracker-jailer" || {
   echo "keep mode did not preserve the Firecracker jail" >&2
   exit 1
 }
-test -f "$keep_audit/firecracker/network-plan.json" || {
+sudo test -f "$keep_audit/firecracker/network-plan.json" || {
   echo "keep mode did not preserve the network plan" >&2
   exit 1
 }
-test -f "$keep_audit/firecracker/firecracker.log" || {
+sudo test -f "$keep_audit/firecracker/firecracker.log" || {
   echo "keep mode did not preserve the Firecracker log" >&2
   exit 1
 }
-test -f "$keep_audit/firecracker/firecracker.metrics.jsonl" || {
+sudo test -f "$keep_audit/firecracker/firecracker.metrics.jsonl" || {
   echo "keep mode did not preserve Firecracker metrics" >&2
   exit 1
 }
-find "$keep_audit/firecracker" -type f -size +1048576c -print -quit \
+sudo find "$keep_audit/firecracker" -type f -size +1048576c -print -quit \
   | grep -q . && {
     echo "Firecracker diagnostic artifact exceeded the 1 MiB bound" >&2
     exit 1
