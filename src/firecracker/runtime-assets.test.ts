@@ -8,6 +8,7 @@ import {
   FIRECRACKER_RUNTIME_MARKER,
   FirecrackerRuntimeAssetImage,
   assertFirecrackerGuestDestinations,
+  assertPermittedStagingRoot,
   calculateFirecrackerRuntimeImageBytes,
   firecrackerForbiddenStagingBasenames,
   resolveFirecrackerGhAwRuntimePlan,
@@ -330,5 +331,68 @@ describe('FirecrackerRuntimeAssetImage', () => {
     await image.prepare();
 
     await expect(image.prepare()).rejects.toThrow(/already prepared/);
+  });
+});
+
+describe('assertPermittedStagingRoot', () => {
+  const env = { HOME: '/home/runner', RUNNER_TOOL_CACHE: '/opt/hostedtoolcache' };
+
+  it('permits a runner temp nested inside the home directory', () => {
+    // The real GitHub layout is /home/runner/work/_temp, so nesting under HOME
+    // has to stay legal even though HOME itself does not.
+    expect(() => assertPermittedStagingRoot('/home/runner/work/_temp', 'runnerTemp root', env))
+      .not.toThrow();
+    expect(() => assertPermittedStagingRoot('/tmp', 'compilerTmp root', env)).not.toThrow();
+  });
+
+  it('refuses the home directory itself', () => {
+    expect(() => assertPermittedStagingRoot('/home/runner', 'runnerTemp root', env))
+      .toThrow(/home directory/);
+  });
+
+  it('refuses the host tool cache', () => {
+    expect(() => assertPermittedStagingRoot('/opt/hostedtoolcache', 'runnerTemp root', env))
+      .toThrow(/hostedtoolcache/);
+    expect(() => assertPermittedStagingRoot('/opt/hostedtoolcache/node/22', 'runnerTemp root', env))
+      .toThrow(/hostedtoolcache/);
+  });
+
+  it('refuses a tool cache declared only through the environment', () => {
+    expect(() => assertPermittedStagingRoot(
+      '/mnt/cache/node',
+      'runnerTemp root',
+      { RUNNER_TOOL_CACHE: '/mnt/cache' },
+    )).toThrow(/RUNNER_TOOL_CACHE/);
+  });
+
+  it('refuses filesystem and system roots', () => {
+    for (const root of ['/', '/root', '/home', '/etc', '/usr/share', '/var/lib']) {
+      expect(() => assertPermittedStagingRoot(root, 'runnerTemp root', env)).toThrow();
+    }
+  });
+
+  it('refuses a symlinked root outright, whatever it points at', async () => {
+    const base = await fs.realpath(os.tmpdir());
+    const directory = await fs.mkdtemp(path.join(base, 'awf-staging-root-'));
+    try {
+      const cache = path.join(directory, 'tool-cache');
+      await fs.mkdir(path.join(cache, 'gh-aw'), { recursive: true, mode: 0o700 });
+      const link = path.join(directory, 'temp');
+      await fs.symlink(cache, link);
+      // A symlinked root cannot be reasoned about safely at all, so it is
+      // refused before its target is even considered. The post-canonicalization
+      // recheck in resolveFirecrackerGhAwRuntimePlan stays as defence in depth
+      // for targets realpath cannot see through, such as bind mounts.
+      await expect(resolveFirecrackerGhAwRuntimePlan({
+        enabled: true,
+        runnerTempPath: link,
+        compilerTmpPath: path.join(directory, 'absent'),
+        maxFileBytes: 1024,
+        maxTotalBytes: 4096,
+        maxFileCount: 16,
+      }, { RUNNER_TOOL_CACHE: cache })).rejects.toThrow(/symlink/);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
   });
 });

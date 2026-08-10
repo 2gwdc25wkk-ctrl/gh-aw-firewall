@@ -43,6 +43,68 @@ export const FIRECRACKER_GH_AW_SOURCES = [
   },
 ] as const;
 
+/**
+ * Host directories that may never themselves be a staging root.
+ *
+ * Only `<root>/gh-aw` is ever staged, so no tree here is copied wholesale. This
+ * exists to stop a root from being *pointed at* one of them, which would turn
+ * the narrow gh-aw subtree into `$HOME/gh-aw` or a tool-cache subtree and
+ * quietly widen the contract.
+ *
+ * A legitimate `RUNNER_TEMP` is normally nested inside the home directory
+ * (`/home/runner/work/_temp`), so the home directory is refused only as an
+ * exact match. The tool cache has no such legitimate nesting and is refused as
+ * an ancestor too.
+ */
+const FORBIDDEN_STAGING_ROOTS_EXACT = [
+  '/', '/home', '/root', '/tmp/gh-aw',
+];
+
+const FORBIDDEN_STAGING_ROOT_TREES = [
+  '/bin', '/boot', '/dev', '/etc', '/lib', '/lib64', '/proc', '/sbin',
+  '/sys', '/usr', '/var', '/opt/hostedtoolcache',
+];
+
+/**
+ * Refuses a staging root that would widen the contract beyond gh-aw assets.
+ */
+export function assertPermittedStagingRoot(
+  root: string,
+  label: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): void {
+  const normalized = path.normalize(root);
+  const within = (ancestor: string): boolean =>
+    normalized === ancestor || normalized.startsWith(`${ancestor}/`);
+
+  if (FORBIDDEN_STAGING_ROOTS_EXACT.includes(normalized)) {
+    throw new Error(
+      `Firecracker gh-aw ${label} must not be ${normalized}: only gh-aw assets may be staged`,
+    );
+  }
+  for (const tree of FORBIDDEN_STAGING_ROOT_TREES) {
+    if (within(tree)) {
+      throw new Error(
+        `Firecracker gh-aw ${label} must not be inside ${tree}: only gh-aw assets may be staged`,
+      );
+    }
+  }
+  const toolCache = environment.RUNNER_TOOL_CACHE;
+  if (toolCache && within(path.normalize(toolCache))) {
+    throw new Error(
+      `Firecracker gh-aw ${label} must not be inside RUNNER_TOOL_CACHE: ` +
+      'host tool caches are never staged',
+    );
+  }
+  const home = environment.HOME;
+  if (home && normalized === path.normalize(home)) {
+    throw new Error(
+      `Firecracker gh-aw ${label} must not be the home directory: ` +
+      'only gh-aw assets may be staged',
+    );
+  }
+}
+
 /** Guest paths AWF refuses to shadow with a staged bind. */
 const RESERVED_GUEST_PREFIXES = [
   '/bin', '/boot', '/dev', '/etc', '/lib', '/lib64', '/proc', '/root',
@@ -107,6 +169,7 @@ export async function resolveFirecrackerGhAwRuntimePlan(
       skipped.push(source.id);
       continue;
     }
+    assertPermittedStagingRoot(root.path, `${source.root} root`, environment);
     let canonicalRoot: string;
     try {
       canonicalRoot = await assertCanonicalDirectory(root.path, `${source.id} root`);
@@ -119,6 +182,9 @@ export async function resolveFirecrackerGhAwRuntimePlan(
       }
       throw error;
     }
+    // Re-checked after canonicalization: the configured value could be a
+    // symlink whose target lands in a forbidden tree.
+    assertPermittedStagingRoot(canonicalRoot, `${source.root} root`, environment);
     const hostPath = path.join(canonicalRoot, source.relativePath);
     let stat;
     try {

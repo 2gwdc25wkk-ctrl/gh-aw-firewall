@@ -1250,6 +1250,13 @@ absolute, canonical, traversal-free path. A root that is configured explicitly
 and does not exist is a hard error (it is almost always a typo); a root that was
 merely defaulted and does not exist is skipped with a warning.
 
+Roots are additionally denylisted. Only `<root>/gh-aw` is ever staged, so no
+tree is copied wholesale, but a root may not be *pointed at* the home directory,
+`RUNNER_TOOL_CACHE`, `/opt/hostedtoolcache`, `/`, or a system directory — that
+would quietly widen the contract into host state. A `RUNNER_TEMP` nested inside
+the home directory (the normal `/home/runner/work/_temp` layout) remains legal;
+the home directory itself does not. A symlinked root is refused outright.
+
 An absent `gh-aw` subtree under a present root is skipped. If *no* root yields a
 `gh-aw` subtree the run fails instead of booting: staging was asked for
 explicitly, so an empty result means the caller would otherwise get a guest that
@@ -1319,6 +1326,11 @@ Every staged and copied-back byte passes through one bounded copier:
 Defaults: 64 MiB per file, 512 MiB total, 20 000 entries for staging;
 16 MiB / 64 MiB / 2 000 for safe-output copy-back. A per-file cap larger than
 the total cap is a configuration error.
+
+The agent rootfs is built the same way: its userspace comes from the
+digest-pinned Debian snapshot and a checksum-verified Node release tarball, never
+from the host's runtimes or `RUNNER_TOOL_CACHE`, and setuid/setgid bits are
+stripped from the staged tree and re-verified in the published image.
 
 ### Credentials are never staged
 

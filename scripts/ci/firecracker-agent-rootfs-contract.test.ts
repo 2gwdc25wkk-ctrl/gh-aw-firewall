@@ -89,6 +89,23 @@ describe('Firecracker agent rootfs build contract', () => {
     expect(verifier).toContain('.git-credentials');
   });
 
+  it('builds its userspace from pinned inputs, never from the host', () => {
+    // A rootfs that copied host runtimes or RUNNER_TOOL_CACHE would inherit
+    // whatever the runner happened to have, defeating the pinning above.
+    expect(builder).not.toMatch(/RUNNER_TOOL_CACHE/);
+    expect(builder).not.toMatch(/hostedtoolcache/);
+    expect(builder).not.toMatch(/cp\s+-[a-zA-Z]*\s*\/usr\/(bin|lib)/);
+    expect(builder).not.toMatch(/command -v node/);
+    // Node arrives as a checksum-verified release tarball.
+    expect(builder).toMatch(/nodejs\.org\/dist\/v\$\{NODE_VERSION\}/);
+    expect(builder).toContain('NODE_SHA256');
+  });
+
+  it('strips setuid and setgid from the staged tree and proves none remain', () => {
+    expect(builder).toMatch(/-perm \/6000 -exec chmod a-s/);
+    expect(builder).toMatch(/-perm \/6000 \| grep -q \./);
+  });
+
   it('reads setuid and special-file modes from the image inode table', () => {
     // `debugfs rdump` drops setuid/setgid bits and skips special files, so a
     // find(1) walk of the dump can never observe them. The verifier has to read
