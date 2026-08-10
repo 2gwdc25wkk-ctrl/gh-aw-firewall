@@ -42,6 +42,7 @@ const WORKSPACE_JAIL_PATH = '/workspace.ext4';
 const VSOCK_JAIL_PATH = `/run/${VSOCK_SOCKET_NAME}`;
 export const FIRECRACKER_GUEST_VSOCK_PORT = 52;
 const FIRECRACKER_GUEST_SHUTDOWN_GRACE_MS = 5_000;
+const FIRECRACKER_GUEST_CONNECT_RETRY_MS = 25;
 
 export interface FirecrackerRunPaths {
   runId: string;
@@ -400,12 +401,28 @@ export class FirecrackerManager {
     await this.client.instanceStart();
     this.instanceStarted = true;
     if (this.guestConfig) {
-      this.guestClient = this.dependencies.createVsockClient(
-        this.vsockSocketPath ?? this.paths.vsockSocketPath,
-        this.guestConfig.vsockPort ?? FIRECRACKER_GUEST_VSOCK_PORT,
-        this.config.apiTimeoutMs,
+      const attempts = Math.max(
+        1,
+        Math.ceil(this.config.apiTimeoutMs / FIRECRACKER_GUEST_CONNECT_RETRY_MS),
       );
-      await this.guestClient.connect();
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const guestClient = this.dependencies.createVsockClient(
+          this.vsockSocketPath ?? this.paths.vsockSocketPath,
+          this.guestConfig.vsockPort ?? FIRECRACKER_GUEST_VSOCK_PORT,
+          this.config.apiTimeoutMs,
+        );
+        try {
+          await guestClient.connect();
+          this.guestClient = guestClient;
+          return;
+        } catch (error) {
+          guestClient.destroy();
+          if (!isRetryableGuestConnectError(error) || attempt === attempts - 1) {
+            throw error;
+          }
+          await this.dependencies.sleep(FIRECRACKER_GUEST_CONNECT_RETRY_MS);
+        }
+      }
     }
   }
 
@@ -713,6 +730,12 @@ export function buildSupervisorBootArgs(
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isRetryableGuestConnectError(error: unknown): boolean {
+  const message = formatError(error);
+  return message === 'Firecracker guest disconnected before readiness' ||
+    /^Firecracker vsock CONNECT failed: ERR 111(?:\D|$)/.test(message);
 }
 
 class BoundedOutputCapture {

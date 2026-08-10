@@ -431,6 +431,56 @@ describe('FirecrackerManager', () => {
       expect(order).toEqual(['extract']);
   });
 
+  it('retries while the booting guest has not started listening on vsock', async () => {
+      const firstClient = {
+        connect: jest.fn().mockRejectedValue(
+          new Error('Firecracker guest disconnected before readiness'),
+        ),
+        destroy: jest.fn(),
+      } as unknown as FirecrackerVsockClient;
+      const readyClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        shutdown: jest.fn().mockResolvedValue(undefined),
+        destroy: jest.fn(),
+      } as unknown as FirecrackerVsockClient;
+      const workspace = {
+        prepare: jest.fn().mockResolvedValue({
+          workspaceImagePath: '/tmp/prepared-workspace.ext4',
+          rootfsImagePath: '/tmp/prepared-rootfs.ext4',
+          imageBytes: 1024,
+          originalManifest: new Map(),
+        }),
+        extractAfterStop: jest.fn().mockResolvedValue(undefined),
+        cleanup: jest.fn().mockResolvedValue(undefined),
+      } as unknown as FirecrackerWorkspaceImage;
+      const deps = dependencies({
+        createWorkspaceImage: jest.fn().mockReturnValue(workspace),
+        createVsockClient: jest.fn()
+          .mockReturnValueOnce(firstClient)
+          .mockReturnValueOnce(readyClient),
+      });
+      const manager = new FirecrackerManager(
+        config({ apiTimeoutMs: 50 }),
+        '/tmp/awf',
+        deps,
+        'guest-retry',
+        networkConfig(),
+        {
+          workspacePath: '/workspace',
+          homePath: '/home/runner',
+          supervisorBinaryPath: '/opt/supervisor',
+          supervisorSha256: 'a'.repeat(64),
+        },
+      );
+      await manager.start();
+
+      await manager.startInstance();
+
+      expect(firstClient.destroy).toHaveBeenCalledTimes(1);
+      expect(deps.createVsockClient).toHaveBeenCalledTimes(2);
+      expect(deps.sleep).toHaveBeenCalledWith(25);
+  });
+
   it('delegates guest cancellation, stdin, and resize only after readiness', async () => {
       const cold = new FirecrackerManager(
         config(),
