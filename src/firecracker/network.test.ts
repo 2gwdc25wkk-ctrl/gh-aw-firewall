@@ -7,6 +7,7 @@ import {
   type FirecrackerNetworkCommandOptions,
   type FirecrackerNetworkPlan,
 } from './network';
+import { promises as fs } from 'fs';
 
 interface CommandCall {
   command: string;
@@ -212,14 +213,20 @@ describe('Firecracker network lifecycle', () => {
     expect(calls[11].args).toContain('net.ipv4.ip_forward=1');
     expect(calls[12].args).toContain('net.ipv6.conf.all.disable_ipv6=1');
     expect(calls[13].args).toContain('net.ipv6.conf.default.disable_ipv6=1');
+    const nftRulesPath = calls[14].args[calls[14].args.length - 1];
     expect(calls[14]).toEqual({
       command: 'ip',
-      args: ['netns', 'exec', plan.namespaceName, 'nft'],
-      options: {
-        reject: true,
-        input: generateFirecrackerNftRuleset(plan),
-      },
+      args: [
+        'netns',
+        'exec',
+        plan.namespaceName,
+        'nft',
+        '-f',
+        expect.stringMatching(/awf-firecracker-nft-.*\/ruleset\.nft$/),
+      ],
+      options: { reject: true },
     });
+    await expect(fs.access(nftRulesPath)).rejects.toThrow();
     expect(probe.verify).toHaveBeenCalledWith(plan);
   });
 

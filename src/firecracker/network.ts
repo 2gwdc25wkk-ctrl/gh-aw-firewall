@@ -1,5 +1,8 @@
 import { createHash } from 'crypto';
 import execa from 'execa';
+import { promises as fs } from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import type { FirecrackerHostToolPaths } from './preflight';
 import {
   AGENT_IP,
@@ -219,11 +222,23 @@ export class FirecrackerNetworkManager implements FirecrackerNetworkLifecycle {
         this.plan.namespaceName,
         'net.ipv6.conf.default.disable_ipv6=1',
       );
-      await this.commands.nftInNamespace(
-        this.plan.namespaceName,
-        [],
-        generateFirecrackerNftRuleset(this.plan),
+      const nftRulesDirectory = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'awf-firecracker-nft-'),
       );
+      const nftRulesPath = path.join(nftRulesDirectory, 'ruleset.nft');
+      try {
+        await fs.writeFile(
+          nftRulesPath,
+          generateFirecrackerNftRuleset(this.plan),
+          { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+        );
+        await this.commands.nftInNamespace(
+          this.plan.namespaceName,
+          ['-f', nftRulesPath],
+        );
+      } finally {
+        await fs.rm(nftRulesDirectory, { force: true, recursive: true });
+      }
       await this.probe?.verify(this.plan);
       this.setupComplete = true;
       return this.plan;
