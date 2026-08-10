@@ -172,6 +172,16 @@ export class FirecrackerWorkspaceImage {
       this.workspaceImagePath,
       String(imageBytes / FIRECRACKER_WORKSPACE_BLOCK_BYTES),
     ]);
+    await this.runTool('debugfs', [
+      '-w',
+      '-R', `set_inode_field / uid ${this.config.uid}`,
+      this.workspaceImagePath,
+    ]);
+    await this.runTool('debugfs', [
+      '-w',
+      '-R', `set_inode_field / gid ${this.config.gid}`,
+      this.workspaceImagePath,
+    ]);
 
     await this.prepareRootfs();
     this.prepared = true;

@@ -78,9 +78,11 @@ describe('Firecracker workspace images', () => {
       path.join(image.stagingDirectory, 'workspace', '.awf-home', '.config', 'gh'),
     )).rejects.toThrow();
     expect(commands.map(({ command }) => command)).toEqual([
-      'mke2fs', 'debugfs', 'debugfs', 'debugfs', 'e2fsck',
+      'mke2fs', 'debugfs', 'debugfs', 'debugfs', 'debugfs', 'debugfs', 'e2fsck',
     ]);
-    expect(commands[1].args).toContain('rm /sbin/awf-supervisor');
+    expect(commands[1].args).toContain(`set_inode_field / uid ${process.getuid?.() ?? 1000}`);
+    expect(commands[2].args).toContain(`set_inode_field / gid ${process.getgid?.() ?? 1000}`);
+    expect(commands[3].args).toContain('rm /sbin/awf-supervisor');
     expect(commands[0].args).toEqual(expect.arrayContaining(['-b', '4096']));
     await fs.rm(root, { recursive: true, force: true });
   });
