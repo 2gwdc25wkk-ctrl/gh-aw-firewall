@@ -5,7 +5,10 @@ import * as path from 'path';
 
 import { applyGeneralWorkflowPatches } from './apply-general-workflow-patches';
 import { applyCodexWorkflowPatches } from './apply-codex-workflow-patches';
-
+import {
+  applyFirecrackerWorkflowPatches,
+  FIRECRACKER_LOCK_FILES,
+} from './apply-firecracker-workflow-patches';
 
 const repoRoot = path.resolve(__dirname, '../..');
 
@@ -66,6 +69,30 @@ for (const workflowPath of codexWorkflowPaths) {
     console.log(`Updated ${workflowPath}`);
   } else {
     console.log(`Skipping ${workflowPath}: no xpia.md changes needed.`);
+  }
+}
+
+for (const filename of FIRECRACKER_LOCK_FILES) {
+  const workflowPath = path.join(workflowsDir, filename);
+  let original: string;
+  try {
+    original = fs.readFileSync(workflowPath, 'utf-8');
+  } catch {
+    console.log(`Skipping ${workflowPath}: file not found.`);
+    continue;
+  }
+  const { content, log } = applyFirecrackerWorkflowPatches(
+    original,
+    workflowPath
+  );
+  log.forEach(msg => console.log(msg));
+  if (content !== original) {
+    fs.writeFileSync(workflowPath, content);
+    console.log(`Updated ${workflowPath}`);
+  } else {
+    console.log(
+      `Skipping ${workflowPath}: Firecracker patches already applied.`
+    );
   }
 }
 

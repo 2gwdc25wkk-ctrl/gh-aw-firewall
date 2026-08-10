@@ -28,7 +28,12 @@ import {
   issueDuplicationConclusionConcurrencySentinel,
 } from './workflow-patch-patterns';
 import { buildCopySessionStateStep } from './workflow-step-builders';
-
+import {
+  applyFirecrackerWorkflowPatches,
+  FIRECRACKER_LOCK_FILES,
+} from './apply-firecracker-workflow-patches';
+import * as fs from 'fs';
+import * as path from 'path';
 
 describe('installStepRegex', () => {
   it('should match unquoted /opt/gh-aw path', () => {
@@ -95,28 +100,29 @@ describe('installStepRegex', () => {
 
 describe('duplicateSetupNodeRegex', () => {
   const block = [
-    "      - name: Setup Node.js",
-    "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0",
-    "        with:",
+    '      - name: Setup Node.js',
+    '        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0',
+    '        with:',
     "          node-version: '24'",
-    "          package-manager-cache: false",
-    "",
-  ].join("\n");
+    '          package-manager-cache: false',
+    '',
+  ].join('\n');
 
   it('collapses two consecutive identical Setup Node.js blocks into one', () => {
-    const input = block + block + "      - name: Install awf dependencies\n";
+    const input = block + block + '      - name: Install awf dependencies\n';
     const output = input.replace(duplicateSetupNodeRegex, '$1');
-    expect(output).toBe(block + "      - name: Install awf dependencies\n");
+    expect(output).toBe(block + '      - name: Install awf dependencies\n');
   });
 
   it('does not collapse a single Setup Node.js block', () => {
-    const input = block + "      - name: Install awf dependencies\n";
+    const input = block + '      - name: Install awf dependencies\n';
     expect(duplicateSetupNodeRegex.test(input)).toBe(false);
   });
 
   it('does not collapse consecutive Setup Node.js blocks that differ', () => {
     const differing = block.replace("node-version: '24'", "node-version: '20'");
-    const input = block + differing + "      - name: Install awf dependencies\n";
+    const input =
+      block + differing + '      - name: Install awf dependencies\n';
     expect(duplicateSetupNodeRegex.test(input)).toBe(false);
   });
 });
@@ -203,7 +209,8 @@ describe('cacheMemoryKeyLineRegex', () => {
     cacheMemoryKeyLineRegex.lastIndex = 0;
     const result = input.replace(
       cacheMemoryKeyLineRegex,
-      (_m, prefix) => `${prefix}\${{ env.CACHE_MEMORY_DATE }}-\${{ github.run_id }}`
+      (_m, prefix) =>
+        `${prefix}\${{ env.CACHE_MEMORY_DATE }}-\${{ github.run_id }}`
     );
     expect(result).toContain('CACHE_MEMORY_DATE');
     expect(result).toContain('github.run_id');
@@ -215,7 +222,8 @@ describe('cacheMemoryKeyLineRegex', () => {
     cacheMemoryKeyLineRegex.lastIndex = 0;
     const result = input.replace(
       cacheMemoryKeyLineRegex,
-      (_m, prefix) => `${prefix}\${{ env.CACHE_MEMORY_DATE }}-\${{ github.run_id }}`
+      (_m, prefix) =>
+        `${prefix}\${{ env.CACHE_MEMORY_DATE }}-\${{ github.run_id }}`
     );
     expect(result).toContain('CACHE_MEMORY_DATE');
     expect(result).toContain('github.run_id');
@@ -247,7 +255,8 @@ describe('cacheRestoreKeyPrefixRegex', () => {
   });
 
   it('should match restore-keys prefix with hardcoded workflow id', () => {
-    const input = '            memory-none-nopolicy-issue-duplication-detector-\n';
+    const input =
+      '            memory-none-nopolicy-issue-duplication-detector-\n';
     cacheRestoreKeyPrefixRegex.lastIndex = 0;
     const result = input.replace(
       cacheRestoreKeyPrefixRegex,
@@ -295,7 +304,10 @@ describe('codexConfigTomlHeredocRegex + CODEX_PROXY_ENV_KEY_REGEX', () => {
       `${indent}base_url = "http://172.30.0.30:10000"\n` +
       `${indent}supports_websockets = false\n` +
       `${indent}\n`;
-    const result = input.replace(codexConfigTomlHeredocRegex, `$1$2${modelProvidersBlock}$3`);
+    const result = input.replace(
+      codexConfigTomlHeredocRegex,
+      `$1$2${modelProvidersBlock}$3`
+    );
     expect(result).toContain('[model_providers.openai-proxy]');
     expect(result).not.toContain('env_key = "OPENAI_API_KEY"');
   });
@@ -416,12 +428,16 @@ describe('buildCopySessionStateStep', () => {
     const result = buildCopySessionStateStep('      ');
     expect(result).toContain(`SESSION_STATE_SRC="${SESSION_STATE_DIR}"`);
     expect(result).toContain('LOGS_DIR="/tmp/gh-aw/sandbox/agent/logs"');
-    expect(result).toContain('cp -rp "$SESSION_STATE_SRC/." "$LOGS_DIR/session-state/"');
+    expect(result).toContain(
+      'cp -rp "$SESSION_STATE_SRC/." "$LOGS_DIR/session-state/"'
+    );
   });
 
   it('should use correct YAML indentation', () => {
     const result = buildCopySessionStateStep('      ');
-    expect(result).toMatch(/^      - name: Copy Copilot session state files to logs\n/);
+    expect(result).toMatch(
+      /^      - name: Copy Copilot session state files to logs\n/
+    );
     expect(result).toContain('        run: |\n');
     expect(result).toContain('          SESSION_STATE_SRC=');
   });
@@ -438,14 +454,13 @@ describe('copilotModelOverrideRegex', () => {
   });
 
   it('should replace empty fallback with workflow-level env.COPILOT_MODEL', () => {
-    const input = "          COPILOT_MODEL: ${{ vars.GH_AW_MODEL_AGENT_COPILOT || '' }}\n";
+    const input =
+      "          COPILOT_MODEL: ${{ vars.GH_AW_MODEL_AGENT_COPILOT || '' }}\n";
     const result = input.replace(
       copilotModelOverrideRegex,
       '$1${{ env.COPILOT_MODEL }}'
     );
-    expect(result).toBe(
-      `          COPILOT_MODEL: \${{ env.COPILOT_MODEL }}\n`
-    );
+    expect(result).toBe(`          COPILOT_MODEL: \${{ env.COPILOT_MODEL }}\n`);
   });
 
   it('should replace hardcoded model fallback with workflow-level env.COPILOT_MODEL', () => {
@@ -455,9 +470,7 @@ describe('copilotModelOverrideRegex', () => {
       copilotModelOverrideRegex,
       '$1${{ env.COPILOT_MODEL }}'
     );
-    expect(result).toBe(
-      `          COPILOT_MODEL: \${{ env.COPILOT_MODEL }}\n`
-    );
+    expect(result).toBe(`          COPILOT_MODEL: \${{ env.COPILOT_MODEL }}\n`);
   });
 
   it('should replace fallback chain with vars.GH_AW_DEFAULT_MODEL_COPILOT link', () => {
@@ -467,14 +480,12 @@ describe('copilotModelOverrideRegex', () => {
       copilotModelOverrideRegex,
       '$1${{ env.COPILOT_MODEL }}'
     );
-    expect(result).toBe(
-      `          COPILOT_MODEL: \${{ env.COPILOT_MODEL }}\n`
-    );
+    expect(result).toBe(`          COPILOT_MODEL: \${{ env.COPILOT_MODEL }}\n`);
   });
 
   it('should replace repo-level override fallback with workflow-level env.COPILOT_MODEL', () => {
     const input =
-      "          COPILOT_MODEL: ${{ vars.GH_AW_MODEL_AGENT_COPILOT || env.COPILOT_MODEL }}\n";
+      '          COPILOT_MODEL: ${{ vars.GH_AW_MODEL_AGENT_COPILOT || env.COPILOT_MODEL }}\n';
     const result = input.replace(
       copilotModelOverrideRegex,
       '$1${{ env.COPILOT_MODEL }}'
@@ -483,7 +494,7 @@ describe('copilotModelOverrideRegex', () => {
   });
 
   it('should be idempotent when already using workflow-level env.COPILOT_MODEL', () => {
-    const input = "          COPILOT_MODEL: ${{ env.COPILOT_MODEL }}\n";
+    const input = '          COPILOT_MODEL: ${{ env.COPILOT_MODEL }}\n';
     const result = input.replace(
       copilotModelOverrideRegex,
       '$1${{ env.COPILOT_MODEL }}'
@@ -501,7 +512,9 @@ describe('issueDuplicationConclusionConcurrencyRegex', () => {
     '      cancel-in-progress: false\n';
 
   it('should match the compiler-generated shared conclusion concurrency group', () => {
-    expect(issueDuplicationConclusionConcurrencyRegex.test(ORIGINAL_CONCURRENCY)).toBe(true);
+    expect(
+      issueDuplicationConclusionConcurrencyRegex.test(ORIGINAL_CONCURRENCY)
+    ).toBe(true);
   });
 
   it('should transform the group to include the issue number', () => {
@@ -509,7 +522,9 @@ describe('issueDuplicationConclusionConcurrencyRegex', () => {
       issueDuplicationConclusionConcurrencyRegex,
       `$1-\${{ github.event.issue.number || github.run_id }}$2`
     );
-    expect(result).toContain('${{ github.event.issue.number || github.run_id }}');
+    expect(result).toContain(
+      '${{ github.event.issue.number || github.run_id }}'
+    );
     expect(result).toContain('cancel-in-progress: false');
     expect(result).not.toContain(
       '"gh-aw-conclusion-issue-duplication-detector"\n'
@@ -525,8 +540,12 @@ describe('issueDuplicationConclusionConcurrencyRegex', () => {
     // postprocess script skips the transform. Additionally, the regex itself
     // does NOT match the updated form because the closing quote is no longer
     // immediately after "issue-duplication-detector" — both guards agree.
-    expect(alreadyUpdated.includes(issueDuplicationConclusionConcurrencySentinel)).toBe(true);
-    expect(issueDuplicationConclusionConcurrencyRegex.test(alreadyUpdated)).toBe(false);
+    expect(
+      alreadyUpdated.includes(issueDuplicationConclusionConcurrencySentinel)
+    ).toBe(true);
+    expect(
+      issueDuplicationConclusionConcurrencyRegex.test(alreadyUpdated)
+    ).toBe(false);
   });
 
   it('should preserve cancel-in-progress: false in the output', () => {
@@ -543,5 +562,162 @@ describe('issueDuplicationConclusionConcurrencyRegex', () => {
       `$1-\${{ github.event.issue.number || github.run_id }}$2`
     );
     expect(result).toContain('gh-aw-conclusion-issue-duplication-detector-');
+  });
+});
+
+describe('Firecracker smoke workflow patches', () => {
+  const repoRoot = path.resolve(__dirname, '../..');
+  const fixture = [
+    'jobs:',
+    '  agent:',
+    '    needs: activation',
+    "    if: needs.activation.outputs.activated == 'true'",
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - name: Install awf binary (local)',
+    '        run: |',
+    '          WORKSPACE_PATH="${GITHUB_WORKSPACE:-$(pwd)}"',
+    '      - name: Setup Node.js',
+    '        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
+    '      - name: Install awf dependencies',
+    '        run: npm ci',
+    '      - name: Build awf',
+    '        run: npm run build',
+    '      - name: Set up Go for Firecracker guest build',
+    '        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e',
+    '        with:',
+    '          cache-dependency-path: guest/firecracker-supervisor/go.mod',
+    '      - name: Determine automatic lockdown mode for GitHub MCP Server',
+    '        run: true',
+    '      - name: Execute GitHub Copilot CLI',
+    '        run: |',
+    '          awf --config "${RUNNER_TEMP}/gh-aw/awf-config.json" --mount "${RUNNER_TEMP}/gh-aw:${RUNNER_TEMP}/gh-aw:ro" --mount "${RUNNER_TEMP}/gh-aw:/host${RUNNER_TEMP}/gh-aw:ro" ${GH_AW_TOOL_CACHE_MOUNT:+--mount "$GH_AW_TOOL_CACHE_MOUNT"} --tty --env-all --exclude-env SECRET --build-local -- echo',
+    '',
+  ].join('\n');
+
+  it.each(FIRECRACKER_LOCK_FILES)(
+    'patches and is idempotent for %s',
+    (filename) => {
+      const workflowPath = path.join(repoRoot, '.github/workflows', filename);
+      const once = applyFirecrackerWorkflowPatches(
+        fixture,
+        workflowPath
+      ).content;
+      const twice = applyFirecrackerWorkflowPatches(once, workflowPath).content;
+
+      expect(twice).toBe(once);
+      expect(once).toContain('  agent:\n');
+      expect(once).toContain('    runs-on: ubuntu-24.04');
+      expect(once).toContain('      - name: Prepare Firecracker preview host');
+      expect(once).not.toContain(' --tty ');
+      expect(once).not.toContain(' --mount ');
+      expect(once).toContain('ref: ${{ github.event.pull_request.base.sha || github.sha }}');
+      expect(once).toContain('working-directory: .awf-trusted-source');
+      expect(once).toContain('WORKSPACE_PATH="${RUNNER_TEMP}/awf-host"');
+    }
+  );
+
+  it.each(FIRECRACKER_LOCK_FILES)(
+    'contains exact Firecracker flags in %s',
+    (filename) => {
+      const workflowPath = path.join(repoRoot, '.github/workflows', filename);
+      const content = fs.readFileSync(workflowPath, 'utf8');
+      for (const flag of [
+        '--container-runtime firecracker',
+        '--firecracker-preview',
+        '--enable-api-proxy',
+        '--firecracker-gh-aw-runtime',
+        '--firecracker-gh-aw-runner-temp "${RUNNER_TEMP}"',
+        '--firecracker-gh-aw-compiler-tmp /tmp',
+        '--firecracker-safe-outputs-dir "${RUNNER_TEMP}/gh-aw/safeoutputs"',
+        '--firecracker-binary "${FIRECRACKER_PLATFORM_ARTIFACTS}/firecracker"',
+        '--firecracker-jailer-binary "${FIRECRACKER_PLATFORM_ARTIFACTS}/jailer"',
+        '--firecracker-kernel "${FIRECRACKER_PLATFORM_ARTIFACTS}/vmlinux.bin"',
+        '--firecracker-rootfs "${FIRECRACKER_AGENT_ARTIFACTS}/rootfs.ext4"',
+        '--firecracker-supervisor "${FIRECRACKER_AGENT_ARTIFACTS}/awf-firecracker-supervisor"',
+        '--firecracker-binary-sha256 "${FIRECRACKER_BINARY_SHA256}"',
+        '--firecracker-jailer-sha256 "${FIRECRACKER_JAILER_SHA256}"',
+        '--firecracker-kernel-sha256 "${FIRECRACKER_KERNEL_SHA256}"',
+        '--firecracker-rootfs-sha256 "${FIRECRACKER_ROOTFS_SHA256}"',
+        '--firecracker-supervisor-sha256 "${FIRECRACKER_SUPERVISOR_SHA256}"',
+      ]) {
+        expect(content).toContain(flag);
+      }
+      expect(content).toContain('sudo -E awf --config');
+    }
+  );
+
+  it.each(FIRECRACKER_LOCK_FILES)(
+    'uses hosted runner and complete setup in %s',
+    (filename) => {
+      const workflowPath = path.join(repoRoot, '.github/workflows', filename);
+      const content = fs.readFileSync(workflowPath, 'utf8');
+      const agentJob = content.slice(
+        content.indexOf('\n  agent:'),
+        content.indexOf('\n  conclusion:')
+      );
+
+      expect(agentJob).toContain('runs-on: ubuntu-24.04');
+      expect(agentJob).not.toContain('self-hosted');
+      expect(agentJob).toContain('test -r /dev/kvm && test -w /dev/kvm');
+      expect(agentJob).toContain("go-version: '1.25.0'");
+      expect(agentJob).toContain('./guest/firecracker/build-test-artifacts.sh');
+      expect(agentJob).toContain('./guest/firecracker/build-agent-rootfs.sh');
+      expect(agentJob).toContain(
+        './guest/firecracker/verify-test-artifacts.sh'
+      );
+      expect(agentJob).toContain('./guest/firecracker/verify-agent-rootfs.sh');
+      expect(agentJob).toContain(
+        'docker build -t ghcr.io/github/gh-aw-firewall/squid:latest'
+      );
+      expect(agentJob).toContain(
+        'docker build -t ghcr.io/github/gh-aw-firewall/api-proxy:latest'
+      );
+      expect(agentJob).toContain('command -v "$tool"');
+      expect(agentJob).toContain('Checkout trusted AWF source');
+      expect(agentJob).toContain(
+        'ref: ${{ github.event.pull_request.base.sha || github.sha }}'
+      );
+      expect(agentJob).toContain(
+        'docker build -t ghcr.io/github/gh-aw-firewall/squid:latest "$trusted/containers/squid"'
+      );
+      expect(agentJob).toContain('rm -rf -- "$trusted"');
+      expect(agentJob).not.toContain(
+        'docker build -t ghcr.io/github/gh-aw-firewall/squid:latest containers/squid'
+      );
+    }
+  );
+
+  it('fails closed when the runner anchor is absent', () => {
+    expect(() =>
+      applyFirecrackerWorkflowPatches(
+        fixture.replace('    runs-on: ubuntu-latest\n', ''),
+        path.join(repoRoot, '.github/workflows', FIRECRACKER_LOCK_FILES[0])
+      )
+    ).toThrow(/runner anchor is missing/);
+  });
+
+  it('fails closed when the setup anchor is absent', () => {
+    expect(() =>
+      applyFirecrackerWorkflowPatches(
+        fixture.replace(
+          '      - name: Determine automatic lockdown mode for GitHub MCP Server\n',
+          ''
+        ),
+        path.join(repoRoot, '.github/workflows', FIRECRACKER_LOCK_FILES[0])
+      )
+    ).toThrow(/setup insertion anchor is missing/);
+  });
+
+  it('fails closed when the AWF command anchor is absent', () => {
+    expect(() =>
+      applyFirecrackerWorkflowPatches(
+        fixture.replace(
+          '          awf --config "${RUNNER_TEMP}/gh-aw/awf-config.json" ',
+          '          echo '
+        ),
+        path.join(repoRoot, '.github/workflows', FIRECRACKER_LOCK_FILES[0])
+      )
+    ).toThrow(/execution command anchor is missing/);
   });
 });
