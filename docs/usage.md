@@ -463,6 +463,28 @@ sudo awf \
 
 > **Security Note:** A future update will change the default behavior to only allow ports 80 and 443 unless `--allow-host-ports` is specified. Explicitly set `--allow-host-ports` now to ensure consistent behavior across versions.
 
+### Example: GitHub Actions `services:` Container in Strict Mode
+
+`--allow-host-ports` works standalone with `--enable-host-access` in strict
+security mode (the default, without `--legacy-security`/`--network-isolation`
+disabled). Direct raw-protocol access to a GitHub Actions `services:` container
+is not available in strict (`--network-isolation`) mode: the isolated agent has
+no `host.docker.internal` route, and clients such as `psql` cannot use Squid's
+HTTP proxy protocol. Use legacy security or a separately verified tunnel. For
+example, to reach a Postgres service container with legacy security:
+
+```bash
+# GitHub Actions services: postgres:
+#   ports: ["5432:5432"]
+
+awf \
+  --legacy-security \
+  --enable-host-access \
+  --allow-host-ports 5432 \
+  --allow-domains host.docker.internal \
+  -- psql -h host.docker.internal -p 5432 -U postgres -c 'select 1'
+```
+
 ### CONNECT Method on Port 80
 
 The firewall allows the HTTP CONNECT method on both ports 80 and 443. This is required because some HTTP clients (e.g., Node.js fetch) use the CONNECT method even for HTTP connections when going through a proxy. Domain ACLs remain the primary security control.

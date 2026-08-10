@@ -287,6 +287,16 @@ specification, and troubleshooting reference.
 
 When DinD is detected, AWF preserves the detected `DOCKER_HOST` value for the agent environment (including MCP servers) so DinD-aware tooling can reach the correct daemon without manual workflow env overrides.
 
+`security.allowHostPorts` (`--allow-host-ports`) is accepted together with
+`security.enableHostAccess` (`--enable-host-access`) in strict security mode
+(the default, without `--legacy-security`), but it does not provide a direct
+route to raw-protocol GitHub Actions `services:` containers. Strict topology
+intentionally omits the agent's `host.docker.internal` mapping and host-access
+iptables bypass; use legacy security or a separately verified tunnel for direct
+service clients.
+`security.allowHostServicePorts` (`--allow-host-service-ports`), which relies
+on host iptables, remains suppressed in strict mode.
+
 The following CLI flag has no config-file equivalent by design:
 
 - `-e, --env <KEY=VALUE>` — inject a single environment variable into
