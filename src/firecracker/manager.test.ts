@@ -1,4 +1,5 @@
 import type { ExecaChildProcess } from 'execa';
+import { PassThrough } from 'stream';
 import type { FirecrackerOptions } from '../types/runtime-options';
 import type { FirecrackerApiClient } from './api-client';
 import {
@@ -83,6 +84,9 @@ function dependencies(
     putDrive: jest.fn().mockResolvedValue(undefined),
     putVsock: jest.fn().mockResolvedValue(undefined),
     putNetworkInterface: jest.fn().mockResolvedValue(undefined),
+    putLogger: jest.fn().mockResolvedValue(undefined),
+    putMetrics: jest.fn().mockResolvedValue(undefined),
+    putAction: jest.fn().mockResolvedValue(undefined),
     instanceStart: jest.fn().mockResolvedValue(undefined),
   } as unknown as FirecrackerApiClient;
   return {
@@ -93,12 +97,16 @@ function dependencies(
       kernelPath: '/opt/vmlinux',
       rootfsPath: '/opt/rootfs.ext4',
       tools: hostTools,
+      supervisorPath: '/opt/awf-supervisor',
+      cgroupVersion: 2,
     }),
     launch: jest.fn().mockReturnValue(processMock()),
     mkdir: jest.fn().mockResolvedValue(undefined),
     copyFile: jest.fn().mockResolvedValue(undefined),
     chmod: jest.fn().mockResolvedValue(undefined),
     chown: jest.fn().mockResolvedValue(undefined),
+    writeFile: jest.fn().mockResolvedValue(undefined),
+    readFileTail: jest.fn().mockResolvedValue(Buffer.alloc(0)),
     access: jest.fn().mockResolvedValue(undefined),
     rm: jest.fn().mockResolvedValue(undefined),
     sleep: jest.fn().mockResolvedValue(undefined),
@@ -136,14 +144,30 @@ describe('FirecrackerManager', () => {
     }, hostTools)).toBeDefined();
     expect(defaults.createVsockClient('/tmp/vsock.socket', 52, 100)).toBeDefined();
 
-    process.env.SUDO_UID = '2001';
-    process.env.SUDO_GID = '2002';
-    expect(firecrackerManagerTestHelpers.resolveJailerIdentity()).toEqual({
-      uid: 2001,
-      gid: 2002,
-    });
-    delete process.env.SUDO_UID;
-    delete process.env.SUDO_GID;
+    const originalSudoUid = process.env.SUDO_UID;
+    const originalSudoGid = process.env.SUDO_GID;
+    const uidSpy = jest.spyOn(process, 'getuid').mockReturnValue(0);
+    const gidSpy = jest.spyOn(process, 'getgid').mockReturnValue(0);
+    try {
+      process.env.SUDO_UID = '2001';
+      process.env.SUDO_GID = '2002';
+      expect(firecrackerManagerTestHelpers.resolveJailerIdentity()).toEqual({
+        uid: 2001,
+        gid: 2002,
+      });
+
+      delete process.env.SUDO_UID;
+      delete process.env.SUDO_GID;
+      expect(firecrackerManagerTestHelpers.resolveJailerIdentity)
+        .toThrow(/non-root target uid\/gid/);
+    } finally {
+      uidSpy.mockRestore();
+      gidSpy.mockRestore();
+      if (originalSudoUid === undefined) delete process.env.SUDO_UID;
+      else process.env.SUDO_UID = originalSudoUid;
+      if (originalSudoGid === undefined) delete process.env.SUDO_GID;
+      else process.env.SUDO_GID = originalSudoGid;
+    }
   });
 
   it('constructs unique, contained jail paths', () => {
@@ -663,6 +687,9 @@ describe('FirecrackerManager', () => {
       putMachineConfig: jest.fn().mockResolvedValue(undefined),
       putBootSource: jest.fn().mockResolvedValue(undefined),
       putDrive: jest.fn().mockResolvedValue(undefined),
+      putLogger: jest.fn().mockResolvedValue(undefined),
+      putMetrics: jest.fn().mockResolvedValue(undefined),
+      putAction: jest.fn().mockResolvedValue(undefined),
       putNetworkInterface: jest.fn().mockRejectedValue(new Error('invalid NIC')),
     } as unknown as FirecrackerApiClient;
     const deps = dependencies({
@@ -705,5 +732,49 @@ describe('FirecrackerManager', () => {
       /exited before API readiness with code null and signal SIGKILL/,
     );
     expect(deps.sleep).not.toHaveBeenCalled();
+  });
+
+  it('flushes metrics and bounds diagnostic files before persistence', async () => {
+    const oversized = Buffer.alloc(1024 * 1024 + 128, 0x61);
+    const child = processMock();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    Object.assign(child, { stdout, stderr });
+    const deps = dependencies({
+      launch: jest.fn().mockReturnValue(child),
+      readFileTail: jest.fn().mockImplementation((_source: string, maxBytes: number) =>
+        Promise.resolve(oversized.subarray(oversized.length - maxBytes)),
+      ),
+    });
+    const manager = new FirecrackerManager(
+      config(),
+      '/tmp/awf',
+      deps,
+      'diagnostics',
+      networkConfig(),
+    );
+
+    const client = await manager.start();
+    stdout.write(oversized);
+    stderr.write('jailer error');
+    await manager.startInstance();
+    await manager.collectDiagnostics('/tmp/diagnostics');
+
+    expect(client.putAction).toHaveBeenCalledWith('FlushMetrics');
+    expect(deps.writeFile).toHaveBeenCalledWith(
+      '/tmp/diagnostics/firecracker.metrics.jsonl',
+      expect.objectContaining({ length: 1024 * 1024 }),
+      { mode: 0o600 },
+    );
+    expect(deps.writeFile).toHaveBeenCalledWith(
+      '/tmp/diagnostics/jailer-stdout.log',
+      expect.objectContaining({ length: 1024 * 1024 }),
+      { mode: 0o600 },
+    );
+    expect(deps.writeFile).toHaveBeenCalledWith(
+      '/tmp/diagnostics/jailer-stderr.log',
+      Buffer.from('jailer error'),
+      { mode: 0o600 },
+    );
   });
 });

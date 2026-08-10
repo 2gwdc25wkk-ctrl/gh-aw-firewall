@@ -59,6 +59,7 @@ describe('Firecracker workspace images', () => {
 
     const prepared = await image.prepare();
     expect(prepared.imageBytes).toBe(FIRECRACKER_MIN_WORKSPACE_IMAGE_BYTES);
+    expect((await fs.stat(prepared.workspaceImagePath)).mode & 0o777).toBe(0o600);
     expect(await fs.readFile(
       path.join(image.stagingDirectory, 'workspace', '.hidden'),
       'utf8',
@@ -77,8 +78,9 @@ describe('Firecracker workspace images', () => {
       path.join(image.stagingDirectory, 'workspace', '.awf-home', '.config', 'gh'),
     )).rejects.toThrow();
     expect(commands.map(({ command }) => command)).toEqual([
-      'mke2fs', 'debugfs', 'debugfs', 'e2fsck',
+      'mke2fs', 'debugfs', 'debugfs', 'debugfs', 'e2fsck',
     ]);
+    expect(commands[1].args).toContain('rm /sbin/awf-supervisor');
     expect(commands[0].args).toEqual(expect.arrayContaining(['-b', '4096']));
     await fs.rm(root, { recursive: true, force: true });
   });
@@ -115,6 +117,29 @@ describe('Firecracker workspace images', () => {
       new Map([['file', file('host')]]),
     )).toThrow(/concurrently/);
     expect(() => assertNoWorkspaceConflicts(original, guest, guest)).not.toThrow();
+  });
+
+  it('rejects host-only changes that copy-back would overwrite or delete', () => {
+    const file = (digest: string) => ({
+      type: 'file' as const,
+      mode: 0o644,
+      uid: 1000,
+      gid: 1000,
+      size: 1,
+      digest,
+    });
+    const original = new Map([['existing', file('before')]]);
+    const unchangedGuest = new Map([['existing', file('before')]]);
+    const hostChanged = new Map([
+      ['existing', file('host-change')],
+      ['host-created', file('host-created')],
+    ]);
+
+    expect(() => assertNoWorkspaceConflicts(
+      original,
+      unchangedGuest,
+      hostChanged,
+    )).toThrow(/existing.*host-created/);
   });
 
   it('preserves the changed image when copy-back fails and cleanup remains safe', async () => {
