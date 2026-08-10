@@ -221,7 +221,7 @@ export class FirecrackerNetworkManager implements FirecrackerNetworkLifecycle {
       );
       await this.commands.nftInNamespace(
         this.plan.namespaceName,
-        ['-f', '-'],
+        [],
         generateFirecrackerNftRuleset(this.plan),
       );
       await this.probe?.verify(this.plan);

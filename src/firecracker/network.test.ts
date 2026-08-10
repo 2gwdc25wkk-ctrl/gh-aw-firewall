@@ -214,7 +214,7 @@ describe('Firecracker network lifecycle', () => {
     expect(calls[13].args).toContain('net.ipv6.conf.default.disable_ipv6=1');
     expect(calls[14]).toEqual({
       command: 'ip',
-      args: ['netns', 'exec', plan.namespaceName, 'nft', '-f', '-'],
+      args: ['netns', 'exec', plan.namespaceName, 'nft'],
       options: {
         reject: true,
         input: generateFirecrackerNftRuleset(plan),
