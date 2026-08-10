@@ -447,6 +447,8 @@ export function buildFirecrackerGuestEnvironment(
     HOME: FIRECRACKER_GUEST_HOME,
     PWD: FIRECRACKER_GUEST_WORKSPACE,
     AWF_WORKDIR: FIRECRACKER_GUEST_WORKSPACE,
+    http_proxy: `http://${infrastructure.squidIp}:3128`,
+    https_proxy: `http://${infrastructure.squidIp}:3128`,
     SQUID_PROXY_HOST: infrastructure.squidIp,
     HOSTNAME: 'awf-firecracker',
     AWF_RUNTIME: 'firecracker',

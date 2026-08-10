@@ -432,6 +432,8 @@ describe('Firecracker runtime backend', () => {
     expect(environment.OPENAI_API_KEY).not.toBe(secret);
     expect(Object.values(environment)).not.toContain(secret);
     expect(environment.HTTP_PROXY).toBe('http://172.30.0.10:3128');
+    expect(environment.http_proxy).toBe(environment.HTTP_PROXY);
+    expect(environment.https_proxy).toBe(environment.HTTPS_PROXY);
     expect(environment.HOME).toBe('/workspace/.awf-home');
 
     expect(() => buildFirecrackerGuestEnvironment(
