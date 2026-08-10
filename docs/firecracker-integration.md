@@ -453,10 +453,17 @@ After the agent command exits, AWF extracts the workspace image content via
 ### Recovery image
 
 If copy-back fails partway through, AWF writes the raw `workspace.ext4` to a
-recovery path (`<workDir>/firecracker-recovery/<runId>-workspace.ext4`) before
-cleanup. This allows manual recovery using standard `debugfs` or `mount` tools.
-The recovery path is logged at `warn` level so it is visible even if the overall
-command exits non-zero.
+recovery path (`$TMPDIR/awf-firecracker-recovery/<runId>-workspace.ext4`, mode
+`0700`) before cleanup. This allows manual recovery using standard `debugfs` or
+`mount` tools. The recovery path is logged at `warn` level so it is visible even
+if the overall command exits non-zero.
+
+The recovery directory deliberately sits **outside both the workspace and the
+per-run control directories**. The workspace holds guest-controlled content, so
+writing a root-owned image into it would let the guest pre-place a symlink at the
+recovery path and redirect the write; the run directory is deleted by cleanup, so
+it cannot hold the one copy of unrecovered work. AWF refuses to start if the
+recovery directory is nested inside either.
 
 ### Bounded image size
 
@@ -1167,7 +1174,7 @@ If copy-back fails and a recovery image was preserved:
 ```bash
 # Mount the recovery image (requires root or loop mount capability)
 sudo mkdir -p /mnt/awf-recovery
-sudo mount -o loop <workDir>/firecracker-recovery/<runId>-workspace.ext4 /mnt/awf-recovery
+sudo mount -o loop "$TMPDIR/awf-firecracker-recovery/<runId>-workspace.ext4" /mnt/awf-recovery
 
 # Browse or extract files
 ls /mnt/awf-recovery/workspace/
@@ -1369,6 +1376,58 @@ device and nothing else.
 If the instance never started, or termination was not confirmed, no copy-back
 occurs. With `--keep-containers` the images are preserved for inspection.
 
+### Extraction integrity: `debugfs` exits 0 on subcommand failure
+
+`debugfs -R <subcommand>` returns exit status 0 even when the subcommand did no
+work. A missing `rdump` destination, a missing `rdump` source, and a `write`
+whose source cannot be opened all report success to the shell. Only an unknown
+subcommand *name* produces a non-zero status. Left unchecked, a silently failed
+`rdump` would produce an empty extraction directory, and the workspace copy-back
+would then `rsync -a --delete` that emptiness over the merge tree.
+
+AWF therefore treats `debugfs` output, not its exit status, as the result:
+
+- **Silence is success.** Mutating and dumping subcommands may print only the
+  version banner and (for `write`) `Allocated inode: N`. Any other line fails the
+  run, naming every diagnostic `debugfs` emitted.
+- **Extraction sentinels.** A successful `rdump /` always materialises the
+  `lost+found` directory that `mke2fs` creates. The workspace extraction requires
+  it; the exchange extraction requires it plus the AWF-written `.awf-exchange`
+  marker. A missing sentinel fails the run instead of being reported as "the
+  guest produced no output".
+- **Non-empty invariant.** If the staged workspace manifest had entries but the
+  extraction has none, copy-back aborts rather than deleting host work. The
+  changed image is preserved for recovery.
+- **Supervisor read-back.** After the guest supervisor is written into the rootfs
+  image, AWF dumps it back out, re-hashes it against the expected SHA-256, and
+  confirms `debugfs stat` reports mode `0755`. A `write` or `sif` that silently
+  did nothing fails the run before the VM is ever booted.
+
+### Guest writable state
+
+With the read-only runtime device in place, the guest's writable surface is:
+
+| Guest path | Backing | Flags | Copied back |
+| --- | --- | --- | --- |
+| `/` | per-run rootfs image (`vda`) | writable | **No** — discarded with the run |
+| `/workspace` | workspace image (`vdb`) | `nosuid,nodev` | Yes, after confirmed stop |
+| `/awf/runtime` | runtime asset image (`vdc`) | `ro,nosuid,nodev` | No |
+| `/awf/runner-temp/gh-aw`, `/tmp/gh-aw` | binds of `/awf/runtime` | `ro,nosuid,nodev` | No |
+| `/awf/exchange` | exchange image (`vdd`) | `nosuid,nodev,noexec` | Yes, `safe-outputs/` only |
+| `/proc` | procfs | — | No |
+
+`/workspace` is the only writable filesystem whose contents reach the host, and
+`/awf/exchange` is the only other writable device — bounded, `noexec`, and read
+exclusively after the VM has stopped. Writes to the rootfs are intentionally
+permitted (package managers, caches, and the supervisor's own scratch state need
+them) but are discarded: nothing on `vda` is ever copied back.
+
+`/workspace` is mounted `MS_NOSUID | MS_NODEV`, so a setuid binary or device node
+smuggled into the workspace cannot confer privilege inside the guest. `MS_NOEXEC`
+is deliberately **not** set, because builds and tests legitimately execute
+binaries from the workspace. The runtime device is likewise not `noexec`: staged
+gh-aw engine and MCP executables must run from it.
+
 ### Agent-capable rootfs
 
 The 128 MiB BusyBox rootfs produced by `guest/firecracker/build-test-artifacts.sh`
@@ -1423,6 +1482,19 @@ its ELF interpreter and every `NEEDED` shared library (or its shebang
 interpreter) is present in-guest — a binary whose loader is missing is a broken
 guest, not a working one. It also re-asserts that no setuid/setgid binaries and
 no credential-bearing paths shipped.
+
+The verifier additionally proves the **C library family**. gh-aw engines ship
+prebuilt glibc binaries, so a musl-based rootfs would fail at agent run time
+rather than at build time. Verification requires a glibc dynamic loader
+(`ld-linux-*.so`) and `libc.so.6`, rejects any `ld-musl-*`/`libc.musl-*`, and
+confirms the pinned Node build's ELF interpreter is the glibc loader. Debian is
+glibc-based, which is why it is the pinned base.
+
+Host runner state is never baked into the guest: the verifier fails if
+`opt/hostedtoolcache`, `opt/actions-runner`, `home/runner`, or
+`usr/local/share/hostedtoolcache` exist in the image, and the builder never reads
+`RUNNER_TOOL_CACHE`. The guest's Node.js is the pinned, checksum-verified build —
+not a copy of whatever the host runner happened to have.
 
 Generated Copilot/Claude/Codex/MCP tooling is **staged**, not baked in; the
 rootfs guarantees only the interpreters and libraries those tools need.

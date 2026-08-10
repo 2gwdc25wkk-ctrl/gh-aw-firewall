@@ -153,4 +153,36 @@ describe('Firecracker agent rootfs build contract', () => {
     expect(verifier).not.toMatch(/debugfs\s+-w/);
     expect(verifier).not.toMatch(/\bmount\b/);
   });
+
+  it('proves the rootfs is glibc-based rather than musl', () => {
+    // gh-aw engines ship prebuilt glibc binaries.
+    expect(verifier).toContain('verify_glibc');
+    expect(verifier).toContain('ld-linux-x86-64.so.2');
+    expect(verifier).toContain('libc.so.6');
+    expect(verifier).toMatch(/ld-musl-\*\.so\*/);
+    expect(verifier).toContain('must be glibc-based');
+    // Debian is glibc-based; a musl base would silently break the engines.
+    expect(builder).toMatch(/DEBIAN_IMAGE_DIGEST=sha256:[0-9a-f]{64}/);
+    expect(builder).toContain('DEBIAN_IMAGE=debian@${DEBIAN_IMAGE_DIGEST}');
+    expect(builder).not.toMatch(/\balpine\b/);
+  });
+
+  it('proves the pinned Node build uses the glibc loader', () => {
+    expect(verifier).toContain('node is not a dynamically linked glibc executable');
+    expect(verifier).toContain('uses non-glibc interpreter');
+  });
+
+  it('refuses host runner state and the runner tool cache', () => {
+    for (const forbidden of [
+      'opt/hostedtoolcache',
+      'opt/actions-runner',
+      'home/runner',
+    ]) {
+      expect(verifier).toContain(forbidden);
+    }
+    expect(verifier).toContain('host runner state present');
+    // The builder must never copy host runtimes into the guest image.
+    expect(builder).not.toContain('RUNNER_TOOL_CACHE');
+    expect(builder).not.toContain('hostedtoolcache');
+  });
 });

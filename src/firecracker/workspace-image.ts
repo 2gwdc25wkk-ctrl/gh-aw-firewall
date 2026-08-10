@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import * as os from 'os';
 import { createReadStream, promises as fs, type Stats } from 'fs';
 import * as path from 'path';
 import execa from 'execa';
@@ -7,6 +8,13 @@ import {
   CREDENTIAL_ENTRIES,
   HOME_TOOL_SUBDIRS,
 } from '../config/mount-policy';
+import {
+  assertDebugfsExtractionProduced,
+  assertDebugfsOperand,
+  assertDebugfsQuerySucceeded,
+  assertDebugfsSucceeded,
+  parseDebugfsStatMode,
+} from './debugfs';
 
 const MIB = 1024 * 1024;
 export const FIRECRACKER_MIN_WORKSPACE_IMAGE_BYTES = 256 * MIB;
@@ -24,6 +32,11 @@ export interface FirecrackerWorkspaceImageConfig {
   readonly supervisorBinaryPath: string;
   readonly supervisorSha256: string;
   readonly maxImageBytes?: number;
+  /**
+   * Where a failed copy-back preserves the changed image. Must sit outside the
+   * workspace and outside the per-run control directories.
+   */
+  readonly recoveryDirectory?: string;
   readonly uid: number;
   readonly gid: number;
 }
@@ -44,7 +57,7 @@ export type FirecrackerWorkspaceManifest = ReadonlyMap<
 >;
 
 export interface FirecrackerWorkspaceImageDependencies {
-  runTool(command: string, args: readonly string[]): Promise<void>;
+  runTool(command: string, args: readonly string[]): Promise<string>;
 }
 
 const defaultDependencies: FirecrackerWorkspaceImageDependencies = {
@@ -54,11 +67,12 @@ const defaultDependencies: FirecrackerWorkspaceImageDependencies = {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 120_000,
     });
-    if (result.exitCode === 0) return;
+    const output = `${result.stdout}\n${result.stderr}`;
+    if (result.exitCode === 0) return output;
     if (
       (command === 'e2fsck' || command.endsWith('/e2fsck')) &&
       result.exitCode === FIRECRACKER_E2FSCK_REPAIR_EXIT_CODE
-    ) return;
+    ) return output;
     throw new Error(
       `${command} exited with code ${result.exitCode}: ` +
       `${result.stderr.trim() || result.stdout.trim()}`,
@@ -77,6 +91,16 @@ export interface FirecrackerWorkspacePreparation {
 export function firecrackerRunImageDirectory(workDir: string, runId: string): string {
   assertSafeRunId(runId);
   return path.join(workDir, 'firecracker-images', runId);
+}
+
+/**
+ * Recovery images are deliberately kept outside the workspace and outside the
+ * per-run control directories: the workspace is guest-controlled content that a
+ * failed copy-back must never write into, and the run directory is removed by
+ * cleanup.
+ */
+export function firecrackerRecoveryDirectory(override?: string): string {
+  return override ?? path.join(os.tmpdir(), 'awf-firecracker-recovery');
 }
 
 /**
@@ -103,9 +127,10 @@ export class FirecrackerWorkspaceImage {
     this.stagingDirectory = path.join(this.runDirectory, 'staging');
     this.workspaceImagePath = path.join(this.runDirectory, 'workspace.ext4');
     this.rootfsImagePath = path.join(this.runDirectory, 'rootfs.ext4');
+    const recoveryDirectory = firecrackerRecoveryDirectory(config.recoveryDirectory);
+    assertRecoveryDirectoryIsolated(recoveryDirectory, config.workspacePath, config.workDir);
     this.recoveryImagePath = path.join(
-      config.workspacePath,
-      '.awf-firecracker-recovery',
+      recoveryDirectory,
       `${config.runId}-workspace.ext4`,
     );
   }
@@ -113,8 +138,16 @@ export class FirecrackerWorkspaceImage {
   private runTool(
     command: 'mke2fs' | 'debugfs' | 'e2fsck' | 'rsync',
     args: readonly string[],
-  ): Promise<void> {
+  ): Promise<string> {
     return this.dependencies.runTool(this.tools?.[command] ?? command, args);
+  }
+
+  /**
+   * Run a silent `debugfs` subcommand and fail closed on any diagnostic, because
+   * `debugfs` exits 0 even when the subcommand performed no work.
+   */
+  private async runDebugfs(args: readonly string[], label: string): Promise<void> {
+    assertDebugfsSucceeded(await this.runTool('debugfs', args), label);
   }
 
   async prepare(): Promise<FirecrackerWorkspacePreparation> {
@@ -203,10 +236,16 @@ export class FirecrackerWorkspaceImage {
       await fs.mkdir(extractionDirectory, { recursive: true, mode: 0o700 });
       assertDebugfsOperand(extractionDirectory, 'extraction directory');
       await this.runTool('e2fsck', ['-f', '-y', changedImagePath]);
-      await this.runTool('debugfs', [
-        '-R', `rdump / ${extractionDirectory}`,
-        changedImagePath,
-      ]);
+      await this.runDebugfs(
+        ['-R', `rdump / ${extractionDirectory}`, changedImagePath],
+        'extracting the guest workspace image',
+      );
+      // Proves the dump actually ran before `rsync --delete` replaces host state.
+      await assertDebugfsExtractionProduced(
+        extractionDirectory,
+        ['lost+found'],
+        'the guest workspace',
+      );
       await fs.rm(path.join(extractionDirectory, '.awf-home'), {
         recursive: true,
         force: true,
@@ -217,6 +256,13 @@ export class FirecrackerWorkspaceImage {
       });
       const guestWorkspace = extractionDirectory;
       const guestManifest = await buildFirecrackerWorkspaceManifest(guestWorkspace);
+      if (guestManifest.size === 0 && this.originalManifest.size > 0) {
+        throw new Error(
+          'the guest workspace extraction is empty while the staged workspace ' +
+          `contained ${this.originalManifest.size} entries; refusing to delete ` +
+          'the host workspace from an unverified extraction',
+        );
+      }
       const currentManifest = await buildFirecrackerWorkspaceManifest(this.config.workspacePath);
       assertNoWorkspaceConflicts(this.originalManifest, guestManifest, currentManifest);
       await this.applyWorkspaceUpdateAtomically(guestWorkspace, guestManifest);
@@ -296,30 +342,92 @@ export class FirecrackerWorkspaceImage {
     await fs.copyFile(this.config.supervisorBinaryPath, localSupervisor);
     await fs.chmod(localSupervisor, 0o500);
     assertDebugfsOperand(localSupervisor, 'supervisor staging path');
-    await this.runTool('debugfs', [
-      '-w',
-      '-R', 'rm /sbin/awf-supervisor',
-      this.rootfsImagePath,
-    ]);
-    await this.dependencies.runTool('debugfs', [
-      '-w',
-      '-R', `write ${localSupervisor} /sbin/awf-supervisor`,
-      this.rootfsImagePath,
-    ]);
-    await this.runTool('debugfs', [
-      '-w',
-      '-R', 'sif /sbin/awf-supervisor mode 0100755',
-      this.rootfsImagePath,
-    ]);
+    await this.runDebugfs(
+      ['-w', '-R', 'rm /sbin/awf-supervisor', this.rootfsImagePath],
+      'removing the previous guest supervisor',
+    ).catch((error: unknown) => {
+      // The base rootfs legitimately may not carry a supervisor yet.
+      if (`${error}`.includes('File not found by ext2_lookup')) return;
+      throw error;
+    });
+    assertDebugfsSucceeded(
+      await this.dependencies.runTool(this.tools?.debugfs ?? 'debugfs', [
+        '-w',
+        '-R', `write ${localSupervisor} /sbin/awf-supervisor`,
+        this.rootfsImagePath,
+      ]),
+      'writing the guest supervisor into the rootfs image',
+    );
+    await this.runDebugfs(
+      ['-w', '-R', 'sif /sbin/awf-supervisor mode 0100755', this.rootfsImagePath],
+      'setting the guest supervisor mode',
+    );
     await this.runTool('e2fsck', ['-f', '-y', this.rootfsImagePath]);
+    await this.verifyEmbeddedSupervisor(actual);
+  }
+
+  /**
+   * `debugfs` reports success for a `write` that copied nothing, so the embedded
+   * supervisor is read back out of the image and re-hashed before the rootfs is
+   * ever booted.
+   */
+  private async verifyEmbeddedSupervisor(expectedSha256: string): Promise<void> {
+    const readback = path.join(this.runDirectory, 'awf-supervisor.readback');
+    await fs.rm(readback, { force: true });
+    assertDebugfsOperand(readback, 'supervisor verification path');
+    try {
+      await this.runDebugfs(
+        ['-R', `dump /sbin/awf-supervisor ${readback}`, this.rootfsImagePath],
+        'reading back the embedded guest supervisor',
+      );
+      const embedded = await sha256File(readback).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') {
+            throw new Error(
+              'the embedded guest supervisor could not be read back from the ' +
+              'rootfs image',
+            );
+          }
+          throw error;
+        },
+      );
+      if (embedded !== expectedSha256) {
+        throw new Error(
+          `embedded guest supervisor SHA-256 mismatch: expected ` +
+          `${expectedSha256}, image contains ${embedded}`,
+        );
+      }
+      const statOutput = await this.runTool('debugfs', [
+        '-R', 'stat /sbin/awf-supervisor',
+        this.rootfsImagePath,
+      ]);
+      assertDebugfsQuerySucceeded(
+        statOutput,
+        'inspecting the embedded guest supervisor',
+      );
+      const mode = parseDebugfsStatMode(statOutput);
+      if (mode !== 0o755) {
+        throw new Error(
+          'embedded guest supervisor mode was not applied: expected 0755, got ' +
+          (mode === undefined ? 'unknown' : `0${mode.toString(8)}`),
+        );
+      }
+    } finally {
+      await fs.rm(readback, { force: true });
+    }
   }
 
   private async preserveRecoveryImage(changedImagePath: string): Promise<void> {
     if (this.recoveryPreserved) return;
-    await fs.mkdir(path.dirname(this.recoveryImagePath), {
-      recursive: true,
-      mode: 0o700,
-    });
+    const recoveryDirectory = path.dirname(this.recoveryImagePath);
+    await fs.mkdir(recoveryDirectory, { recursive: true, mode: 0o700 });
+    await fs.chmod(recoveryDirectory, 0o700);
+    const directoryStat = await fs.lstat(recoveryDirectory);
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
+      throw new Error(
+        `Firecracker recovery directory must be a real directory: ${recoveryDirectory}`,
+      );
+    }
     const temporary = `${this.recoveryImagePath}.tmp-${process.pid}`;
     await fs.copyFile(changedImagePath, temporary);
     await fs.chmod(temporary, 0o600);
@@ -600,9 +708,30 @@ function assertSafeRunId(runId: string): void {
   }
 }
 
-function assertDebugfsOperand(value: string, label: string): void {
-  if (/[\s"'\\;`\r\n]/.test(value)) {
-    throw new Error(`Firecracker ${label} is unsafe for debugfs commands: ${value}`);
+/**
+ * The workspace is guest-controlled and the run directory is deleted by cleanup,
+ * so neither may host the recovery image.
+ */
+function assertRecoveryDirectoryIsolated(
+  recoveryDirectory: string,
+  workspacePath: string,
+  workDir: string,
+): void {
+  const recovery = path.resolve(recoveryDirectory);
+  for (const [label, candidate] of [
+    ['workspace', workspacePath],
+    ['run directory', path.join(workDir, 'firecracker-images')],
+  ] as const) {
+    const resolved = path.resolve(candidate);
+    const relative = path.relative(resolved, recovery);
+    const contained = relative === '' ||
+      (!relative.startsWith('..') && !path.isAbsolute(relative));
+    if (contained) {
+      throw new Error(
+        `Firecracker recovery directory must not live inside the ${label}: ` +
+        `${recovery}`,
+      );
+    }
   }
 }
 

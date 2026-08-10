@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { createFakeToolRunner } from './debugfs.test-utils';
 import {
   FIRECRACKER_EXCHANGE_MARKER,
   FIRECRACKER_EXCHANGE_OUTPUT_DIRNAME,
@@ -85,25 +86,23 @@ describe('FirecrackerExchangeImage', () => {
     const image = new FirecrackerExchangeImage(
       { runId: 'run-1', runDirectory, plan, uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 },
       {
-        runTool: async (command, args) => {
-          commands.push({ command, args });
-          if (command === 'mke2fs') {
+        runTool: createFakeToolRunner({
+          onCommand: async (command, args) => {
+            commands.push({ command, args });
+            if (command !== 'mke2fs') return;
             await fs.writeFile(path.join(runDirectory, 'exchange.ext4'), 'image');
-          }
-          if (command === 'debugfs') {
-            // Simulate `rdump /` of the guest device into the extraction dir.
-            const destination = image.extractionDirectory;
+          },
+          onRdump: async (destination) => {
             await fs.mkdir(path.join(destination, FIRECRACKER_EXCHANGE_OUTPUT_DIRNAME), {
               recursive: true,
             });
-            await fs.mkdir(path.join(destination, 'lost+found'), { recursive: true });
             await fs.writeFile(path.join(destination, FIRECRACKER_EXCHANGE_MARKER), '{}');
             await fs.writeFile(
               path.join(destination, FIRECRACKER_EXCHANGE_OUTPUT_DIRNAME, 'outputs.jsonl'),
               '{"type":"add-comment"}\n',
             );
-          }
-        },
+          },
+        }),
       },
     );
     return { image, commands, hostDirectory, runDirectory };
@@ -155,19 +154,18 @@ describe('FirecrackerExchangeImage', () => {
     const image: FirecrackerExchangeImage = new FirecrackerExchangeImage(
       { runId: 'run-1', runDirectory, plan, uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 },
       {
-        runTool: async (command) => {
-          if (command === 'mke2fs') {
+        runTool: createFakeToolRunner({
+          onCommand: async (command) => {
+            if (command !== 'mke2fs') return;
             await fs.writeFile(path.join(runDirectory, 'exchange.ext4'), 'image');
-          }
-          if (command === 'debugfs') {
-            const outputs = path.join(
-              image.extractionDirectory,
-              FIRECRACKER_EXCHANGE_OUTPUT_DIRNAME,
-            );
+          },
+          onRdump: async (destination) => {
+            await fs.writeFile(path.join(destination, FIRECRACKER_EXCHANGE_MARKER), '{}');
+            const outputs = path.join(destination, FIRECRACKER_EXCHANGE_OUTPUT_DIRNAME);
             await fs.mkdir(outputs, { recursive: true });
             await fs.writeFile(path.join(outputs, 'big.jsonl'), Buffer.alloc(64));
-          }
-        },
+          },
+        }),
       },
     );
     await image.prepare();
@@ -183,19 +181,18 @@ describe('FirecrackerExchangeImage', () => {
     const image: FirecrackerExchangeImage = new FirecrackerExchangeImage(
       { runId: 'run-1', runDirectory, plan, uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 },
       {
-        runTool: async (command) => {
-          if (command === 'mke2fs') {
+        runTool: createFakeToolRunner({
+          onCommand: async (command) => {
+            if (command !== 'mke2fs') return;
             await fs.writeFile(path.join(runDirectory, 'exchange.ext4'), 'image');
-          }
-          if (command === 'debugfs') {
-            const outputs = path.join(
-              image.extractionDirectory,
-              FIRECRACKER_EXCHANGE_OUTPUT_DIRNAME,
-            );
+          },
+          onRdump: async (destination) => {
+            await fs.writeFile(path.join(destination, FIRECRACKER_EXCHANGE_MARKER), '{}');
+            const outputs = path.join(destination, FIRECRACKER_EXCHANGE_OUTPUT_DIRNAME);
             await fs.mkdir(outputs, { recursive: true });
             await fs.symlink('/etc/passwd', path.join(outputs, 'escape'));
-          }
-        },
+          },
+        }),
       },
     );
     await image.prepare();
@@ -212,11 +209,15 @@ describe('FirecrackerExchangeImage', () => {
     const image = new FirecrackerExchangeImage(
       { runId: 'run-1', runDirectory, plan, uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 },
       {
-        runTool: async (command) => {
-          if (command === 'mke2fs') {
+        runTool: createFakeToolRunner({
+          onCommand: async (command) => {
+            if (command !== 'mke2fs') return;
             await fs.writeFile(path.join(runDirectory, 'exchange.ext4'), 'image');
-          }
-        },
+          },
+          onRdump: async (destination) => {
+            await fs.writeFile(path.join(destination, FIRECRACKER_EXCHANGE_MARKER), '{}');
+          },
+        }),
       },
     );
     await image.prepare();
@@ -240,19 +241,18 @@ describe('FirecrackerExchangeImage', () => {
     const image: FirecrackerExchangeImage = new FirecrackerExchangeImage(
       { runId: 'run-1', runDirectory, plan, uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 },
       {
-        runTool: async (command) => {
-          if (command === 'mke2fs') {
+        runTool: createFakeToolRunner({
+          onCommand: async (command) => {
+            if (command !== 'mke2fs') return;
             await fs.writeFile(path.join(runDirectory, 'exchange.ext4'), 'image');
-          }
-          if (command === 'debugfs') {
-            const outputs = path.join(
-              image.extractionDirectory,
-              FIRECRACKER_EXCHANGE_OUTPUT_DIRNAME,
-            );
+          },
+          onRdump: async (destination) => {
+            await fs.writeFile(path.join(destination, FIRECRACKER_EXCHANGE_MARKER), '{}');
+            const outputs = path.join(destination, FIRECRACKER_EXCHANGE_OUTPUT_DIRNAME);
             await fs.mkdir(outputs, { recursive: true });
             await fs.writeFile(path.join(outputs, 'outputs.jsonl'), '{}\n');
-          }
-        },
+          },
+        }),
       },
     );
     await image.prepare();
@@ -291,19 +291,19 @@ describe('FirecrackerExchangeImage failure and ownership handling', () => {
         gid: process.getgid?.() ?? 0,
       },
       {
-        runTool: async (command) => {
-          if (command === 'mke2fs') {
+        runTool: createFakeToolRunner({
+          onCommand: async (command) => {
+            if (command !== 'mke2fs') return;
             await fs.writeFile(path.join(runDirectory, 'exchange.ext4'), 'image');
-          }
-          if (command === 'debugfs') {
-            const destination = image.extractionDirectory;
+          },
+          onRdump: async (destination) => {
             const outputs = path.join(destination, FIRECRACKER_EXCHANGE_OUTPUT_DIRNAME);
             await fs.mkdir(outputs, { recursive: true });
             await fs.writeFile(path.join(destination, FIRECRACKER_EXCHANGE_MARKER), '{}');
             if (write) await write(outputs);
             else await fs.writeFile(path.join(outputs, 'outputs.jsonl'), '{}\n');
-          }
-        },
+          },
+        }),
       },
     );
     return { image, hostDirectory };

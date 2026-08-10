@@ -12,6 +12,11 @@ import {
   defaultRuntimeAssetDependencies,
   type FirecrackerRuntimeAssetImageDependencies,
 } from './runtime-assets';
+import {
+  assertDebugfsExtractionProduced,
+  assertDebugfsOperand,
+  assertDebugfsSucceeded,
+} from './debugfs';
 
 const MIB = 1024 * 1024;
 const EXCHANGE_BLOCK_BYTES = 4096;
@@ -168,10 +173,19 @@ export class FirecrackerExchangeImage {
       await fs.rm(this.extractionDirectory, { recursive: true, force: true });
       await fs.mkdir(this.extractionDirectory, { recursive: true, mode: 0o700 });
       await this.runTool('e2fsck', ['-f', '-y', changedImagePath]);
-      await this.runTool('debugfs', [
-        '-R', `rdump / ${this.extractionDirectory}`,
-        changedImagePath,
-      ]);
+      assertDebugfsSucceeded(
+        await this.runTool('debugfs', [
+          '-R', `rdump / ${this.extractionDirectory}`,
+          changedImagePath,
+        ]),
+        'extracting the safe-output exchange image',
+      );
+      // A silent `debugfs` failure would otherwise be reported as "no outputs".
+      await assertDebugfsExtractionProduced(
+        this.extractionDirectory,
+        ['lost+found', FIRECRACKER_EXCHANGE_MARKER],
+        'the safe-output exchange',
+      );
       for (const reserved of ['lost+found', FIRECRACKER_EXCHANGE_MARKER]) {
         await fs.rm(path.join(this.extractionDirectory, reserved), {
           recursive: true,
@@ -281,7 +295,7 @@ export class FirecrackerExchangeImage {
   private runTool(
     command: 'mke2fs' | 'e2fsck' | 'debugfs',
     args: readonly string[],
-  ): Promise<void> {
+  ): Promise<string> {
     return this.dependencies.runTool(this.tools?.[command] ?? command, args);
   }
 }
@@ -294,8 +308,3 @@ function alignExchangeBytes(requestedBytes: number): number {
   return Math.ceil(requested / EXCHANGE_BLOCK_BYTES) * EXCHANGE_BLOCK_BYTES;
 }
 
-function assertDebugfsOperand(value: string, label: string): void {
-  if (/[\s"'\\;`\r\n]/.test(value)) {
-    throw new Error(`Firecracker ${label} is unsafe for debugfs commands: ${value}`);
-  }
-}

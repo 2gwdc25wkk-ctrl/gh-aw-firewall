@@ -288,6 +288,7 @@ describe('FirecrackerRuntimeAssetImage', () => {
           if (command === 'mke2fs') {
             await fs.writeFile(path.join(runDirectory, 'runtime-assets.ext4'), 'image');
           }
+          return '';
         },
       },
     );

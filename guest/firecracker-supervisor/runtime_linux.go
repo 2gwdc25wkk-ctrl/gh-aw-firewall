@@ -273,6 +273,11 @@ func mountBlockDevice(device, target string, flags uintptr, mode os.FileMode) er
 	return syscall.Mount(device, target, "", flags, "")
 }
 
+// workspaceMountFlags keeps the only writable guest filesystem from carrying
+// privilege escalation vectors. MS_NOEXEC is deliberately not set: builds and
+// tests legitimately execute binaries from the workspace.
+const workspaceMountFlags = syscall.MS_NOSUID | syscall.MS_NODEV
+
 func mountWorkspace(config bootConfig) error {
 	info, err := os.Stat(config.WorkspaceDevice)
 	if err != nil {
@@ -284,7 +289,13 @@ func mountWorkspace(config bootConfig) error {
 	if err := os.MkdirAll(config.WorkspaceMount, 0755); err != nil {
 		return fmt.Errorf("create workspace mount: %w", err)
 	}
-	if err := syscall.Mount(config.WorkspaceDevice, config.WorkspaceMount, "", 0, ""); err != nil {
+	flags := uintptr(workspaceMountFlags)
+	if err := syscall.Mount(config.WorkspaceDevice, config.WorkspaceMount, "ext4", flags, ""); err == nil {
+		return nil
+	} else if !errors.Is(err, syscall.ENODEV) {
+		return fmt.Errorf("mount workspace: %w", err)
+	}
+	if err := syscall.Mount(config.WorkspaceDevice, config.WorkspaceMount, "", flags, ""); err != nil {
 		return fmt.Errorf("mount workspace: %w", err)
 	}
 	return nil

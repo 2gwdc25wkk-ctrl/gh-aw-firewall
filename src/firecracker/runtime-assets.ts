@@ -284,7 +284,8 @@ export interface FirecrackerRuntimeAssetImageConfig {
 }
 
 export interface FirecrackerRuntimeAssetImageDependencies {
-  runTool(command: string, args: readonly string[]): Promise<void>;
+  /** Resolves with the combined stdout/stderr of the tool. */
+  runTool(command: string, args: readonly string[]): Promise<string>;
 }
 
 export interface FirecrackerRuntimeAssetPreparation {
@@ -300,11 +301,12 @@ export const defaultRuntimeAssetDependencies: FirecrackerRuntimeAssetImageDepend
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 120_000,
     });
-    if (result.exitCode === 0) return;
+    const output = `${result.stdout}\n${result.stderr}`;
+    if (result.exitCode === 0) return output;
     if (
       (command === 'e2fsck' || command.endsWith('/e2fsck')) &&
       result.exitCode === E2FSCK_REPAIR_EXIT_CODE
-    ) return;
+    ) return output;
     throw new Error(
       `${command} exited with code ${result.exitCode}: ` +
       `${result.stderr.trim() || result.stdout.trim()}`,
@@ -423,7 +425,7 @@ export class FirecrackerRuntimeAssetImage {
     await fs.chown(target, ownership.uid, ownership.gid);
   }
 
-  private runTool(command: 'mke2fs' | 'e2fsck', args: readonly string[]): Promise<void> {
+  private runTool(command: 'mke2fs' | 'e2fsck', args: readonly string[]): Promise<string> {
     return this.dependencies.runTool(this.tools?.[command] ?? command, args);
   }
 }

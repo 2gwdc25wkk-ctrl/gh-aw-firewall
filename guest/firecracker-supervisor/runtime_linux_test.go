@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -63,5 +64,23 @@ func TestUnmountPlanSkipsAbsentOptionalDevices(t *testing.T) {
 	plan := unmountPlan(bootConfig{WorkspaceMount: "/workspace"})
 	if len(plan) != 1 || plan[0].Target != "/workspace" {
 		t.Fatalf("unmount plan = %+v, want workspace only", plan)
+	}
+}
+
+// The workspace is the only writable guest filesystem, so it must never permit
+// setuid or device nodes. MS_NOEXEC must stay off because builds and tests run
+// binaries out of the workspace.
+func TestWorkspaceMountFlagsBlockPrivilegeVectors(t *testing.T) {
+	if workspaceMountFlags&syscall.MS_NOSUID == 0 {
+		t.Fatal("workspace mount must set MS_NOSUID")
+	}
+	if workspaceMountFlags&syscall.MS_NODEV == 0 {
+		t.Fatal("workspace mount must set MS_NODEV")
+	}
+	if workspaceMountFlags&syscall.MS_NOEXEC != 0 {
+		t.Fatal("workspace mount must not set MS_NOEXEC")
+	}
+	if workspaceMountFlags&syscall.MS_RDONLY != 0 {
+		t.Fatal("workspace mount must stay writable for copy-back")
 	}
 }

@@ -202,6 +202,65 @@ if find "$tree" -xdev -type f -perm /6000 | grep -q .; then
   fail "setuid/setgid binaries present"
 fi
 
+# gh-aw engines ship prebuilt glibc binaries, so a musl rootfs would fail at run
+# time rather than at build time. Prove the C library family explicitly.
+verify_glibc() {
+  local loader found=""
+  for loader in \
+    lib64/ld-linux-x86-64.so.2 \
+    lib/ld-linux-x86-64.so.2 \
+    lib/ld-linux-aarch64.so.1 \
+    lib64/ld-linux-aarch64.so.1; do
+    if [ -e "$tree/$loader" ]; then
+      found=$loader
+      break
+    fi
+  done
+  if [ -z "$found" ]; then
+    fail "no glibc dynamic loader (ld-linux-*.so) found in the rootfs"
+  fi
+  if ! find "$tree/lib" "$tree/lib64" "$tree/usr/lib" "$tree/usr/lib64" \
+    -name 'libc.so.6' -print -quit 2>/dev/null | grep -q .; then
+    fail "glibc runtime (libc.so.6) missing from the rootfs"
+  fi
+  if find "$tree" -xdev \( -name 'ld-musl-*.so*' -o -name 'libc.musl-*.so*' \) \
+    -print -quit 2>/dev/null | grep -q .; then
+    fail "musl C library present; the agent rootfs must be glibc-based"
+  fi
+  # The pinned Node build is the engine host, so it must use the glibc loader.
+  local node="$tree/usr/local/bin/node"
+  if [ -e "$node" ] && command -v readelf >/dev/null; then
+    local resolved node_interpreter
+    resolved=$(readlink -f "$node" 2>/dev/null || true)
+    if [ -n "$resolved" ] && [ -f "$resolved" ]; then
+      node_interpreter=$(readelf -l "$resolved" 2>/dev/null |
+        sed -n 's/.*program interpreter: \(.*\)\]/\1/p' | head -n 1)
+      case "$node_interpreter" in
+        */ld-linux-*) ;;
+        '')
+          fail "node is not a dynamically linked glibc executable"
+          ;;
+        *)
+          fail "node uses non-glibc interpreter $node_interpreter"
+          ;;
+      esac
+    fi
+  fi
+}
+
+verify_glibc
+
+# Host runtimes and the runner tool cache must never be baked into the guest.
+for forbidden_tree in \
+  opt/hostedtoolcache \
+  opt/actions-runner \
+  home/runner \
+  usr/local/share/hostedtoolcache; do
+  if [ -e "$tree/$forbidden_tree" ]; then
+    fail "host runner state present: /$forbidden_tree"
+  fi
+done
+
 # debugfs `rdump` restores only the nine rwx bits and skips device nodes, FIFOs
 # and sockets, so the tree walk above can never observe setuid/setgid or special
 # files that exist in the image. Read the inode modes out of the image itself.
