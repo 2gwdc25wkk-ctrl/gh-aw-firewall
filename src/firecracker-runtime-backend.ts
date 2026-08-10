@@ -1,4 +1,4 @@
-import type { Readable, Writable } from 'stream';
+import { PassThrough, type Readable, type Writable } from 'stream';
 import type { WorkflowDependencies } from './cli-workflow';
 import type { ExternalAgentRuntimeBackend } from './external-runtime-backend';
 import {
@@ -387,17 +387,35 @@ export class FirecrackerRuntimeBackend implements ExternalAgentRuntimeBackend {
     const apiProxyProbe = this.config.enableApiProxy
       ? ` && wget -q -T 5 -O /dev/null http://${API_PROXY_IP}:10000/reflect`
       : '';
+    const probeOutput = new PassThrough();
+    const probeError = new PassThrough();
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    probeOutput.on('data', (chunk: Buffer) => stdout.push(chunk));
+    probeError.on('data', (chunk: Buffer) => stderr.push(chunk));
     const result = await manager.execute({
       requestId: `probe-${process.pid}-${Date.now()}`,
-      argv: ['/bin/sh', '-c', `set -eu; ${squidProbe}${apiProxyProbe}`],
+      argv: [
+        '/bin/sh',
+        '-c',
+        `set -eu; { ${squidProbe}${apiProxyProbe}; } || ` +
+          `{ status=$?; ip address show; ip route show; exit "$status"; }`,
+      ],
       env: environment,
       cwd: FIRECRACKER_GUEST_WORKSPACE,
       ...identity,
       timeoutMs: FIRECRACKER_PROBE_TIMEOUT_MS,
+      stdout: probeOutput,
+      stderr: probeError,
     });
     if (result.exitCode !== 0) {
+      const diagnostics = Buffer.concat([...stdout, ...stderr])
+        .subarray(0, 4096)
+        .toString('utf8')
+        .trim();
       throw new Error(
-        `Firecracker guest connectivity probe failed with exit code ${result.exitCode}`,
+        `Firecracker guest connectivity probe failed with exit code ${result.exitCode}` +
+        (diagnostics ? `:\n${diagnostics}` : ''),
       );
     }
     this.dependencies.logger.info(

@@ -219,6 +219,7 @@ export class FirecrackerManager {
   private workspace: FirecrackerWorkspaceImage | undefined;
   private guestClient: FirecrackerVsockClient | undefined;
   private networkPlan: FirecrackerNetworkPlan | undefined;
+  private diagnosticNetworkPlan: FirecrackerNetworkPlan | undefined;
   private socketBridgeDirectory: string | undefined;
   private apiSocketPath: string | undefined;
   private vsockSocketPath: string | undefined;
@@ -262,6 +263,7 @@ export class FirecrackerManager {
         jailerGid: identity.gid,
       });
       this.networkPlan = networkPlan;
+      this.diagnosticNetworkPlan = networkPlan;
       this.network = this.dependencies.createNetwork(networkPlan, artifacts.tools);
       await this.network.setup();
       let rootfsSource = artifacts.rootfsPath;
@@ -634,7 +636,7 @@ export class FirecrackerManager {
     );
     await this.dependencies.writeFile(
       path.join(directory, 'network-plan.json'),
-      `${JSON.stringify(this.networkPlan ?? null, null, 2)}\n`,
+      `${JSON.stringify(this.networkPlan ?? this.diagnosticNetworkPlan ?? null, null, 2)}\n`,
       { mode: 0o600 },
     );
     await this.dependencies.writeFile(
