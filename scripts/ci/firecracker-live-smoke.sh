@@ -168,10 +168,22 @@ sudo ip netns list | grep -q '^awffc-' || {
   echo "keep mode did not preserve the run network namespace" >&2
   exit 1
 }
-test -d "$keep_work/firecracker-jailer"
-test -f "$keep_audit/firecracker/network-plan.json"
-test -f "$keep_audit/firecracker/firecracker.log"
-test -f "$keep_audit/firecracker/firecracker.metrics.jsonl"
+test -d "$keep_work/firecracker-jailer" || {
+  echo "keep mode did not preserve the Firecracker jail" >&2
+  exit 1
+}
+test -f "$keep_audit/firecracker/network-plan.json" || {
+  echo "keep mode did not preserve the network plan" >&2
+  exit 1
+}
+test -f "$keep_audit/firecracker/firecracker.log" || {
+  echo "keep mode did not preserve the Firecracker log" >&2
+  exit 1
+}
+test -f "$keep_audit/firecracker/firecracker.metrics.jsonl" || {
+  echo "keep mode did not preserve Firecracker metrics" >&2
+  exit 1
+}
 find "$keep_audit/firecracker" -type f -size +1048576c -print -quit \
   | grep -q . && {
     echo "Firecracker diagnostic artifact exceeded the 1 MiB bound" >&2
@@ -183,7 +195,10 @@ while read -r namespace _; do
     awffc-*) sudo ip netns delete "$namespace" ;;
   esac
 done < <(sudo ip netns list)
-sudo docker compose -f "$keep_work/docker-compose.yml" down --volumes --remove-orphans
+sudo docker compose -f "$keep_work/docker-compose.yml" down --volumes --remove-orphans || {
+  echo "keep mode infrastructure cleanup failed" >&2
+  exit 1
+}
 assert_no_residue
 
 echo "Firecracker live smoke/security suite passed."
