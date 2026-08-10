@@ -6,9 +6,17 @@ import { logger } from '../logger';
 import {
   FIRECRACKER_DEFAULT_API_TIMEOUT_MS,
   FIRECRACKER_DEFAULT_BINARY,
+  FIRECRACKER_DEFAULT_GH_AW_COMPILER_TMP,
+  FIRECRACKER_DEFAULT_GH_AW_MAX_FILE_BYTES,
+  FIRECRACKER_DEFAULT_GH_AW_MAX_FILE_COUNT,
+  FIRECRACKER_DEFAULT_GH_AW_MAX_TOTAL_BYTES,
   FIRECRACKER_DEFAULT_JAILER_BINARY,
   FIRECRACKER_DEFAULT_MEMORY_MIB,
+  FIRECRACKER_DEFAULT_SAFE_OUTPUT_MAX_FILE_BYTES,
+  FIRECRACKER_DEFAULT_SAFE_OUTPUT_MAX_FILE_COUNT,
+  FIRECRACKER_DEFAULT_SAFE_OUTPUT_MAX_TOTAL_BYTES,
   FIRECRACKER_DEFAULT_VCPU_COUNT,
+  type FirecrackerGhAwRuntimeOptions,
 } from '../types/runtime-options';
 
 /**
@@ -252,7 +260,17 @@ function buildFirecrackerConfig(
       'firecrackerKernelSha256',
       'firecrackerRootfsSha256',
       'firecrackerSupervisorSha256',
-    ].some((key) => options[key] !== undefined);
+      'firecrackerGhAwRunnerTemp',
+      'firecrackerGhAwCompilerTmp',
+      'firecrackerGhAwMaxFileBytes',
+      'firecrackerGhAwMaxTotalBytes',
+      'firecrackerGhAwMaxFiles',
+      'firecrackerSafeOutputsDir',
+      'firecrackerSafeOutputsMaxFileBytes',
+      'firecrackerSafeOutputsMaxTotalBytes',
+      'firecrackerSafeOutputsMaxFiles',
+    ].some((key) => options[key] !== undefined)
+    || options.firecrackerGhAwRuntime === true;
   if (!selected && !configured) return undefined;
 
   const sha256 = {
@@ -291,6 +309,67 @@ function buildFirecrackerConfig(
     sha256: Object.values(sha256).some((value) => value !== undefined)
       ? sha256
       : undefined,
+    ghAwRuntime: buildFirecrackerGhAwRuntime(options),
+  };
+}
+
+function buildFirecrackerGhAwRuntime(
+  options: Record<string, unknown>,
+): FirecrackerGhAwRuntimeOptions | undefined {
+  const enabled = options.firecrackerGhAwRuntime === true;
+  const safeOutputsDirectory = options.firecrackerSafeOutputsDir as string | undefined;
+  const touched = enabled || [
+    'firecrackerGhAwRunnerTemp',
+    'firecrackerGhAwCompilerTmp',
+    'firecrackerGhAwMaxFileBytes',
+    'firecrackerGhAwMaxTotalBytes',
+    'firecrackerGhAwMaxFiles',
+    'firecrackerSafeOutputsDir',
+    'firecrackerSafeOutputsMaxFileBytes',
+    'firecrackerSafeOutputsMaxTotalBytes',
+    'firecrackerSafeOutputsMaxFiles',
+  ].some((key) => options[key] !== undefined);
+  if (!touched) return undefined;
+
+  return {
+    enabled,
+    runnerTempPath: options.firecrackerGhAwRunnerTemp as string | undefined,
+    compilerTmpPath:
+      (options.firecrackerGhAwCompilerTmp as string | undefined)
+      ?? FIRECRACKER_DEFAULT_GH_AW_COMPILER_TMP,
+    maxFileBytes: parseFirecrackerPositiveInteger(
+      options.firecrackerGhAwMaxFileBytes,
+      '--firecracker-gh-aw-max-file-bytes',
+      FIRECRACKER_DEFAULT_GH_AW_MAX_FILE_BYTES,
+    ),
+    maxTotalBytes: parseFirecrackerPositiveInteger(
+      options.firecrackerGhAwMaxTotalBytes,
+      '--firecracker-gh-aw-max-total-bytes',
+      FIRECRACKER_DEFAULT_GH_AW_MAX_TOTAL_BYTES,
+    ),
+    maxFileCount: parseFirecrackerPositiveInteger(
+      options.firecrackerGhAwMaxFiles,
+      '--firecracker-gh-aw-max-files',
+      FIRECRACKER_DEFAULT_GH_AW_MAX_FILE_COUNT,
+    ),
+    safeOutputs: safeOutputsDirectory === undefined ? undefined : {
+      hostDirectory: safeOutputsDirectory,
+      maxFileBytes: parseFirecrackerPositiveInteger(
+        options.firecrackerSafeOutputsMaxFileBytes,
+        '--firecracker-safe-outputs-max-file-bytes',
+        FIRECRACKER_DEFAULT_SAFE_OUTPUT_MAX_FILE_BYTES,
+      ),
+      maxTotalBytes: parseFirecrackerPositiveInteger(
+        options.firecrackerSafeOutputsMaxTotalBytes,
+        '--firecracker-safe-outputs-max-total-bytes',
+        FIRECRACKER_DEFAULT_SAFE_OUTPUT_MAX_TOTAL_BYTES,
+      ),
+      maxFileCount: parseFirecrackerPositiveInteger(
+        options.firecrackerSafeOutputsMaxFiles,
+        '--firecracker-safe-outputs-max-files',
+        FIRECRACKER_DEFAULT_SAFE_OUTPUT_MAX_FILE_COUNT,
+      ),
+    },
   };
 }
 

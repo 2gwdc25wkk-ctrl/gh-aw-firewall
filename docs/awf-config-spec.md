@@ -204,6 +204,16 @@ AWF settings MAY be supplied via config files, including stdin (`--config -`).
 - `firecracker.sha256.kernel` → `--firecracker-kernel-sha256`
 - `firecracker.sha256.rootfs` → `--firecracker-rootfs-sha256`
 - `firecracker.sha256.supervisor` → `--firecracker-supervisor-sha256`
+- `firecracker.ghAwRuntime.enabled` → `--firecracker-gh-aw-runtime`
+- `firecracker.ghAwRuntime.runnerTempPath` → `--firecracker-gh-aw-runner-temp`
+- `firecracker.ghAwRuntime.compilerTmpPath` → `--firecracker-gh-aw-compiler-tmp`
+- `firecracker.ghAwRuntime.maxFileBytes` → `--firecracker-gh-aw-max-file-bytes`
+- `firecracker.ghAwRuntime.maxTotalBytes` → `--firecracker-gh-aw-max-total-bytes`
+- `firecracker.ghAwRuntime.maxFileCount` → `--firecracker-gh-aw-max-files`
+- `firecracker.ghAwRuntime.safeOutputs.hostDirectory` → `--firecracker-safe-outputs-dir`
+- `firecracker.ghAwRuntime.safeOutputs.maxFileBytes` → `--firecracker-safe-outputs-max-file-bytes`
+- `firecracker.ghAwRuntime.safeOutputs.maxTotalBytes` → `--firecracker-safe-outputs-max-total-bytes`
+- `firecracker.ghAwRuntime.safeOutputs.maxFileCount` → `--firecracker-safe-outputs-max-files`
 - `chroot.binariesSourcePath` → *(config-only; mounts a runner-side binaries directory at `/tmp/awf-runner-bin` inside chroot mode and prepends it to `PATH`)*
 - `chroot.identity.home` → *(config-only; forwarded as `AWF_CHROOT_IDENTITY_HOME` and applied after chroot pivot)*
 - `chroot.identity.user` → *(config-only; forwarded as `AWF_CHROOT_IDENTITY_USER` and applied to `USER`/`LOGNAME` after chroot pivot)*
@@ -271,6 +281,15 @@ supervisor. AWF starts Compose infrastructure only, attaches the jailed
 microVM to the proven internal bridge, and executes through vsock. Host access,
 DinD, extra mounts, TTY, topology peers, and enclaves fail closed in this
 preview. Selecting `firecracker` never falls back to another runtime.
+
+The optional `firecracker.ghAwRuntime` surface stages generated gh-aw compiler
+assets for the guest. It is **not** a general mount facility: only
+`<RUNNER_TEMP>/gh-aw` and `<compilerTmpPath>/gh-aw` are eligible sources, both
+are staged onto a separate **read-only** block device, and `--volume-mount`
+remains rejected whether or not staging is enabled. Its optional
+`safeOutputs` block adds a bounded writable exchange device that is copied back
+to the host only after the microVM is confirmed stopped. Per-file, total-byte,
+and file-count caps are enforced during the copy in both directions.
 
 **macOS and Windows are permanently unsupported.** CI specifically supports
 GitHub-hosted x64 `ubuntu-24.04`; KVM remains mandatory, and hosts without usable

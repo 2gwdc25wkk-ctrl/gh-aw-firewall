@@ -134,6 +134,20 @@ export interface AwfFileConfig {
     memoryMib?: number;
     apiTimeoutMs?: number;
     sha256?: FirecrackerArtifactDigests;
+    ghAwRuntime?: {
+      enabled?: boolean;
+      runnerTempPath?: string;
+      compilerTmpPath?: string;
+      maxFileBytes?: number;
+      maxTotalBytes?: number;
+      maxFileCount?: number;
+      safeOutputs?: {
+        hostDirectory?: string;
+        maxFileBytes?: number;
+        maxTotalBytes?: number;
+        maxFileCount?: number;
+      };
+    };
   };
   chroot?: {
     binariesSourcePath?: string;

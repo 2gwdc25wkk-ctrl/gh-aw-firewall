@@ -775,6 +775,14 @@ any of them produces a hard validation failure before the VM is launched.
 | Host ports (`--allow-host-ports`) | **Rejected** | Same as above |
 | Host service ports | **Rejected** | Same as above |
 | Extra volume mounts (`--volume-mount`) | **Rejected** | "does not support additional host volume mounts" |
+
+:::note[gh-aw staging is not a volume mount]
+`--firecracker-gh-aw-runtime` does **not** relax the rule above. It stages a
+fixed, AWF-owned source contract onto a separate read-only block device; it
+accepts no user-supplied source or destination paths, and `--volume-mount`
+remains rejected whether or not staging is enabled. See
+[Part 17](#part-17--gh-aw-agent-runtime-staging).
+:::
 | DNS-over-HTTPS (`--dns-over-https`) | **Rejected** | "does not support DNS-over-HTTPS" |
 | TTY (`--tty`) | **Rejected** | "guest supervisor does not support TTY execution" |
 | Remote Docker host (non-Unix socket) | **Rejected** | "requires a local Unix-socket Docker daemon" |
@@ -843,6 +851,16 @@ Firecracker options derive the non-root jail identity from `SUDO_UID`/`SUDO_GID`
 | `--firecracker-kernel-sha256 <digest>` | string | — | **Required.** 64-character hex SHA-256 of the guest kernel. |
 | `--firecracker-rootfs-sha256 <digest>` | string | — | **Required.** 64-character hex SHA-256 of the guest rootfs. |
 | `--firecracker-supervisor-sha256 <digest>` | string | — | **Required.** 64-character hex SHA-256 of the AWF guest supervisor. |
+| `--firecracker-gh-aw-runtime` | boolean | false | Stages gh-aw compiler assets onto a **read-only** guest device. See [Part 17](#part-17--gh-aw-agent-runtime-staging). |
+| `--firecracker-gh-aw-runner-temp <path>` | string | `$RUNNER_TEMP` | Absolute canonical host `RUNNER_TEMP`; only its `gh-aw` subtree is staged. |
+| `--firecracker-gh-aw-compiler-tmp <path>` | string | `/tmp` | Absolute canonical host directory holding the compiler's `gh-aw` output. |
+| `--firecracker-gh-aw-max-file-bytes <bytes>` | integer | 67108864 | Per-file staging cap. |
+| `--firecracker-gh-aw-max-total-bytes <bytes>` | integer | 536870912 | Total staging byte cap. |
+| `--firecracker-gh-aw-max-files <count>` | integer | 20000 | Total staged entry cap. |
+| `--firecracker-safe-outputs-dir <path>` | string | — | Absolute host directory that receives safe outputs **after** the VM stops. Enables the bounded exchange device. |
+| `--firecracker-safe-outputs-max-file-bytes <bytes>` | integer | 16777216 | Per-file copy-back cap. |
+| `--firecracker-safe-outputs-max-total-bytes <bytes>` | integer | 67108864 | Total copy-back byte cap. |
+| `--firecracker-safe-outputs-max-files <count>` | integer | 2000 | Copy-back entry cap. |
 
 ### Using test artifacts
 
@@ -891,10 +909,27 @@ sudo -E awf \
       "kernel": "<64-hex-chars>",
       "rootfs": "<64-hex-chars>",
       "supervisor": "<64-hex-chars>"
+    },
+    "ghAwRuntime": {
+      "enabled": true,
+      "runnerTempPath": "/home/runner/work/_temp",
+      "compilerTmpPath": "/tmp",
+      "maxFileBytes": 67108864,
+      "maxTotalBytes": 536870912,
+      "maxFileCount": 20000,
+      "safeOutputs": {
+        "hostDirectory": "/home/runner/work/_temp/awf-safe-outputs",
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "maxFileCount": 2000
+      }
     }
   }
 }
 ```
+
+`ghAwRuntime` is optional. Omit it entirely and the runtime behaves exactly as
+before: the workspace snapshot is the only staged filesystem.
 
 ---
 
@@ -938,6 +973,31 @@ KVM. It:
 6. Attests artifact provenance via `actions/attest-build-provenance`
 7. Uploads `release/firecracker-test-x86_64/` as artifact `firecracker-test-x86_64`
    with 7-day retention
+
+#### `build-agent-rootfs` (runs on `ubuntu-24.04`)
+
+This job also runs without KVM, in parallel with `build-test-artifacts`. It
+builds the *separate* agent-capable rootfs described in
+[Part 17](#part-17--gh-aw-agent-runtime-staging). It:
+
+1. Checks out the repository and sets up Go 1.25.0
+2. Installs the agent rootfs prerequisites (`binutils`, `ca-certificates`,
+   `e2fsprogs`, `file`, `xz-utils`)
+3. Runs `guest/firecracker/build-agent-rootfs.sh` as root — pulls the
+   digest-pinned `debian:bookworm-slim`, installs packages from the frozen
+   `snapshot.debian.org` index, adds SHA-256-verified Node.js and CA bundle,
+   builds the supervisor, strips setuid/setgid bits and credential material,
+   and produces `rootfs.ext4`, `SHA256SUMS`, `manifest.json`, `packages.tsv`,
+   `sbom.spdx.json`, and `awf-firecracker-agent-x86_64.tar.gz`
+4. Runs `guest/firecracker/verify-agent-rootfs.sh` against the published
+   `rootfs.ext4` (read-only `debugfs` dump; never mutates the artifact)
+5. Re-checks `SHA256SUMS`
+6. Attests artifact provenance via `actions/attest-build-provenance`
+7. Uploads `release/firecracker-agent-x86_64/` as artifact
+   `firecracker-agent-x86_64` with 7-day retention
+
+The two builders are independent: `build-test-artifacts` continues to produce
+the 128 MiB BusyBox image used by `live-kvm`, and this job never modifies it.
 
 #### `live-kvm` (runs on `ubuntu-24.04`)
 
@@ -1136,6 +1196,9 @@ to be addressed before promotion out of preview.
 | **No topology peers or enclaves** | The MCP gateway path is not proved in the Firecracker network model. Topology attachment and enclave execution are disabled. |
 | **No TTY** | The guest supervisor does not implement a PTY multiplexer. Interactive agents requiring TTY cannot run. |
 | **No virtiofs / live bind mounts** | Workspace is snapshotted at boot. Files created on the host after VM start are not visible to the guest. |
+| **gh-aw staging is a fixed contract** | Only `<RUNNER_TEMP>/gh-aw` and `<compilerTmp>/gh-aw` can be staged, always read-only. Arbitrary mounts remain rejected. See [Part 17](#part-17--gh-aw-agent-runtime-staging). |
+| **Hardlinks are never staged** | A staged file with `nlink > 1` fails the run, because a hardlink can reference a file outside the staged tree undetectably. |
+| **Agent rootfs must be operator-built** | `build-agent-rootfs.sh` requires Linux x86_64, root, and Docker. No pre-built agent rootfs is published outside CI artifacts. |
 | **No Docker-in-Docker** | The guest has no Docker daemon. Agents that build or run containers cannot use Docker inside the VM. |
 | **Single agent only** | The Firecracker path supports one agent execution per VM. Multi-agent or parallel executor models are not supported. |
 | **Narrow CI host support** | CI specifically supports GitHub-hosted x64 `ubuntu-24.04`; other hosts must satisfy every preflight requirement and fail closed otherwise. |
@@ -1144,3 +1207,244 @@ to be addressed before promotion out of preview.
 | **8 GiB workspace image ceiling** | Workspaces larger than 8 GiB cannot be used with Firecracker. |
 | **Workspace copy-back is authoritative** | Guest deletions are applied with `rsync --delete`. Any concurrent host-only or divergent change fails copy-back and preserves the changed image for recovery instead of overwriting host work. |
 | **No DNS-over-HTTPS in guest** | The DoH proxy is a host-side service; the guest does not participate. |
+
+---
+
+## Part 17 — gh-aw agent runtime staging
+
+Generated gh-aw agents do not run from the workspace alone. The gh-aw compiler
+writes lockfiles, prompts, engine shims, and MCP server configuration under
+`$RUNNER_TEMP/gh-aw` and `/tmp/gh-aw`, and the generated agent reads them at
+runtime. The Firecracker workspace snapshot covers only `GITHUB_WORKSPACE`, so
+without staging those assets a generated agent cannot start inside the guest.
+
+`--firecracker-gh-aw-runtime` closes that gap with a **fixed, AWF-owned
+contract**. It is deliberately *not* a general mount facility.
+
+### What staging is, and what it is not
+
+| Property | gh-aw runtime staging | A general `--volume-mount` |
+|----------|----------------------|----------------------------|
+| Source paths | Fixed contract, AWF-owned | Caller supplied |
+| Destination paths | Fixed contract, AWF-owned | Caller supplied |
+| Guest writability | Read-only device | Typically writable |
+| Copy-back | Never | Often |
+| Status in Firecracker | Supported | **Rejected** (unchanged) |
+
+`--volume-mount` remains rejected by `assertFirecrackerPreSecurityCompatibility`
+whether or not staging is enabled. Enabling staging cannot introduce a new
+source, retarget a destination, or make the runtime device writable.
+
+### The source contract
+
+Only two sources are eligible, and both are resolved from canonical roots:
+
+| ID | Host source | Guest destination |
+|----|-------------|-------------------|
+| `gh-aw-runner-temp` | `<RUNNER_TEMP>/gh-aw` | `/awf/runner-temp/gh-aw` |
+| `gh-aw-tmp` | `<compilerTmp>/gh-aw` | `/tmp/gh-aw` |
+
+`RUNNER_TEMP` defaults to the `RUNNER_TEMP` environment variable and
+`compilerTmp` defaults to `/tmp`; both may be overridden, but only with an
+absolute, canonical, traversal-free path. A root that is configured explicitly
+and does not exist is a hard error (it is almost always a typo); a root that was
+merely defaulted and does not exist is skipped with a warning.
+
+An absent `gh-aw` subtree under a present root is also skipped — a repository
+that does not use gh-aw stages nothing and boots normally.
+
+### Guest layout
+
+```
+/awf/runtime          read-only ext4 device (vdc), contains the staged tree
+  ├── .awf-runtime-assets   marker the supervisor verifies before binding
+  ├── gh-aw-runner-temp/
+  └── gh-aw-tmp/
+/awf/runner-temp/gh-aw  read-only bind of gh-aw-runner-temp   (RUNNER_TEMP=/awf/runner-temp)
+/tmp/gh-aw              read-only bind of gh-aw-tmp
+/awf/exchange         bounded writable ext4 device (vdc or vdd), safe outputs only
+  └── safe-outputs/outputs.jsonl
+/workspace            the only writable filesystem that is copied back to the host
+```
+
+The supervisor mounts the runtime device `ro,nosuid,nodev,noexec` and re-applies
+`MS_RDONLY` to each bind so a read-write remount inside the guest cannot make it
+writable. Device letters are computed host-side from drive-registration order;
+each device carries a marker file, and the supervisor fails closed if the marker
+does not match the device it was told to mount.
+
+Guest variables set when staging is active:
+
+| Variable | Value | Meaning |
+|----------|-------|---------|
+| `RUNNER_TEMP` | `/awf/runner-temp` | Guest-local runner temp (host value is never exported) |
+| `AWF_GH_AW_RUNTIME_MOUNT` | `/awf/runtime` | AWF-owned pointer to the read-only device |
+| `AWF_SAFE_OUTPUTS_DIR` | `/awf/exchange/safe-outputs` | AWF-owned safe-output directory |
+| `GITHUB_AW_SAFE_OUTPUTS` | `/awf/exchange/safe-outputs/outputs.jsonl` | gh-aw safe-output collector file |
+
+`AWF_SAFE_OUTPUTS_DIR` is the AWF-owned name and is authoritative for this
+runtime; `GITHUB_AW_SAFE_OUTPUTS` is set for gh-aw compatibility. Both are only
+present when `--firecracker-safe-outputs-dir` is supplied.
+
+### Copy semantics and caps
+
+Every staged and copied-back byte passes through one bounded copier:
+
+- Directory traversal opens each component with `O_NOFOLLOW`; a symlink
+  encountered as a path component is a hard failure, not a silent skip.
+- Regular files are copied with an exclusive `O_CREAT|O_EXCL` `0600` create
+  (directories `0700`), so an attacker cannot pre-create the destination.
+- The source is `fstat`-ed before and after the copy; a size, inode, device, or
+  mtime change fails the copy (TOCTOU / swapped-file defence).
+- Symlinks are preserved only when their target resolves inside the same staged
+  subtree; escaping targets, absolute targets, and traversal targets fail.
+- Sockets, FIFOs, device nodes, and any file with `setuid`/`setgid` bits fail.
+- Files with `nlink > 1` fail. A hardlink inside `RUNNER_TEMP/gh-aw` to, say,
+  `/etc/shadow` is invisible to path and `realpath` checks, so hardlinks are
+  rejected outright. This is intentionally strict.
+- Per-file bytes, total bytes, and total entry count are enforced *during* the
+  walk, so an oversized tree fails early rather than after filling a device.
+- Duplicate, overlapping, absolute-outside, or reserved guest destinations are
+  rejected before any I/O happens.
+
+Defaults: 64 MiB per file, 512 MiB total, 20 000 entries for staging;
+16 MiB / 64 MiB / 2 000 for safe-output copy-back. A per-file cap larger than
+the total cap is a configuration error.
+
+### Credentials are never staged
+
+Real provider, GitHub, OIDC, and Docker credentials are never placed on any
+guest device:
+
+- The staging walk rejects credential-bearing basenames
+  (`.netrc`, `.git-credentials`, `credentials.json`, `.dockercfg`,
+  `id_rsa`, `id_ed25519`, `.npmrc`, and the credential dot-directories AWF
+  already knows about, excluding the benign `.config`, `.local`, `.cache`,
+  and `.npm`).
+- Staged file *contents* are scanned for the process's real credential values;
+  a match fails the run rather than shipping the secret.
+- The guest environment continues to receive only synthetic API-proxy
+  credentials. `assertNoProviderSecrets` still runs with staging enabled.
+- Network policy is unchanged: egress remains proxy-mandatory and fail-closed.
+
+### Safe-output copy-back happens only after the VM has stopped
+
+The exchange device is a separate, bounded ext4 image. AWF never reads it while
+the VM is running. In `stop()`, extraction runs inside the same
+`terminationConfirmed && instanceWasStarted` gate that guards workspace
+copy-back, immediately after the workspace extraction:
+
+1. Guest shutdown is requested over vsock.
+2. The VM process is confirmed terminated (natural exit, then `SIGTERM`).
+3. The workspace image is extracted and copied back.
+4. The exchange image is extracted and copied back.
+5. Only then is cleanup allowed to remove the images.
+
+Copy-back applies the same bounded copier, plus a destination directory created
+`0700` and owned by the invoking user. Host safe outputs and host config are
+never exposed on writable guest storage — the guest writes into the exchange
+device and nothing else.
+
+If the instance never started, or termination was not confirmed, no copy-back
+occurs. With `--keep-containers` the images are preserved for inspection.
+
+### Agent-capable rootfs
+
+The 128 MiB BusyBox rootfs produced by `guest/firecracker/build-test-artifacts.sh`
+is unchanged and remains the low-level boot/protocol smoke artifact. It cannot
+run a generated gh-aw agent — there is no `bash`, no `node`, no `git`.
+
+`guest/firecracker/build-agent-rootfs.sh` is a **separate builder producing a
+separate artifact**:
+
+| | Test rootfs | Agent rootfs |
+|---|---|---|
+| Builder | `build-test-artifacts.sh` | `build-agent-rootfs.sh` |
+| Output directory | `release/firecracker-test-x86_64/` | `release/firecracker-agent-x86_64/` |
+| Tarball | `awf-firecracker-test-x86_64.tar.gz` | `awf-firecracker-agent-x86_64.tar.gz` |
+| CI artifact | `firecracker-test-x86_64` | `firecracker-agent-x86_64` |
+| Base | static BusyBox | Debian bookworm (digest-pinned) |
+| Size | 128 MiB | 2 GiB |
+| Contents | BusyBox + supervisor | bash, coreutils, git, curl, iproute2, CA certs, Node.js, supervisor |
+
+Every external input is pinned; no `latest` tag or unverified asset is used:
+
+| Input | Pin |
+|-------|-----|
+| Base image | `debian@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241` |
+| Debian packages | `snapshot.debian.org` archive `20251101T000000Z` (`check-valid-until=no`) |
+| Node.js | `22.22.0`, tarball SHA-256 verified |
+| CA bundle | `2025-02-25` snapshot, SHA-256 verified |
+| Timestamps | `SOURCE_DATE_EPOCH` pinned for reproducibility |
+
+Published artifacts:
+
+```
+release/firecracker-agent-x86_64/
+├── rootfs.ext4                          # the guest image
+├── awf-firecracker-supervisor           # matching supervisor binary
+├── SHA256SUMS                           # digests for the two files above
+├── manifest.json                        # pins, sizes, build inputs
+├── packages.tsv                         # exact package/version/arch list
+├── sbom.spdx.json                       # SPDX SBOM
+└── awf-firecracker-agent-x86_64.tar.gz  # everything above, archived
+```
+
+Consume the digests exactly as with the test artifacts — `--firecracker-rootfs`
+and `--firecracker-rootfs-sha256` are still mandatory and still verified.
+
+`guest/firecracker/verify-agent-rootfs.sh` proves the contract and runs twice in
+the build: once against the staging tree and once against the finished
+`rootfs.ext4`. Given an image it dumps it through `debugfs` in read-only mode,
+so verification can never mutate the artifact it attests. It checks that every
+required executable exists, is executable, resolves inside the tree, and that
+its ELF interpreter and every `NEEDED` shared library (or its shebang
+interpreter) is present in-guest — a binary whose loader is missing is a broken
+guest, not a working one. It also re-asserts that no setuid/setgid binaries and
+no credential-bearing paths shipped.
+
+Generated Copilot/Claude/Codex/MCP tooling is **staged**, not baked in; the
+rootfs guarantees only the interpreters and libraries those tools need.
+
+### CI use
+
+`.github/workflows/test-firecracker.yml` gains a `build-agent-rootfs` job that
+runs alongside `build-test-artifacts` on `ubuntu-24.04`, builds the rootfs as
+root, verifies the published image, checks `SHA256SUMS`, attests provenance, and
+uploads the `firecracker-agent-x86_64` artifact. It does not require KVM.
+
+Local build (Linux x86_64, root, Docker required):
+
+```bash
+sudo ./guest/firecracker/build-agent-rootfs.sh
+./guest/firecracker/verify-agent-rootfs.sh release/firecracker-agent-x86_64/rootfs.ext4
+```
+
+### Example
+
+```bash
+ARTIFACTS=/path/to/firecracker-agent-x86_64
+digest() { awk -v f="$1" '$2==f{print $1;exit}' "$ARTIFACTS/SHA256SUMS"; }
+
+sudo -E awf \
+  --container-runtime firecracker \
+  --firecracker-preview \
+  --firecracker-kernel     /path/to/vmlinux.bin \
+  --firecracker-rootfs     "$ARTIFACTS/rootfs.ext4" \
+  --firecracker-supervisor "$ARTIFACTS/awf-firecracker-supervisor" \
+  --firecracker-rootfs-sha256     "$(digest rootfs.ext4)" \
+  --firecracker-supervisor-sha256 "$(digest awf-firecracker-supervisor)" \
+  --firecracker-binary-sha256 "$FC_SHA" \
+  --firecracker-jailer-sha256 "$JAILER_SHA" \
+  --firecracker-kernel-sha256 "$KERNEL_SHA" \
+  --firecracker-gh-aw-runtime \
+  --firecracker-safe-outputs-dir "$RUNNER_TEMP/awf-safe-outputs" \
+  --allow-domains github.com \
+  -- bash /awf/runner-temp/gh-aw/aw_prompts/run.sh
+```
+
+Inside the guest the agent reads its compiler assets from
+`/awf/runner-temp/gh-aw` and `/tmp/gh-aw` (read-only), writes safe outputs to
+`$GITHUB_AW_SAFE_OUTPUTS`, and does all other work in `/workspace`. After the VM
+stops, `/workspace` is copied back to the host workspace and the safe outputs
+appear in `$RUNNER_TEMP/awf-safe-outputs`.

@@ -25,6 +25,7 @@ export function assertFirecrackerRuntimeCompatibility(
     throw new Error('Firecracker preview requires API proxy credential isolation');
   }
   assertFirecrackerPreSecurityCompatibility(config);
+  assertFirecrackerGhAwRuntimeContract(firecracker);
   if (!firecracker.kernelPath || !firecracker.rootfsPath || !firecracker.supervisorPath) {
     throw new Error(
       'Firecracker preview requires explicit kernel, rootfs, and guest supervisor artifacts',
@@ -89,4 +90,76 @@ export function requireFirecrackerConfig(config: WrapperConfig): FirecrackerOpti
     throw new Error('Firecracker backend resolved without Firecracker runtime configuration');
   }
   return config.firecracker;
+}
+
+/**
+ * Validates the AWF-owned gh-aw staging contract.
+ *
+ * This deliberately mirrors the `--mount` rejection above: the contract only
+ * ever stages AWF's fixed source set, so enabling it must never be read as
+ * permission to bind arbitrary host paths into the guest.
+ */
+export function assertFirecrackerGhAwRuntimeContract(
+  firecracker: FirecrackerOptions,
+): void {
+  const runtime = firecracker.ghAwRuntime;
+  if (!runtime) return;
+  if (!runtime.enabled) {
+    if (runtime.safeOutputs) {
+      throw new Error(
+        'Firecracker safe-output exchange requires --firecracker-gh-aw-runtime',
+      );
+    }
+    return;
+  }
+  for (const [flag, value] of [
+    ['--firecracker-gh-aw-runner-temp', runtime.runnerTempPath],
+    ['--firecracker-gh-aw-compiler-tmp', runtime.compilerTmpPath],
+  ] as const) {
+    if (value === undefined) continue;
+    if (!value.startsWith('/') || value.includes('..') || /[\s\0]/.test(value)) {
+      throw new Error(`${flag} must be an absolute path without traversal: ${value}`);
+    }
+  }
+  for (const [flag, value] of [
+    ['--firecracker-gh-aw-max-file-bytes', runtime.maxFileBytes],
+    ['--firecracker-gh-aw-max-total-bytes', runtime.maxTotalBytes],
+    ['--firecracker-gh-aw-max-files', runtime.maxFileCount],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`${flag} must be a positive integer`);
+    }
+  }
+  if (runtime.maxFileBytes > runtime.maxTotalBytes) {
+    throw new Error(
+      '--firecracker-gh-aw-max-file-bytes may not exceed --firecracker-gh-aw-max-total-bytes',
+    );
+  }
+  const safeOutputs = runtime.safeOutputs;
+  if (!safeOutputs) return;
+  if (
+    !safeOutputs.hostDirectory.startsWith('/') ||
+    safeOutputs.hostDirectory.includes('..') ||
+    /[\s\0]/.test(safeOutputs.hostDirectory)
+  ) {
+    throw new Error(
+      `--firecracker-safe-outputs-dir must be an absolute path without traversal: ` +
+      safeOutputs.hostDirectory,
+    );
+  }
+  for (const [flag, value] of [
+    ['--firecracker-safe-outputs-max-file-bytes', safeOutputs.maxFileBytes],
+    ['--firecracker-safe-outputs-max-total-bytes', safeOutputs.maxTotalBytes],
+    ['--firecracker-safe-outputs-max-files', safeOutputs.maxFileCount],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`${flag} must be a positive integer`);
+    }
+  }
+  if (safeOutputs.maxFileBytes > safeOutputs.maxTotalBytes) {
+    throw new Error(
+      '--firecracker-safe-outputs-max-file-bytes may not exceed ' +
+      '--firecracker-safe-outputs-max-total-bytes',
+    );
+  }
 }

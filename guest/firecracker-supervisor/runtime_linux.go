@@ -81,6 +81,12 @@ func runSupervisor() error {
 	if err := mountWorkspace(config); err != nil {
 		return err
 	}
+	if err := mountRuntimeAssets(config); err != nil {
+		return err
+	}
+	if err := mountExchange(config); err != nil {
+		return err
+	}
 	if err := configureNetwork(config); err != nil {
 		return err
 	}
@@ -117,13 +123,129 @@ func mountProc() error {
 
 func shutdownGuest(config bootConfig) error {
 	syscall.Sync()
+	// Unmount in reverse dependency order so every device is flushed and
+	// detached before the host is allowed to read any of them back.
+	for i := len(config.RuntimeBinds) - 1; i >= 0; i-- {
+		if err := syscall.Unmount(config.RuntimeBinds[i].Target, 0); err != nil {
+			return fmt.Errorf("unmount runtime bind %s: %w", config.RuntimeBinds[i].Target, err)
+		}
+	}
+	if config.RuntimeMount != "" {
+		if err := syscall.Unmount(config.RuntimeMount, 0); err != nil {
+			return fmt.Errorf("unmount runtime assets: %w", err)
+		}
+	}
+	if config.ExchangeMount != "" {
+		if err := syscall.Unmount(config.ExchangeMount, 0); err != nil {
+			return fmt.Errorf("unmount exchange: %w", err)
+		}
+	}
 	if err := syscall.Unmount(config.WorkspaceMount, 0); err != nil {
 		return fmt.Errorf("unmount workspace: %w", err)
 	}
+	syscall.Sync()
 	if err := syscall.Reboot(syscall.LINUX_REBOOT_CMD_POWER_OFF); err != nil {
 		return fmt.Errorf("power off guest: %w", err)
 	}
 	return nil
+}
+
+const (
+	runtimeAssetsMarker = ".awf-runtime-assets"
+	exchangeMarker      = ".awf-exchange"
+	exchangeOutputDir   = "safe-outputs"
+)
+
+// mountRuntimeAssets mounts the AWF-owned gh-aw runtime device read-only and
+// binds each staged subdirectory to its declared guest path, also read-only.
+func mountRuntimeAssets(config bootConfig) error {
+	if config.RuntimeMount == "" {
+		return nil
+	}
+	const flags = syscall.MS_RDONLY | syscall.MS_NOSUID | syscall.MS_NODEV
+	if err := mountBlockDevice(config.RuntimeDevice, config.RuntimeMount, flags, 0555); err != nil {
+		return fmt.Errorf("mount runtime assets: %w", err)
+	}
+	if err := assertMarker(filepath.Join(config.RuntimeMount, runtimeAssetsMarker)); err != nil {
+		return fmt.Errorf("verify runtime asset device: %w", err)
+	}
+	for _, bind := range config.RuntimeBinds {
+		source := filepath.Join(config.RuntimeMount, bind.ID)
+		info, err := os.Stat(source)
+		if err != nil {
+			return fmt.Errorf("stat runtime asset %s: %w", bind.ID, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("runtime asset %s is not a directory", bind.ID)
+		}
+		if err := os.MkdirAll(bind.Target, 0755); err != nil {
+			return fmt.Errorf("create runtime bind %s: %w", bind.Target, err)
+		}
+		if err := syscall.Mount(source, bind.Target, "", syscall.MS_BIND, ""); err != nil {
+			return fmt.Errorf("bind runtime asset %s: %w", bind.ID, err)
+		}
+		remount := uintptr(syscall.MS_REMOUNT | syscall.MS_BIND | flags)
+		if err := syscall.Mount("", bind.Target, "", remount, ""); err != nil {
+			return fmt.Errorf("seal runtime bind %s read-only: %w", bind.Target, err)
+		}
+	}
+	return nil
+}
+
+// mountExchange mounts the bounded writable safe-output device. It is never
+// executable and never carries device nodes or setuid bits.
+func mountExchange(config bootConfig) error {
+	if config.ExchangeMount == "" {
+		return nil
+	}
+	const flags = syscall.MS_NOSUID | syscall.MS_NODEV | syscall.MS_NOEXEC
+	if err := mountBlockDevice(config.ExchangeDevice, config.ExchangeMount, flags, 0755); err != nil {
+		return fmt.Errorf("mount exchange: %w", err)
+	}
+	if err := assertMarker(filepath.Join(config.ExchangeMount, exchangeMarker)); err != nil {
+		return fmt.Errorf("verify exchange device: %w", err)
+	}
+	outputs := filepath.Join(config.ExchangeMount, exchangeOutputDir)
+	info, err := os.Stat(outputs)
+	if err != nil {
+		return fmt.Errorf("stat exchange output directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("exchange output path is not a directory")
+	}
+	return nil
+}
+
+// assertMarker fails closed when a device is missing its AWF marker, which
+// would mean guest block device ordering did not match the host's plan.
+func assertMarker(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("marker %s is not a regular file", path)
+	}
+	return nil
+}
+
+func mountBlockDevice(device, target string, flags uintptr, mode os.FileMode) error {
+	info, err := os.Stat(device)
+	if err != nil {
+		return fmt.Errorf("stat device: %w", err)
+	}
+	if info.Mode()&os.ModeDevice == 0 || info.Mode()&os.ModeCharDevice != 0 {
+		return fmt.Errorf("%s is not a block device", device)
+	}
+	if err := os.MkdirAll(target, mode); err != nil {
+		return fmt.Errorf("create mount point: %w", err)
+	}
+	if err := syscall.Mount(device, target, "ext4", flags, ""); err == nil {
+		return nil
+	} else if !errors.Is(err, syscall.ENODEV) {
+		return err
+	}
+	return syscall.Mount(device, target, "", flags, "")
 }
 
 func mountWorkspace(config bootConfig) error {

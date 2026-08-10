@@ -16,6 +16,8 @@ import type {
 } from './network';
 import type { FirecrackerVsockClient } from './vsock-client';
 import type { FirecrackerWorkspaceImage } from './workspace-image';
+import type { FirecrackerRuntimeAssetImage, FirecrackerRuntimeAssetPlan } from './runtime-assets';
+import type { FirecrackerExchangeImage, FirecrackerExchangePlan } from './exchange-image';
 import type { FirecrackerHostToolPaths } from './preflight';
 
 const hostTools: FirecrackerHostToolPaths = {
@@ -113,6 +115,8 @@ function dependencies(
     createClient: jest.fn().mockReturnValue(client),
     createNetwork: jest.fn((plan) => networkLifecycle(plan)),
     createWorkspaceImage: jest.fn(),
+    createRuntimeAssetImage: jest.fn(),
+    createExchangeImage: jest.fn(),
     createVsockClient: jest.fn(),
     resolveIdentity: jest.fn().mockReturnValue({ uid: 1000, gid: 1000 }),
     ...overrides,
@@ -777,4 +781,213 @@ describe('FirecrackerManager', () => {
       { mode: 0o600 },
     );
   });
+});
+
+describe('FirecrackerManager gh-aw runtime staging', () => {
+  const runtimeAssets: FirecrackerRuntimeAssetPlan = {
+    entries: [
+      {
+        id: 'gh-aw-runner-temp',
+        hostPath: '/runner/_temp/gh-aw',
+        guestPath: '/awf/runner-temp/gh-aw',
+      },
+      { id: 'gh-aw-tmp', hostPath: '/tmp/gh-aw', guestPath: '/tmp/gh-aw' },
+    ],
+    limits: { maxFileBytes: 1024, maxTotalBytes: 4096, maxFileCount: 16 },
+    guestMountPoint: '/awf/runtime',
+    guestRunnerTemp: '/awf/runner-temp',
+  };
+  const safeOutputs: FirecrackerExchangePlan = {
+    hostDirectory: '/var/tmp/awf-safe-outputs',
+    guestMountPoint: '/awf/exchange',
+    guestOutputDirectory: '/awf/exchange/safe-outputs',
+    guestOutputFile: '/awf/exchange/safe-outputs/outputs.jsonl',
+    maxFileBytes: 1024,
+    maxTotalBytes: 4096,
+    maxFileCount: 16,
+  };
+
+  function guestConfig(overrides: Record<string, unknown> = {}) {
+    return {
+      workspacePath: '/workspace',
+      homePath: '/home/runner',
+      supervisorBinaryPath: '/opt/awf-supervisor',
+      supervisorSha256: 'a'.repeat(64),
+      ...overrides,
+    };
+  }
+
+  it('omits the runtime and exchange boot arguments when staging is disabled', () => {
+    const args = buildSupervisorBootArgs(networkPlan(), guestConfig());
+
+    expect(args).not.toContain('awf.runtime-device');
+    expect(args).not.toContain('awf.exchange-device');
+  });
+
+  it('names guest devices in drive-registration order', () => {
+    const args = buildSupervisorBootArgs(
+      networkPlan(),
+      guestConfig({ runtimeAssets, safeOutputs }),
+    );
+
+    expect(args).toContain('awf.workspace-device=/dev/vdb');
+    expect(args).toContain('awf.runtime-device=/dev/vdc');
+    expect(args).toContain('awf.runtime-mount=/awf/runtime');
+    expect(args).toContain(
+      'awf.runtime-bind=gh-aw-runner-temp:/awf/runner-temp/gh-aw,gh-aw-tmp:/tmp/gh-aw',
+    );
+    expect(args).toContain('awf.exchange-device=/dev/vdd');
+    expect(args).toContain('awf.exchange-mount=/awf/exchange');
+  });
+
+  it('shifts the exchange device when runtime staging is absent', () => {
+    const args = buildSupervisorBootArgs(networkPlan(), guestConfig({ safeOutputs }));
+
+    expect(args).toContain('awf.exchange-device=/dev/vdc');
+    expect(args).not.toContain('awf.runtime-device');
+  });
+
+  it('rejects boot argument values that could inject another argument', () => {
+    expect(() => buildSupervisorBootArgs(networkPlan(), guestConfig({
+      runtimeAssets: { ...runtimeAssets, guestMountPoint: '/awf/runtime evil=1' },
+    }))).toThrow(/unsafe/i);
+  });
+
+  it('registers a read-only runtime drive and a writable exchange drive', async () => {
+    const { manager, deps } = stagedManager();
+
+    const client = await manager.start();
+
+    expect(client.putDrive).toHaveBeenCalledWith({
+      drive_id: 'runtime-assets',
+      path_on_host: '/runtime-assets.ext4',
+      is_root_device: false,
+      is_read_only: true,
+    });
+    expect(client.putDrive).toHaveBeenCalledWith({
+      drive_id: 'exchange',
+      path_on_host: '/exchange.ext4',
+      is_root_device: false,
+      is_read_only: false,
+    });
+    const driveOrder = (client.putDrive as jest.Mock).mock.calls.map((call) => call[0].drive_id);
+    expect(driveOrder).toEqual(['rootfs', 'workspace', 'runtime-assets', 'exchange']);
+    expect(deps.chmod).toHaveBeenCalledWith(
+      expect.stringContaining('runtime-assets.ext4'),
+      0o400,
+    );
+  });
+
+  it('copies safe outputs back only after the VM process has terminated', async () => {
+    const order: string[] = [];
+    const { manager, child, exchange } = stagedManager(order);
+
+    await manager.start();
+    await manager.startInstance();
+    await manager.stop();
+
+    expect(order).toEqual(['extract-workspace', 'extract-exchange']);
+    expect(child.exitCode).toBe(0);
+    expect(exchange.extractAfterStop).toHaveBeenCalledWith(
+      expect.stringContaining('exchange.ext4'),
+    );
+  });
+
+  it('does not copy safe outputs back when the instance never started', async () => {
+    const { manager, exchange } = stagedManager();
+
+    await manager.start();
+    await manager.stop();
+
+    expect(exchange.extractAfterStop).not.toHaveBeenCalled();
+  });
+
+  function networkPlan(): FirecrackerNetworkPlan {
+    return {
+      runId: 'run',
+      namespaceName: 'ns',
+      netnsPath: '/var/run/netns/ns',
+      nftTableName: 'table',
+      infrastructureBridge: 'awfbr0',
+      hostVethName: 'host',
+      namespaceVethName: 'namespace',
+      tapName: 'tap',
+      infrastructureIp: '172.30.0.20',
+      infrastructureCidr: '172.30.0.0/24',
+      hostGatewayIp: '172.30.0.1',
+      guestSubnet: '100.64.0.0/30',
+      guestIp: '100.64.0.2',
+      guestGatewayIp: '100.64.0.1',
+      guestPrefixLength: 30,
+      guestMac: '02:00:00:00:00:01',
+      jailerUid: 1000,
+      jailerGid: 1000,
+      allowedEndpoints: [],
+      networkInterface: { iface_id: 'eth0', host_dev_name: 'tap' },
+    } as unknown as FirecrackerNetworkPlan;
+  }
+
+  function stagedManager(order: string[] = []) {
+    const child = processMock();
+    const workspace = {
+      prepare: jest.fn().mockResolvedValue({
+        workspaceImagePath: '/tmp/prepared-workspace.ext4',
+        rootfsImagePath: '/tmp/prepared-rootfs.ext4',
+        imageBytes: 1024,
+        originalManifest: new Map(),
+      }),
+      extractAfterStop: jest.fn(async () => {
+        order.push('extract-workspace');
+        expect(child.exitCode).toBe(0);
+      }),
+      cleanup: jest.fn().mockResolvedValue(undefined),
+      runDirectory: '/tmp/awf/firecracker-images/run',
+    } as unknown as FirecrackerWorkspaceImage;
+    const runtimeImage = {
+      prepare: jest.fn().mockResolvedValue({
+        imagePath: '/tmp/runtime-assets.ext4',
+        imageBytes: 4096,
+        totals: { files: 1, directories: 0, symlinks: 0, bytes: 10 },
+      }),
+      cleanup: jest.fn().mockResolvedValue(undefined),
+    } as unknown as FirecrackerRuntimeAssetImage;
+    const exchange = {
+      prepare: jest.fn().mockResolvedValue({
+        imagePath: '/tmp/exchange.ext4',
+        imageBytes: 4096,
+      }),
+      extractAfterStop: jest.fn(async () => {
+        order.push('extract-exchange');
+        expect(child.exitCode).toBe(0);
+        return { files: 0, directories: 0, symlinks: 0, bytes: 0 };
+      }),
+      cleanup: jest.fn().mockResolvedValue(undefined),
+    } as unknown as FirecrackerExchangeImage;
+    const guestClient = {
+      connect: jest.fn().mockResolvedValue({
+        version: 1,
+        type: 'ready',
+        requestId: 'control',
+        capabilities: { stdin: true, tty: false, resize: false },
+      }),
+      shutdown: jest.fn().mockResolvedValue(undefined),
+      destroy: jest.fn(),
+    } as unknown as FirecrackerVsockClient;
+    const deps = dependencies({
+      launch: jest.fn().mockReturnValue(child),
+      createWorkspaceImage: jest.fn().mockReturnValue(workspace),
+      createRuntimeAssetImage: jest.fn().mockReturnValue(runtimeImage),
+      createExchangeImage: jest.fn().mockReturnValue(exchange),
+      createVsockClient: jest.fn().mockReturnValue(guestClient),
+    });
+    const manager = new FirecrackerManager(
+      config(),
+      '/tmp/awf',
+      deps,
+      'guest',
+      networkConfig(),
+      guestConfig({ runtimeAssets, safeOutputs }) as never,
+    );
+    return { manager, deps, child, workspace, runtimeImage, exchange };
+  }
 });

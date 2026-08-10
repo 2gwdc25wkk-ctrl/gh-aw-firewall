@@ -9,6 +9,9 @@ import {
   type FirecrackerRuntimeBackendDependencies,
 } from './firecracker-runtime-backend';
 import { assertFirecrackerSelection } from './firecracker/runtime-validation';
+import { collectRealCredentialValues } from './firecracker-runtime-backend';
+import type { FirecrackerRuntimeAssetPlan } from './firecracker/runtime-assets';
+import type { FirecrackerExchangePlan } from './firecracker/exchange-image';
 import type { FirecrackerInfrastructureSnapshot } from './firecracker/infrastructure';
 
 const digest = 'a'.repeat(64);
@@ -425,5 +428,71 @@ describe('Firecracker runtime backend', () => {
     expect(() => assertFirecrackerSelection(
       config({ containerRuntime: 'gvisor' }),
     )).toThrow(/require --container-runtime firecracker/);
+  });
+});
+
+describe('Firecracker gh-aw guest staging environment', () => {
+  const runtimeAssets: FirecrackerRuntimeAssetPlan = {
+    entries: [{
+      id: 'gh-aw-runner-temp',
+      hostPath: '/runner/_temp/gh-aw',
+      guestPath: '/awf/runner-temp/gh-aw',
+    }],
+    limits: { maxFileBytes: 1024, maxTotalBytes: 4096, maxFileCount: 16 },
+    guestMountPoint: '/awf/runtime',
+    guestRunnerTemp: '/awf/runner-temp',
+  };
+  const safeOutputs: FirecrackerExchangePlan = {
+    hostDirectory: '/var/tmp/awf-safe-outputs',
+    guestMountPoint: '/awf/exchange',
+    guestOutputDirectory: '/awf/exchange/safe-outputs',
+    guestOutputFile: '/awf/exchange/safe-outputs/outputs.jsonl',
+    maxFileBytes: 1024,
+    maxTotalBytes: 4096,
+    maxFileCount: 16,
+  };
+
+  it('omits staging variables when nothing is staged', () => {
+    const environment = buildFirecrackerGuestEnvironment(config(), infrastructure());
+
+    expect(environment.RUNNER_TEMP).toBeUndefined();
+    expect(environment.AWF_GH_AW_RUNTIME_MOUNT).toBeUndefined();
+    expect(environment.AWF_SAFE_OUTPUTS_DIR).toBeUndefined();
+    expect(environment.GITHUB_AW_SAFE_OUTPUTS).toBeUndefined();
+  });
+
+  it('points gh-aw at guest paths rather than host paths', () => {
+    const environment = buildFirecrackerGuestEnvironment(
+      config({ additionalEnv: { RUNNER_TEMP: '/runner/_temp' } }),
+      infrastructure(),
+      '100.64.0.2',
+      { runtimeAssets, safeOutputs },
+    );
+
+    expect(environment.RUNNER_TEMP).toBe('/awf/runner-temp');
+    expect(environment.AWF_GH_AW_RUNTIME_MOUNT).toBe('/awf/runtime');
+    expect(environment.AWF_SAFE_OUTPUTS_DIR).toBe('/awf/exchange/safe-outputs');
+    expect(environment.GITHUB_AW_SAFE_OUTPUTS).toBe('/awf/exchange/safe-outputs/outputs.jsonl');
+  });
+
+  it('still refuses real provider credentials while staging is active', () => {
+    expect(() => buildFirecrackerGuestEnvironment(
+      config({
+        anthropicApiKey: 'sk-ant-real-value',
+        additionalEnv: { LEAK: 'sk-ant-real-value' },
+      }),
+      infrastructure(),
+      '100.64.0.2',
+      { runtimeAssets, safeOutputs },
+    )).toThrow(/Refusing to pass a real provider credential/);
+  });
+
+  it('collects only substantial real credential values for staging denial', () => {
+    expect(collectRealCredentialValues(config({
+      openaiApiKey: 'sk-openai-secret',
+      githubToken: 'ghp_secret_token',
+      anthropicApiKey: 'short',
+    }))).toEqual(['sk-openai-secret', 'ghp_secret_token']);
+    expect(collectRealCredentialValues(config())).toEqual([]);
   });
 });

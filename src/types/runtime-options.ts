@@ -11,12 +11,71 @@ export const FIRECRACKER_DEFAULT_VCPU_COUNT = 2;
 export const FIRECRACKER_DEFAULT_MEMORY_MIB = 512;
 export const FIRECRACKER_DEFAULT_API_TIMEOUT_MS = 5_000;
 
+const FIRECRACKER_MIB = 1024 * 1024;
+
+/** Bounded defaults for the AWF-owned gh-aw runtime asset staging contract. */
+export const FIRECRACKER_DEFAULT_GH_AW_MAX_FILE_BYTES = 64 * FIRECRACKER_MIB;
+export const FIRECRACKER_DEFAULT_GH_AW_MAX_TOTAL_BYTES = 512 * FIRECRACKER_MIB;
+export const FIRECRACKER_DEFAULT_GH_AW_MAX_FILE_COUNT = 20_000;
+
+/** Bounded defaults for the post-stop safe-output exchange. */
+export const FIRECRACKER_DEFAULT_SAFE_OUTPUT_MAX_FILE_BYTES = 16 * FIRECRACKER_MIB;
+export const FIRECRACKER_DEFAULT_SAFE_OUTPUT_MAX_TOTAL_BYTES = 64 * FIRECRACKER_MIB;
+export const FIRECRACKER_DEFAULT_SAFE_OUTPUT_MAX_FILE_COUNT = 2_000;
+
+/** Default host root that holds the gh-aw compiler's `/tmp/gh-aw` output tree. */
+export const FIRECRACKER_DEFAULT_GH_AW_COMPILER_TMP = '/tmp';
+
 export interface FirecrackerArtifactDigests {
   firecracker?: string;
   jailer?: string;
   kernel?: string;
   rootfs?: string;
   supervisor?: string;
+}
+
+/**
+ * Bounded copy caps applied while AWF stages host trees into guest devices.
+ *
+ * Every cap is enforced during the copy itself, not after it, so a source tree
+ * that grows while it is being staged still fails closed.
+ */
+export interface FirecrackerStagingLimits {
+  /** Largest single regular file AWF will stage, in bytes. */
+  maxFileBytes: number;
+  /** Largest total staged payload, in bytes. */
+  maxTotalBytes: number;
+  /** Largest number of staged entries (files, directories, and symlinks). */
+  maxFileCount: number;
+}
+
+/**
+ * Post-stop safe-output exchange contract.
+ *
+ * The guest writes into a dedicated writable exchange device that is never
+ * populated from host state. AWF copies the result to `hostDirectory` only
+ * after the Firecracker process termination is confirmed.
+ */
+export interface FirecrackerSafeOutputsOptions extends FirecrackerStagingLimits {
+  /** Absolute, canonical host directory that receives validated guest output. */
+  hostDirectory: string;
+}
+
+/**
+ * AWF-owned staging contract for generated gh-aw agents.
+ *
+ * The source set is fixed by AWF: only the canonical `RUNNER_TEMP/gh-aw` and
+ * compiler `/tmp/gh-aw` trees are eligible, and guest destinations are AWF
+ * constants. This is deliberately not a general bind-mount facility, so
+ * `--mount` / `volumeMounts` stay rejected for the Firecracker runtime.
+ */
+export interface FirecrackerGhAwRuntimeOptions extends FirecrackerStagingLimits {
+  enabled: boolean;
+  /** Canonical `RUNNER_TEMP` root; `<root>/gh-aw` is staged read-only. */
+  runnerTempPath?: string;
+  /** Canonical compiler tmp root; `<root>/gh-aw` is staged read-only. */
+  compilerTmpPath?: string;
+  safeOutputs?: FirecrackerSafeOutputsOptions;
 }
 
 /**
@@ -36,6 +95,8 @@ export interface FirecrackerOptions {
   memoryMib: number;
   apiTimeoutMs: number;
   sha256?: FirecrackerArtifactDigests;
+  /** Bounded gh-aw runtime asset staging and safe-output exchange contract. */
+  ghAwRuntime?: FirecrackerGhAwRuntimeOptions;
 }
 
 export interface RuntimeOptions {

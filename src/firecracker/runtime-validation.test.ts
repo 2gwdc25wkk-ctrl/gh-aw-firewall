@@ -1,10 +1,12 @@
 import type { WrapperConfig } from '../types';
 import {
+  assertFirecrackerGhAwRuntimeContract,
   assertFirecrackerPreSecurityCompatibility,
   assertFirecrackerRuntimeCompatibility,
   assertFirecrackerSelection,
   requireFirecrackerConfig,
 } from './runtime-validation';
+import type { FirecrackerGhAwRuntimeOptions } from '../types/runtime-options';
 
 const digest = 'a'.repeat(64);
 
@@ -102,5 +104,106 @@ describe('Firecracker runtime validation', () => {
     expect(() => assertFirecrackerPreSecurityCompatibility(config({
       awfDockerHost: 'unix:///var/run/docker.sock',
     }))).not.toThrow();
+  });
+});
+
+describe('Firecracker gh-aw runtime staging contract', () => {
+  const base: FirecrackerGhAwRuntimeOptions = {
+    enabled: true,
+    maxFileBytes: 1024,
+    maxTotalBytes: 4096,
+    maxFileCount: 16,
+  };
+
+  function withRuntime(ghAwRuntime: FirecrackerGhAwRuntimeOptions): WrapperConfig {
+    const valid = config();
+    return {
+      ...valid,
+      firecracker: { ...valid.firecracker!, ghAwRuntime },
+    } as WrapperConfig;
+  }
+
+  it('still refuses arbitrary host volume mounts when staging is enabled', () => {
+    expect(() => assertFirecrackerRuntimeCompatibility(withRuntime({
+      ...base,
+      volumeMounts: ['/etc:/etc'],
+    } as never))).not.toThrow();
+    expect(() => assertFirecrackerPreSecurityCompatibility({
+      ...withRuntime(base),
+      volumeMounts: ['/etc:/etc'],
+    } as WrapperConfig)).toThrow(/does not support additional host volume mounts/);
+  });
+
+  it('accepts the default contract and a complete safe-output block', () => {
+    expect(() => assertFirecrackerGhAwRuntimeContract({ ghAwRuntime: base } as never))
+      .not.toThrow();
+    expect(() => assertFirecrackerGhAwRuntimeContract({
+      ghAwRuntime: {
+        ...base,
+        runnerTempPath: '/runner/_temp',
+        compilerTmpPath: '/tmp',
+        safeOutputs: {
+          hostDirectory: '/var/tmp/awf-safe-outputs',
+          maxFileBytes: 512,
+          maxTotalBytes: 1024,
+          maxFileCount: 8,
+        },
+      },
+    } as never)).not.toThrow();
+  });
+
+  it('is a no-op when the contract is absent', () => {
+    expect(() => assertFirecrackerGhAwRuntimeContract({} as never)).not.toThrow();
+    expect(() => assertFirecrackerGhAwRuntimeContract({
+      ghAwRuntime: { ...base, enabled: false },
+    } as never)).not.toThrow();
+  });
+
+  it.each([
+    [
+      'safe outputs without staging',
+      { ...base, enabled: false, safeOutputs: {
+        hostDirectory: '/var/tmp/out', maxFileBytes: 1, maxTotalBytes: 2, maxFileCount: 1,
+      } },
+      /requires --firecracker-gh-aw-runtime/,
+    ],
+    ['relative runner temp', { ...base, runnerTempPath: 'runner/_temp' }, /absolute path/],
+    ['traversal runner temp', { ...base, runnerTempPath: '/runner/../etc' }, /absolute path/],
+    ['whitespace compiler tmp', { ...base, compilerTmpPath: '/tmp evil' }, /absolute path/],
+    ['zero file cap', { ...base, maxFileBytes: 0 }, /positive integer/],
+    ['negative total cap', { ...base, maxTotalBytes: -1 }, /positive integer/],
+    ['fractional count cap', { ...base, maxFileCount: 2.5 }, /positive integer/],
+    [
+      'per-file cap above total cap',
+      { ...base, maxFileBytes: 8192 },
+      /may not exceed/,
+    ],
+    [
+      'relative safe-output directory',
+      { ...base, safeOutputs: {
+        hostDirectory: 'outputs', maxFileBytes: 1, maxTotalBytes: 2, maxFileCount: 1,
+      } },
+      /absolute path/,
+    ],
+    [
+      'safe-output cap inversion',
+      { ...base, safeOutputs: {
+        hostDirectory: '/var/tmp/out', maxFileBytes: 4, maxTotalBytes: 2, maxFileCount: 1,
+      } },
+      /may not exceed/,
+    ],
+    [
+      'safe-output zero count cap',
+      { ...base, safeOutputs: {
+        hostDirectory: '/var/tmp/out', maxFileBytes: 1, maxTotalBytes: 2, maxFileCount: 0,
+      } },
+      /positive integer/,
+    ],
+  ])('rejects %s', (_name, ghAwRuntime, pattern) => {
+    expect(() => assertFirecrackerGhAwRuntimeContract({ ghAwRuntime } as never))
+      .toThrow(pattern);
+    expect(() => assertFirecrackerRuntimeCompatibility(
+      withRuntime(ghAwRuntime as FirecrackerGhAwRuntimeOptions),
+    )).toThrow(pattern);
   });
 });

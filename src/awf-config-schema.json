@@ -725,6 +725,76 @@
               "$ref": "#/$defs/sha256Digest"
             }
           }
+        },
+        "ghAwRuntime": {
+          "type": "object",
+          "description": "AWF-owned staging contract for generated gh-aw agent runtime assets. Sources are fixed by AWF (canonical RUNNER_TEMP/gh-aw and the compiler tmp gh-aw tree); this is never a general bind-mount facility and never stages credentials.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Stage the fixed gh-aw runtime asset set onto a dedicated read-only guest block device."
+            },
+            "runnerTempPath": {
+              "type": "string",
+              "description": "Absolute host RUNNER_TEMP whose gh-aw subtree is staged. Defaults to $RUNNER_TEMP."
+            },
+            "compilerTmpPath": {
+              "type": "string",
+              "description": "Absolute host tmp root whose gh-aw subtree is staged. Defaults to /tmp."
+            },
+            "maxFileBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 67108864,
+              "description": "Per-file byte cap enforced while staging runtime assets."
+            },
+            "maxTotalBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 536870912,
+              "description": "Total byte cap enforced while staging runtime assets."
+            },
+            "maxFileCount": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 20000,
+              "description": "File count cap enforced while staging runtime assets."
+            },
+            "safeOutputs": {
+              "type": "object",
+              "description": "Bounded safe-output exchange device. Guest writes are copied back to the host only after confirmed VM stop.",
+              "additionalProperties": false,
+              "required": [
+                "hostDirectory"
+              ],
+              "properties": {
+                "hostDirectory": {
+                  "type": "string",
+                  "description": "Absolute host directory that receives a per-run subdirectory of validated safe outputs."
+                },
+                "maxFileBytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 16777216,
+                  "description": "Per-file byte cap enforced during copy-back."
+                },
+                "maxTotalBytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 67108864,
+                  "description": "Total byte cap enforced during copy-back."
+                },
+                "maxFileCount": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 2000,
+                  "description": "File count cap enforced during copy-back."
+                }
+              }
+            }
+          }
         }
       }
     },

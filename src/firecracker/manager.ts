@@ -26,21 +26,37 @@ import {
 } from './vsock-client';
 import {
   FirecrackerWorkspaceImage,
+  firecrackerRunImageDirectory,
   type FirecrackerWorkspaceImageConfig,
 } from './workspace-image';
+import {
+  FirecrackerRuntimeAssetImage,
+  type FirecrackerRuntimeAssetImageConfig,
+  type FirecrackerRuntimeAssetPlan,
+} from './runtime-assets';
+import {
+  FirecrackerExchangeImage,
+  type FirecrackerExchangeImageConfig,
+  type FirecrackerExchangePlan,
+} from './exchange-image';
 
 const API_SOCKET_NAME = 'firecracker.socket';
 const VSOCK_SOCKET_NAME = 'awf-vsock.socket';
 const WORKSPACE_IMAGE_NAME = 'workspace.ext4';
+const RUNTIME_ASSETS_IMAGE_NAME = 'runtime-assets.ext4';
+const EXCHANGE_IMAGE_NAME = 'exchange.ext4';
 const FIRECRACKER_LOG_NAME = 'firecracker.log';
 const FIRECRACKER_METRICS_NAME = 'firecracker.metrics.jsonl';
 const FIRECRACKER_CAPTURE_LIMIT_BYTES = 1024 * 1024;
 const KERNEL_JAIL_PATH = '/kernel';
 const ROOTFS_JAIL_PATH = '/rootfs';
 const WORKSPACE_JAIL_PATH = '/workspace.ext4';
+const RUNTIME_ASSETS_JAIL_PATH = `/${RUNTIME_ASSETS_IMAGE_NAME}`;
+const EXCHANGE_JAIL_PATH = `/${EXCHANGE_IMAGE_NAME}`;
 const VSOCK_JAIL_PATH = `/run/${VSOCK_SOCKET_NAME}`;
 export const FIRECRACKER_GUEST_VSOCK_PORT = 52;
 const FIRECRACKER_GUEST_SHUTDOWN_GRACE_MS = 5_000;
+const FIRECRACKER_MAX_BOOT_ARGS_LENGTH = 2048;
 
 export interface FirecrackerRunPaths {
   runId: string;
@@ -50,6 +66,8 @@ export interface FirecrackerRunPaths {
   kernelPath: string;
   rootfsPath: string;
   workspacePath: string;
+  runtimeAssetsPath: string;
+  exchangePath: string;
   vsockSocketPath: string;
   logPath: string;
   metricsPath: string;
@@ -78,6 +96,14 @@ export interface FirecrackerManagerDependencies {
   createClient(socketPath: string, timeoutMs: number): FirecrackerApiClient;
   createNetwork(plan: FirecrackerNetworkPlan, tools: FirecrackerHostToolPaths): FirecrackerNetworkLifecycle;
   createWorkspaceImage(config: FirecrackerWorkspaceImageConfig, tools: FirecrackerHostToolPaths): FirecrackerWorkspaceImage;
+  createRuntimeAssetImage(
+    config: FirecrackerRuntimeAssetImageConfig,
+    tools: FirecrackerHostToolPaths,
+  ): FirecrackerRuntimeAssetImage;
+  createExchangeImage(
+    config: FirecrackerExchangeImageConfig,
+    tools: FirecrackerHostToolPaths,
+  ): FirecrackerExchangeImage;
   createVsockClient(socketPath: string, guestPort: number, timeoutMs: number): FirecrackerVsockClient;
   resolveIdentity(): { uid: number; gid: number };
 }
@@ -96,6 +122,12 @@ export interface FirecrackerManagerGuestConfig {
   readonly maxWorkspaceImageBytes?: number;
   readonly vsockPort?: number;
   readonly identity?: { uid: number; gid: number };
+  /** Bounded, read-only gh-aw runtime asset device contract. */
+  readonly runtimeAssets?: FirecrackerRuntimeAssetPlan;
+  /** Bounded, post-stop safe-output exchange contract. */
+  readonly safeOutputs?: FirecrackerExchangePlan;
+  /** Literal credential values that must never appear in staged assets. */
+  readonly forbiddenStagedContents?: readonly string[];
 }
 
 async function readBoundedTail(filePath: string, maxBytes: number): Promise<Buffer> {
@@ -131,6 +163,9 @@ const defaultDependencies: FirecrackerManagerDependencies = {
     new FirecrackerLinuxNetworkCommands(undefined, tools),
   ),
   createWorkspaceImage: (config, tools) => new FirecrackerWorkspaceImage(config, undefined, tools),
+  createRuntimeAssetImage: (config, tools) =>
+    new FirecrackerRuntimeAssetImage(config, undefined, tools),
+  createExchangeImage: (config, tools) => new FirecrackerExchangeImage(config, undefined, tools),
   createVsockClient: (socketPath, guestPort, timeoutMs) => new FirecrackerVsockClient({
     socketPath,
     guestPort,
@@ -196,6 +231,8 @@ export function createFirecrackerRunPaths(
     kernelPath: path.join(jailRoot, KERNEL_JAIL_PATH),
     rootfsPath: path.join(jailRoot, ROOTFS_JAIL_PATH),
     workspacePath: path.join(jailRoot, WORKSPACE_IMAGE_NAME),
+    runtimeAssetsPath: path.join(jailRoot, RUNTIME_ASSETS_IMAGE_NAME),
+    exchangePath: path.join(jailRoot, EXCHANGE_IMAGE_NAME),
     vsockSocketPath: path.join(jailRoot, 'run', VSOCK_SOCKET_NAME),
     logPath: path.join(jailRoot, 'run', FIRECRACKER_LOG_NAME),
     metricsPath: path.join(jailRoot, 'run', FIRECRACKER_METRICS_NAME),
@@ -211,6 +248,8 @@ export class FirecrackerManager {
   private client: FirecrackerApiClient | undefined;
   private network: FirecrackerNetworkLifecycle | undefined;
   private workspace: FirecrackerWorkspaceImage | undefined;
+  private runtimeAssets: FirecrackerRuntimeAssetImage | undefined;
+  private exchange: FirecrackerExchangeImage | undefined;
   private guestClient: FirecrackerVsockClient | undefined;
   private networkPlan: FirecrackerNetworkPlan | undefined;
   private instanceStarted = false;
@@ -257,6 +296,8 @@ export class FirecrackerManager {
       await this.network.setup();
       let rootfsSource = artifacts.rootfsPath;
       let workspaceSource: string | undefined;
+      let runtimeAssetsSource: string | undefined;
+      let exchangeSource: string | undefined;
       if (this.guestConfig) {
         this.workspace = this.dependencies.createWorkspaceImage({
           runId: this.paths.runId,
@@ -275,6 +316,30 @@ export class FirecrackerManager {
         const preparation = await this.workspace.prepare();
         rootfsSource = preparation.rootfsImagePath;
         workspaceSource = preparation.workspaceImagePath;
+
+        if (this.guestConfig.runtimeAssets) {
+          this.runtimeAssets = this.dependencies.createRuntimeAssetImage({
+            runId: this.paths.runId,
+            runDirectory: firecrackerRunImageDirectory(this.workDir, this.paths.runId),
+            plan: this.guestConfig.runtimeAssets,
+            uid: identity.uid,
+            gid: identity.gid,
+            ...(this.guestConfig.forbiddenStagedContents
+              ? { forbiddenContents: this.guestConfig.forbiddenStagedContents }
+              : {}),
+          }, artifacts.tools);
+          runtimeAssetsSource = (await this.runtimeAssets.prepare()).imagePath;
+        }
+        if (this.guestConfig.safeOutputs) {
+          this.exchange = this.dependencies.createExchangeImage({
+            runId: this.paths.runId,
+            runDirectory: firecrackerRunImageDirectory(this.workDir, this.paths.runId),
+            plan: this.guestConfig.safeOutputs,
+            uid: identity.uid,
+            gid: identity.gid,
+          }, artifacts.tools);
+          exchangeSource = (await this.exchange.prepare()).imagePath;
+        }
       }
       await this.dependencies.mkdir(this.paths.chrootBaseDir, {
         recursive: true,
@@ -312,6 +377,17 @@ export class FirecrackerManager {
       await this.stageArtifact(rootfsSource, this.paths.rootfsPath, 0o600, identity);
       if (workspaceSource) {
         await this.stageArtifact(workspaceSource, this.paths.workspacePath, 0o600, identity);
+      }
+      if (runtimeAssetsSource) {
+        await this.stageArtifact(
+          runtimeAssetsSource,
+          this.paths.runtimeAssetsPath,
+          0o400,
+          identity,
+        );
+      }
+      if (exchangeSource) {
+        await this.stageArtifact(exchangeSource, this.paths.exchangePath, 0o600, identity);
       }
 
       this.client = this.dependencies.createClient(
@@ -353,6 +429,22 @@ export class FirecrackerManager {
           is_root_device: false,
           is_read_only: false,
         });
+        if (runtimeAssetsSource) {
+          await this.client.putDrive({
+            drive_id: 'runtime-assets',
+            path_on_host: RUNTIME_ASSETS_JAIL_PATH,
+            is_root_device: false,
+            is_read_only: true,
+          });
+        }
+        if (exchangeSource) {
+          await this.client.putDrive({
+            drive_id: 'exchange',
+            path_on_host: EXCHANGE_JAIL_PATH,
+            is_root_device: false,
+            is_read_only: false,
+          });
+        }
         await this.client.putVsock({
           guest_cid: 3,
           uds_path: VSOCK_JAIL_PATH,
@@ -497,6 +589,13 @@ export class FirecrackerManager {
         errors.push(error);
       }
     }
+    if (this.exchange && instanceWasStarted) {
+      try {
+        await this.exchange.extractAfterStop(this.paths.exchangePath);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
     this.instanceStarted = false;
 
     if (options.preserve) {
@@ -538,6 +637,20 @@ export class FirecrackerManager {
       errors.push(error);
     }
     this.workspace = undefined;
+
+    try {
+      await this.runtimeAssets?.cleanup();
+    } catch (error) {
+      errors.push(error);
+    }
+    this.runtimeAssets = undefined;
+
+    try {
+      await this.exchange?.cleanup();
+    } catch (error) {
+      errors.push(error);
+    }
+    this.exchange = undefined;
 
     if (errors.length === 1) throw errors[0];
     if (errors.length > 1) {
@@ -660,7 +773,7 @@ export function buildSupervisorBootArgs(
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error(`Firecracker guest vsock port must be in 1-65535: ${port}`);
   }
-  return [
+  const args = [
     'console=ttyS0',
     'reboot=k',
     'panic=1',
@@ -673,7 +786,53 @@ export function buildSupervisorBootArgs(
     `awf.guest-prefix=${networkPlan.guestPrefixLength}`,
     `awf.guest-gateway=${networkPlan.guestGatewayIp}`,
     'awf.guest-interface=eth0',
-  ].join(' ');
+  ];
+
+  // Guest block devices are named in drive-registration order, which is fixed
+  // as rootfs, workspace, runtime assets, exchange.
+  let deviceIndex = 1;
+  if (guestConfig.runtimeAssets) {
+    deviceIndex += 1;
+    const binds = guestConfig.runtimeAssets.entries
+      .map((entry) => `${entry.id}:${entry.guestPath}`)
+      .join(',');
+    assertSafeBootArgValue(binds, 'runtime asset bind list');
+    assertSafeBootArgValue(guestConfig.runtimeAssets.guestMountPoint, 'runtime mount point');
+    args.push(
+      `awf.runtime-device=${guestDeviceName(deviceIndex)}`,
+      `awf.runtime-mount=${guestConfig.runtimeAssets.guestMountPoint}`,
+      `awf.runtime-bind=${binds}`,
+    );
+  }
+  if (guestConfig.safeOutputs) {
+    deviceIndex += 1;
+    assertSafeBootArgValue(guestConfig.safeOutputs.guestMountPoint, 'exchange mount point');
+    args.push(
+      `awf.exchange-device=${guestDeviceName(deviceIndex)}`,
+      `awf.exchange-mount=${guestConfig.safeOutputs.guestMountPoint}`,
+    );
+  }
+
+  const bootArgs = args.join(' ');
+  if (bootArgs.length > FIRECRACKER_MAX_BOOT_ARGS_LENGTH) {
+    throw new Error(
+      `Firecracker guest boot arguments exceed ${FIRECRACKER_MAX_BOOT_ARGS_LENGTH} characters`,
+    );
+  }
+  return bootArgs;
+}
+
+function guestDeviceName(index: number): string {
+  if (!Number.isInteger(index) || index < 0 || index > 25) {
+    throw new Error(`Firecracker guest block device index is out of range: ${index}`);
+  }
+  return `/dev/vd${String.fromCharCode('a'.charCodeAt(0) + index)}`;
+}
+
+function assertSafeBootArgValue(value: string, label: string): void {
+  if (value.length === 0 || /[\s"'\\;`\r\n]/.test(value)) {
+    throw new Error(`Firecracker ${label} is unsafe for guest boot arguments: ${value}`);
+  }
 }
 
 function formatError(error: unknown): string {

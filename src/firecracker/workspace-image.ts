@@ -73,6 +73,12 @@ export interface FirecrackerWorkspacePreparation {
   readonly originalManifest: FirecrackerWorkspaceManifest;
 }
 
+/** Single source of truth for the per-run image directory layout. */
+export function firecrackerRunImageDirectory(workDir: string, runId: string): string {
+  assertSafeRunId(runId);
+  return path.join(workDir, 'firecracker-images', runId);
+}
+
 /**
  * Owns the host-only population and post-stop extraction of one writable image.
  */
@@ -93,7 +99,7 @@ export class FirecrackerWorkspaceImage {
     private readonly tools?: Pick<FirecrackerHostToolPaths, 'mke2fs' | 'debugfs' | 'e2fsck' | 'rsync'>,
   ) {
     assertSafeRunId(config.runId);
-    this.runDirectory = path.join(config.workDir, 'firecracker-images', config.runId);
+    this.runDirectory = firecrackerRunImageDirectory(config.workDir, config.runId);
     this.stagingDirectory = path.join(this.runDirectory, 'staging');
     this.workspaceImagePath = path.join(this.runDirectory, 'workspace.ext4');
     this.rootfsImagePath = path.join(this.runDirectory, 'rootfs.ext4');

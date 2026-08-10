@@ -197,6 +197,22 @@ program
   .option('--firecracker-kernel-sha256 <digest>', 'Expected SHA-256 digest of the guest kernel.')
   .option('--firecracker-rootfs-sha256 <digest>', 'Expected SHA-256 digest of the guest rootfs.')
   .option('--firecracker-supervisor-sha256 <digest>', 'Expected SHA-256 digest of the AWF guest supervisor.')
+  .option(
+   '--firecracker-gh-aw-runtime',
+   'Stage generated gh-aw agent runtime assets into the guest on a read-only device.\n' +
+   '                                       Sources are fixed by AWF (RUNNER_TEMP/gh-aw and /tmp/gh-aw);\n' +
+   '                                       this is NOT a general bind-mount facility.',
+   false
+  )
+  .option('--firecracker-gh-aw-runner-temp <path>', 'Host RUNNER_TEMP whose gh-aw subtree is staged (default: $RUNNER_TEMP).')
+  .option('--firecracker-gh-aw-compiler-tmp <path>', 'Host tmp root whose gh-aw subtree is staged (default: /tmp).')
+  .option('--firecracker-gh-aw-max-file-bytes <bytes>', 'Per-file cap for staged gh-aw runtime assets (default: 67108864).')
+  .option('--firecracker-gh-aw-max-total-bytes <bytes>', 'Total byte cap for staged gh-aw runtime assets (default: 536870912).')
+  .option('--firecracker-gh-aw-max-files <count>', 'File count cap for staged gh-aw runtime assets (default: 20000).')
+  .option('--firecracker-safe-outputs-dir <path>', 'Host directory receiving guest safe outputs after the VM stops.')
+  .option('--firecracker-safe-outputs-max-file-bytes <bytes>', 'Per-file cap for copied-back safe outputs (default: 16777216).')
+  .option('--firecracker-safe-outputs-max-total-bytes <bytes>', 'Total byte cap for copied-back safe outputs (default: 67108864).')
+  .option('--firecracker-safe-outputs-max-files <count>', 'File count cap for copied-back safe outputs (default: 2000).')
 
   // -- Container Configuration --
   .option(

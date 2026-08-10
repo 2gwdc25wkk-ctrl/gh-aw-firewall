@@ -209,6 +209,15 @@ v1.16.1 binaries, Linux 6.1.141 kernel, BusyBox 1.36.1 rootfs, and AWF guest
 supervisor — from pinned, SHA-256 verified sources. Attests provenance. Uploads
 as a 7-day workflow artifact.
 
+**Agent rootfs job** (`ubuntu-24.04`): Builds the separate agent-capable guest
+rootfs (`guest/firecracker/build-agent-rootfs.sh`) from a digest-pinned Debian
+base and a frozen package snapshot, verifies the published `rootfs.ext4` against
+the execution contract (`verify-agent-rootfs.sh`), attests provenance, and
+uploads artifact `firecracker-agent-x86_64`. This artifact is distinct from the
+128 MiB BusyBox test rootfs and is the one that can actually run a generated
+gh-aw agent. Contract assertions are unit-tested in
+`scripts/ci/firecracker-agent-rootfs-contract.test.ts`.
+
 **Live job** (`ubuntu-24.04`): Runs on a GitHub-hosted x64 runner, downloads the
 build artifact, verifies all five SHA-256 digests, and runs the live
 smoke/security suite. The preflight requires usable KVM and fails closed if

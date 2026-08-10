@@ -73,6 +73,51 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-agent-rootfs:
+    name: Build agent-capable guest rootfs
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.0'
+          cache-dependency-path: guest/firecracker-supervisor/go.mod
+
+      - name: Install agent rootfs build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            binutils \
+            ca-certificates \
+            e2fsprogs \
+            file \
+            xz-utils
+
+      - name: Build and verify the agent rootfs
+        run: |
+          sudo env "PATH=$PATH" ./guest/firecracker/build-agent-rootfs.sh
+          sudo ./guest/firecracker/verify-agent-rootfs.sh \
+            release/firecracker-agent-x86_64/rootfs.ext4
+          (cd release/firecracker-agent-x86_64 && sha256sum --check SHA256SUMS)
+
+      - name: Attest agent rootfs provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/firecracker-agent-x86_64/awf-firecracker-agent-x86_64.tar.gz
+
+      - name: Upload agent rootfs artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: firecracker-agent-x86_64
+          path: release/firecracker-agent-x86_64/
+          if-no-files-found: error
+          retention-days: 7
+
   live-kvm:
     name: Live Firecracker KVM smoke/security
     needs: build-test-artifacts

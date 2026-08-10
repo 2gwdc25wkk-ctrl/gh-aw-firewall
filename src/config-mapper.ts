@@ -128,6 +128,18 @@ export function mapAwfFileConfigToCliOptions(config: AwfFileConfig): Record<stri
     firecrackerKernelSha256: config.firecracker?.sha256?.kernel,
     firecrackerRootfsSha256: config.firecracker?.sha256?.rootfs,
     firecrackerSupervisorSha256: config.firecracker?.sha256?.supervisor,
+    firecrackerGhAwRuntime: config.firecracker?.ghAwRuntime?.enabled,
+    firecrackerGhAwRunnerTemp: config.firecracker?.ghAwRuntime?.runnerTempPath,
+    firecrackerGhAwCompilerTmp: config.firecracker?.ghAwRuntime?.compilerTmpPath,
+    firecrackerGhAwMaxFileBytes: config.firecracker?.ghAwRuntime?.maxFileBytes,
+    firecrackerGhAwMaxTotalBytes: config.firecracker?.ghAwRuntime?.maxTotalBytes,
+    firecrackerGhAwMaxFiles: config.firecracker?.ghAwRuntime?.maxFileCount,
+    firecrackerSafeOutputsDir: config.firecracker?.ghAwRuntime?.safeOutputs?.hostDirectory,
+    firecrackerSafeOutputsMaxFileBytes:
+      config.firecracker?.ghAwRuntime?.safeOutputs?.maxFileBytes,
+    firecrackerSafeOutputsMaxTotalBytes:
+      config.firecracker?.ghAwRuntime?.safeOutputs?.maxTotalBytes,
+    firecrackerSafeOutputsMaxFiles: config.firecracker?.ghAwRuntime?.safeOutputs?.maxFileCount,
     chrootBinariesSourcePath: config.chroot?.binariesSourcePath,
     chrootIdentityHome: config.chroot?.identity?.home,
     chrootIdentityUser: config.chroot?.identity?.user,

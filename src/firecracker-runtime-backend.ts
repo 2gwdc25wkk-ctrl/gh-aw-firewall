@@ -26,6 +26,15 @@ import {
   assertFirecrackerRuntimeCompatibility,
   requireFirecrackerConfig,
 } from './firecracker/runtime-validation';
+import {
+  resolveFirecrackerGhAwRuntimePlan,
+  FIRECRACKER_GUEST_RUNNER_TEMP,
+  type FirecrackerRuntimeAssetPlan,
+} from './firecracker/runtime-assets';
+import {
+  resolveFirecrackerExchangePlan,
+  type FirecrackerExchangePlan,
+} from './firecracker/exchange-image';
 export {
   assertFirecrackerPreSecurityCompatibility,
   assertFirecrackerRuntimeCompatibility,
@@ -41,6 +50,12 @@ interface FirecrackerBackendLogger {
   debug(message: string, ...args: unknown[]): void;
   info(message: string, ...args: unknown[]): void;
   warn(message: string, ...args: unknown[]): void;
+}
+
+export interface FirecrackerGuestStaging {
+  readonly runtimeAssets?: FirecrackerRuntimeAssetPlan;
+  readonly safeOutputs?: FirecrackerExchangePlan;
+  readonly forbiddenStagedContents?: readonly string[];
 }
 
 interface FirecrackerManagerAdapter {
@@ -68,6 +83,7 @@ export interface FirecrackerRuntimeBackendDependencies {
     workspacePath: string,
     homePath: string,
     identity: { uid: number; gid: number },
+    staging?: FirecrackerGuestStaging,
   ): FirecrackerManagerAdapter;
   workspacePath(): string;
   homePath(): string;
@@ -86,7 +102,7 @@ function defaultDependencies(
     preflight: runFirecrackerPreflight,
     resolveInfrastructure: (enableApiProxy, ipPath) =>
       resolveFirecrackerInfrastructure(enableApiProxy, undefined, ipPath),
-    createManager: (config, workDir, infrastructure, workspacePath, homePath, identity) =>
+    createManager: (config, workDir, infrastructure, workspacePath, homePath, identity, staging) =>
       new FirecrackerManager(
         config,
         workDir,
@@ -102,6 +118,11 @@ function defaultDependencies(
           supervisorBinaryPath: config.supervisorPath!,
           supervisorSha256: config.sha256!.supervisor!,
           identity,
+          ...(staging?.runtimeAssets ? { runtimeAssets: staging.runtimeAssets } : {}),
+          ...(staging?.safeOutputs ? { safeOutputs: staging.safeOutputs } : {}),
+          ...(staging?.forbiddenStagedContents?.length
+            ? { forbiddenStagedContents: staging.forbiddenStagedContents }
+            : {}),
         },
       ),
     workspacePath: () => process.env.GITHUB_WORKSPACE || process.cwd(),
@@ -133,6 +154,7 @@ export class FirecrackerRuntimeBackend implements ExternalAgentRuntimeBackend {
   private stopping: Promise<void> | undefined;
   private identity: { uid: number; gid: number } | undefined;
   private preflightResult: FirecrackerPreflightResult | undefined;
+  private staging: FirecrackerGuestStaging | undefined;
 
   constructor(
     private readonly config: WrapperConfig,
@@ -185,6 +207,8 @@ export class FirecrackerRuntimeBackend implements ExternalAgentRuntimeBackend {
         Boolean(this.config.enableApiProxy),
         this.preflightResult?.tools.ip,
       );
+      stage = 'gh-aw-runtime-staging';
+      this.staging = await this.resolveStaging(firecracker);
       this.identity = this.dependencies.identity();
       this.manager = this.dependencies.createManager(
         firecracker,
@@ -193,6 +217,7 @@ export class FirecrackerRuntimeBackend implements ExternalAgentRuntimeBackend {
         this.dependencies.workspacePath(),
         this.dependencies.homePath(),
         this.identity,
+        this.staging,
       );
 
       stage = 'topology-revalidation';
@@ -206,6 +231,7 @@ export class FirecrackerRuntimeBackend implements ExternalAgentRuntimeBackend {
         this.config,
         infrastructure,
         this.manager.guestIp,
+        this.staging,
       );
       stage = 'guest-boot';
       await this.manager.startInstance();
@@ -365,6 +391,36 @@ export class FirecrackerRuntimeBackend implements ExternalAgentRuntimeBackend {
     await this.manager?.stop({ preserve });
   }
 
+  /**
+   * Resolves the AWF-owned gh-aw staging contract before any guest exists so a
+   * contract violation fails closed at startup rather than mid-boot.
+   */
+  private async resolveStaging(
+    firecracker: FirecrackerOptions,
+  ): Promise<FirecrackerGuestStaging | undefined> {
+    const runtime = firecracker.ghAwRuntime;
+    if (!runtime?.enabled) return undefined;
+    const resolution = await resolveFirecrackerGhAwRuntimePlan(runtime);
+    if (!resolution.plan) return undefined;
+    for (const id of resolution.skipped) {
+      this.dependencies.logger.warn(
+        `[firecracker] gh-aw runtime source ${id} is absent; continuing without it`,
+      );
+    }
+    this.dependencies.logger.info(
+      `[firecracker] Staging ${resolution.plan.entries.length} read-only gh-aw runtime ` +
+      `source(s): ${resolution.plan.entries.map((entry) => entry.guestPath).join(', ')}`,
+    );
+    const forbiddenStagedContents = collectRealCredentialValues(this.config);
+    return {
+      runtimeAssets: resolution.plan,
+      ...(runtime.safeOutputs
+        ? { safeOutputs: resolveFirecrackerExchangePlan(runtime.safeOutputs) }
+        : {}),
+      ...(forbiddenStagedContents.length > 0 ? { forbiddenStagedContents } : {}),
+    };
+  }
+
   private async probeGuestConnectivity(): Promise<void> {
     const manager = this.manager!;
     const environment = this.environment!;
@@ -402,6 +458,7 @@ export function buildFirecrackerGuestEnvironment(
   config: WrapperConfig,
   infrastructure: Pick<FirecrackerInfrastructureSnapshot, 'squidIp' | 'apiProxyIp'>,
   guestIp = '100.64.0.2',
+  staging?: FirecrackerGuestStaging,
 ): Record<string, string> {
   const networkConfig = {
     subnet: NETWORK_SUBNET,
@@ -425,8 +482,33 @@ export function buildFirecrackerGuestEnvironment(
     HOSTNAME: 'awf-firecracker',
     AWF_RUNTIME: 'firecracker',
   });
+  if (staging?.runtimeAssets) {
+    Object.assign(environment, {
+      RUNNER_TEMP: FIRECRACKER_GUEST_RUNNER_TEMP,
+      AWF_GH_AW_RUNTIME_MOUNT: staging.runtimeAssets.guestMountPoint,
+    });
+  }
+  if (staging?.safeOutputs) {
+    Object.assign(environment, {
+      AWF_SAFE_OUTPUTS_DIR: staging.safeOutputs.guestOutputDirectory,
+      GITHUB_AW_SAFE_OUTPUTS: staging.safeOutputs.guestOutputFile,
+    });
+  }
   assertNoProviderSecrets(config, environment);
   return environment;
+}
+
+/** Real credential values that must never be staged onto a guest device. */
+export function collectRealCredentialValues(config: WrapperConfig): string[] {
+  return [
+    config.openaiApiKey,
+    config.anthropicApiKey,
+    config.copilotGithubToken,
+    config.copilotProviderApiKey,
+    config.geminiApiKey,
+    config.googleApiKey,
+    config.githubToken,
+  ].filter((value): value is string => typeof value === 'string' && value.length >= 8);
 }
 
 function assertNoProviderSecrets(

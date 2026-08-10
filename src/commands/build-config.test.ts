@@ -593,3 +593,137 @@ describe('buildConfig', () => {
     });
   });
 });
+
+describe('Firecracker gh-aw runtime staging configuration', () => {
+  it('leaves the contract undefined when no staging option is supplied', () => {
+    const config = buildConfig(makeInputs({
+      options: { ...makeInputs().options, containerRuntime: 'firecracker' },
+    }));
+
+    expect(config.firecracker?.ghAwRuntime).toBeUndefined();
+  });
+
+  it('applies documented defaults when staging is enabled with no caps', () => {
+    const config = buildConfig(makeInputs({
+      options: {
+        ...makeInputs().options,
+        containerRuntime: 'firecracker',
+        firecrackerGhAwRuntime: true,
+      },
+    }));
+
+    expect(config.firecracker?.ghAwRuntime).toEqual({
+      enabled: true,
+      runnerTempPath: undefined,
+      compilerTmpPath: '/tmp',
+      maxFileBytes: 64 * 1024 * 1024,
+      maxTotalBytes: 512 * 1024 * 1024,
+      maxFileCount: 20000,
+      safeOutputs: undefined,
+    });
+  });
+
+  it('records explicit caps and paths without enabling staging implicitly', () => {
+    const config = buildConfig(makeInputs({
+      options: {
+        ...makeInputs().options,
+        containerRuntime: 'firecracker',
+        firecrackerGhAwRunnerTemp: '/runner/_temp',
+        firecrackerGhAwCompilerTmp: '/var/tmp',
+        firecrackerGhAwMaxFileBytes: '1024',
+        firecrackerGhAwMaxTotalBytes: '4096',
+        firecrackerGhAwMaxFiles: '12',
+      },
+    }));
+
+    expect(config.firecracker?.ghAwRuntime).toEqual({
+      enabled: false,
+      runnerTempPath: '/runner/_temp',
+      compilerTmpPath: '/var/tmp',
+      maxFileBytes: 1024,
+      maxTotalBytes: 4096,
+      maxFileCount: 12,
+      safeOutputs: undefined,
+    });
+  });
+
+  it('builds the safe-output exchange only when a host directory is given', () => {
+    const config = buildConfig(makeInputs({
+      options: {
+        ...makeInputs().options,
+        containerRuntime: 'firecracker',
+        firecrackerGhAwRuntime: true,
+        firecrackerSafeOutputsDir: '/var/tmp/awf-safe-outputs',
+        firecrackerSafeOutputsMaxFileBytes: '2048',
+        firecrackerSafeOutputsMaxTotalBytes: '8192',
+        firecrackerSafeOutputsMaxFiles: '9',
+      },
+    }));
+
+    expect(config.firecracker?.ghAwRuntime?.safeOutputs).toEqual({
+      hostDirectory: '/var/tmp/awf-safe-outputs',
+      maxFileBytes: 2048,
+      maxTotalBytes: 8192,
+      maxFileCount: 9,
+    });
+  });
+
+  it.each([
+    ['firecrackerGhAwMaxFileBytes', '--firecracker-gh-aw-max-file-bytes'],
+    ['firecrackerGhAwMaxTotalBytes', '--firecracker-gh-aw-max-total-bytes'],
+    ['firecrackerGhAwMaxFiles', '--firecracker-gh-aw-max-files'],
+    ['firecrackerSafeOutputsMaxFileBytes', '--firecracker-safe-outputs-max-file-bytes'],
+    ['firecrackerSafeOutputsMaxTotalBytes', '--firecracker-safe-outputs-max-total-bytes'],
+    ['firecrackerSafeOutputsMaxFiles', '--firecracker-safe-outputs-max-files'],
+  ])('rejects a non-numeric %s', (key, flag) => {
+    expect(() => buildConfig(makeInputs({
+      options: {
+        ...makeInputs().options,
+        containerRuntime: 'firecracker',
+        firecrackerGhAwRuntime: true,
+        firecrackerSafeOutputsDir: '/var/tmp/awf-safe-outputs',
+        [key]: 'not-a-number',
+      },
+    }))).toThrow(new RegExp(flag.replace(/-/g, '\\-')));
+  });
+
+  it('maps the config-file block onto the same CLI options', () => {
+    const options = mapAwfFileConfigToCliOptions({
+      firecracker: {
+        ghAwRuntime: {
+          enabled: true,
+          runnerTempPath: '/runner/_temp',
+          compilerTmpPath: '/var/tmp',
+          maxFileBytes: 1024,
+          maxTotalBytes: 4096,
+          maxFileCount: 12,
+          safeOutputs: {
+            hostDirectory: '/var/tmp/awf-safe-outputs',
+            maxFileBytes: 512,
+            maxTotalBytes: 2048,
+            maxFileCount: 6,
+          },
+        },
+      },
+    });
+
+    expect(options).toMatchObject({
+      firecrackerGhAwRuntime: true,
+      firecrackerGhAwRunnerTemp: '/runner/_temp',
+      firecrackerGhAwCompilerTmp: '/var/tmp',
+      firecrackerGhAwMaxFileBytes: 1024,
+      firecrackerGhAwMaxTotalBytes: 4096,
+      firecrackerGhAwMaxFiles: 12,
+      firecrackerSafeOutputsDir: '/var/tmp/awf-safe-outputs',
+      firecrackerSafeOutputsMaxFileBytes: 512,
+      firecrackerSafeOutputsMaxTotalBytes: 2048,
+      firecrackerSafeOutputsMaxFiles: 6,
+    });
+
+    const config = buildConfig(makeInputs({
+      options: { ...makeInputs().options, containerRuntime: 'firecracker', ...options },
+    }));
+    expect(config.firecracker?.ghAwRuntime?.enabled).toBe(true);
+    expect(config.firecracker?.ghAwRuntime?.safeOutputs?.maxFileCount).toBe(6);
+  });
+});
