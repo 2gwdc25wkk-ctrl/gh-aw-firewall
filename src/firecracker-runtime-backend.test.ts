@@ -271,6 +271,23 @@ describe('Firecracker runtime backend', () => {
     expect(manager.stop).toHaveBeenCalledTimes(1);
   });
 
+  it('collects startup diagnostics before tearing down a failed VM', async () => {
+    const { manager, deps } = harness();
+    manager.startInstance.mockRejectedValue(new Error('guest boot failed'));
+    manager.collectDiagnostics.mockImplementation(async () => {
+      expect(manager.stop).not.toHaveBeenCalled();
+    });
+    const backend = new FirecrackerRuntimeBackend(
+      config({ diagnosticLogs: true, auditDir: '/tmp/audit' }),
+      deps,
+    );
+
+    await expect(backend.start('/tmp/awf', ['github.com']))
+      .rejects.toThrow(/guest boot failed/);
+    expect(manager.collectDiagnostics).toHaveBeenCalledWith('/tmp/audit/firecracker');
+    expect(manager.stop).toHaveBeenCalledTimes(1);
+  });
+
   it('fails closed when manager readiness or startup cleanup is unavailable', async () => {
       const missingIp = harness();
       Reflect.set(missingIp.manager, 'guestIp', undefined);

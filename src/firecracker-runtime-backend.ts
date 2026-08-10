@@ -216,6 +216,15 @@ export class FirecrackerRuntimeBackend implements ExternalAgentRuntimeBackend {
       this.dependencies.logger.warn(
         `[firecracker] stage=${stage} status=failed: ${formatError(error)}`,
       );
+      if (this.config.diagnosticLogs && this.manager) {
+        try {
+          await this.collectDiagnostics();
+        } catch (diagnosticError) {
+          this.dependencies.logger.warn(
+            `[firecracker] startup diagnostic collection failed: ${formatError(diagnosticError)}`,
+          );
+        }
+      }
       try {
         await this.manager?.stop();
       } catch (cleanupError) {
