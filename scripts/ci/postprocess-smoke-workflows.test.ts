@@ -709,7 +709,7 @@ describe('Firecracker smoke workflow patches', () => {
       'npm install --prefix "${RUNNER_TEMP}/gh-aw/engine-cli" @anthropic-ai/claude-code@2.1.223'
     );
     expect(content).toContain('echo "CLAUDE_BIN=$CLAUDE_BIN" >> "$GITHUB_ENV"');
-    expect(content).toContain('actions/claude_harness.cjs "$CLAUDE_BIN" --print');
+    expect(content).toContain('actions/claude_harness.cjs "${RUNNER_TEMP}/gh-aw/engine-cli/node_modules/.bin/claude" --print');
     expect(content).toContain(
       '--debug-file /workspace/.gh-aw-firecracker/claude-debug.json'
     );
@@ -733,7 +733,7 @@ describe('Firecracker smoke workflow patches', () => {
       'npm install --ignore-scripts --prefix "${RUNNER_TEMP}/gh-aw/engine-cli" @openai/codex@0.146.1'
     );
     expect(content).toContain('echo "CODEX_BIN=$CODEX_BIN" >> "$GITHUB_ENV"');
-    expect(content).toContain('actions/codex_harness.cjs "$CODEX_BIN" exec');
+    expect(content).toContain('actions/codex_harness.cjs "${RUNNER_TEMP}/gh-aw/engine-cli/node_modules/.bin/codex" exec');
     expect(content).toContain(
       'CODEX_HOME: /workspace/.gh-aw-firecracker/codex-home'
     );

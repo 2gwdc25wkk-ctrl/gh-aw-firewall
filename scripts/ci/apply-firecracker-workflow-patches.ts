@@ -83,8 +83,8 @@ export const FIRECRACKER_SETUP_STEPS =
   '\n' +
   '          trusted="$GITHUB_WORKSPACE/.awf-trusted-source"\n' +
   '          host_runtime="$RUNNER_TEMP/awf-host"\n' +
-  '          (cd "$trusted" && sudo ./guest/firecracker/build-test-artifacts.sh)\n' +
-  '          (cd "$trusted" && sudo ./guest/firecracker/build-agent-rootfs.sh)\n' +
+  '          (cd "$trusted" && sudo env "PATH=$PATH" ./guest/firecracker/build-test-artifacts.sh)\n' +
+  '          (cd "$trusted" && sudo env "PATH=$PATH" ./guest/firecracker/build-agent-rootfs.sh)\n' +
   '          platform_artifacts="$trusted/release/firecracker-test-x86_64"\n' +
   '          agent_artifacts="$trusted/release/firecracker-agent-x86_64"\n' +
   '          (cd "$trusted" && ./guest/firecracker/verify-test-artifacts.sh "$platform_artifacts")\n' +
@@ -469,6 +469,34 @@ export function applyFirecrackerWorkflowPatches(
     !content.includes(FIRECRACKER_IMAGE_FLAGS)
   ) {
     throw new Error(`${filename}: Firecracker image reuse flags are missing`);
+  }
+
+  // Fix: sudo strips PATH so Go 1.25.0 installed by setup-go is not found.
+  // Replace bare `sudo ./guest/firecracker/build-*.sh` with
+  // `sudo env "PATH=$PATH" ./guest/...` to preserve the toolcache PATH.
+  const SUDO_BUILD_BARE = /sudo (\.\/(guest\/firecracker\/build-[a-z-]+\.sh))/g;
+  if (SUDO_BUILD_BARE.test(content)) {
+    SUDO_BUILD_BARE.lastIndex = 0;
+    content = content.replace(SUDO_BUILD_BARE, 'sudo env "PATH=$PATH" $1');
+    log.push('  Fixed sudo PATH preservation for Firecracker build scripts');
+  }
+
+  // Fix: CLAUDE_BIN / CODEX_BIN are resolved on the host to an absolute path,
+  // but Firecracker remaps RUNNER_TEMP in the guest. Use the literal
+  // RUNNER_TEMP-relative path inside the harness invocation so the guest
+  // evaluates it with its own (remapped) RUNNER_TEMP value.
+  const CLAUDE_BIN_HOST = 'claude_harness.cjs "$CLAUDE_BIN"';
+  const CLAUDE_BIN_GUEST = 'claude_harness.cjs "${RUNNER_TEMP}/gh-aw/engine-cli/node_modules/.bin/claude"';
+  if (content.includes(CLAUDE_BIN_HOST)) {
+    content = content.split(CLAUDE_BIN_HOST).join(CLAUDE_BIN_GUEST);
+    log.push('  Fixed CLAUDE_BIN to use guest-resolved RUNNER_TEMP path');
+  }
+
+  const CODEX_BIN_HOST = 'codex_harness.cjs "$CODEX_BIN"';
+  const CODEX_BIN_GUEST = 'codex_harness.cjs "${RUNNER_TEMP}/gh-aw/engine-cli/node_modules/.bin/codex"';
+  if (content.includes(CODEX_BIN_HOST)) {
+    content = content.split(CODEX_BIN_HOST).join(CODEX_BIN_GUEST);
+    log.push('  Fixed CODEX_BIN to use guest-resolved RUNNER_TEMP path');
   }
 
   return { content, log };

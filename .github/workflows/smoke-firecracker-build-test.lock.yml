@@ -614,8 +614,8 @@ jobs:
 
           trusted="$GITHUB_WORKSPACE/.awf-trusted-source"
           host_runtime="$RUNNER_TEMP/awf-host"
-          (cd "$trusted" && sudo ./guest/firecracker/build-test-artifacts.sh)
-          (cd "$trusted" && sudo ./guest/firecracker/build-agent-rootfs.sh)
+          (cd "$trusted" && sudo env "PATH=$PATH" ./guest/firecracker/build-test-artifacts.sh)
+          (cd "$trusted" && sudo env "PATH=$PATH" ./guest/firecracker/build-agent-rootfs.sh)
           platform_artifacts="$trusted/release/firecracker-test-x86_64"
           agent_artifacts="$trusted/release/firecracker-agent-x86_64"
           (cd "$trusted" && ./guest/firecracker/verify-test-artifacts.sh "$platform_artifacts")
