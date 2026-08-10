@@ -14,7 +14,7 @@ type ExternalRuntimeBackendFactory = (
   context: ExternalRuntimeBackendFactoryContext,
 ) => ExternalAgentRuntimeBackend;
 
-export type ExternalRuntimeBackendRegistry = Readonly<
+type ExternalRuntimeBackendRegistry = Readonly<
   Record<string, ExternalRuntimeBackendFactory>
 >;
 
