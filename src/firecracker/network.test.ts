@@ -151,6 +151,11 @@ describe('Firecracker nftables policy', () => {
     expect(ruleset).toContain('udp dport 53 drop');
     expect(ruleset).toContain('tcp dport 53 drop');
     expect(ruleset).toContain('ct state established,related accept');
+    expect(ruleset).toContain(
+      `iifname "${plan.namespaceVethName}" oifname "${plan.tapName}" ` +
+      `ip daddr ${plan.guestIp} ct state established,related accept`,
+    );
+    expect(ruleset).not.toContain(`ether daddr ${plan.guestMac}`);
     expect(ruleset).toContain('ip daddr 172.30.0.10 tcp dport 3128');
     for (let port = 10000; port <= 10004; port += 1) {
       expect(ruleset).toContain(`ip daddr 172.30.0.30 tcp dport ${port}`);

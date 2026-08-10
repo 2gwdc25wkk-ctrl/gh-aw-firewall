@@ -396,8 +396,7 @@ export function generateFirecrackerNftRuleset(plan: FirecrackerNetworkPlan): str
     `    iifname "${plan.tapName}" udp dport 53 drop`,
     `    iifname "${plan.tapName}" tcp dport 53 drop`,
     `    iifname "${plan.namespaceVethName}" oifname "${plan.tapName}" ` +
-      `ether daddr ${plan.guestMac} ip daddr ${plan.guestIp} ` +
-      'ct state established,related accept',
+      `ip daddr ${plan.guestIp} ct state established,related accept`,
     ...allowRules,
     '  }',
     '  chain postrouting {',
