@@ -9,16 +9,18 @@ import {
 
 /**
  * Fail-closed host and artifact validation for the Cloud Hypervisor v53.0
- * foundation. This module intentionally mirrors
+ * runtime. This module intentionally mirrors
  * `src/firecracker/preflight.ts`'s trust-check patterns (absolute paths,
  * root/operator-owned non-writable regular files, trusted ancestor
  * directories, digest pinning, PATH-resolved but ownership-verified host
  * tools) so both VMM backends share the same fail-closed posture.
  *
- * There is no lifecycle backend yet — this is exercised only by unit tests
- * and by a future layer that wires up Cloud Hypervisor workload execution.
  * Cloud Hypervisor has no jailer-equivalent process, so there is no paired
  * binary version cross-check the way Firecracker cross-checks jailer.
+ * Instead `src/cloud-hypervisor/launcher.ts` builds an equivalent
+ * network-namespace-join + privilege-drop + Landlock/seccomp launch using
+ * the `setpriv` tool resolved here, and `src/cloud-hypervisor/manager.ts`
+ * stages artifacts into a private, non-world-readable run directory.
  */
 
 export interface CloudHypervisorPreflightDependencies {
@@ -35,8 +37,11 @@ export interface CloudHypervisorPreflightDependencies {
   runVersion(binaryPath: string): Promise<string>;
   sha256(filePath: string): Promise<string>;
   assertToolAvailable(tool: string): Promise<string>;
-  assertHostPolicy(): Promise<1 | 2>;
+  assertHostPolicy(): Promise<2>;
   assertDockerInfrastructure(dockerBinaryPath: string): Promise<void>;
+  /** Resolves the group ID that owns `/dev/kvm`, so the launcher can retain
+   * exactly that supplementary group instead of the full operator group set. */
+  resolveKvmGid(): Promise<number>;
 }
 
 export type CloudHypervisorHostToolPaths = Readonly<{
@@ -47,9 +52,16 @@ export type CloudHypervisorHostToolPaths = Readonly<{
   debugfs: string;
   e2fsck: string;
   rsync: string;
+  /**
+   * util-linux `setpriv`, used by the launcher to drop to the non-root
+   * operator uid/gid and clear capabilities/groups after joining the
+   * per-run network namespace (there is no jailer-equivalent process to do
+   * this for Cloud Hypervisor). See `src/cloud-hypervisor/launcher.ts`.
+   */
+  setpriv: string;
 }>;
 const CLOUD_HYPERVISOR_HOST_TOOLS: (keyof CloudHypervisorHostToolPaths)[] = [
-  'ip', 'nft', 'sysctl', 'mke2fs', 'debugfs', 'e2fsck', 'rsync',
+  'ip', 'nft', 'sysctl', 'mke2fs', 'debugfs', 'e2fsck', 'rsync', 'setpriv',
 ];
 
 const defaultDependencies: CloudHypervisorPreflightDependencies = {
@@ -105,16 +117,21 @@ const defaultDependencies: CloudHypervisorPreflightDependencies = {
     try {
       await fs.access('/sys/fs/cgroup/cgroup.controllers', constants.R_OK);
       return 2;
-    } catch {
-      try {
-        await fs.access('/sys/fs/cgroup', constants.R_OK | constants.W_OK);
-        return 1;
-      } catch (error) {
-        throw new Error(
-          'Cloud Hypervisor requires a writable cgroup v1 hierarchy or cgroup v2 controllers: ' +
-          `${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
+    } catch (error) {
+      // Cloud Hypervisor's launcher manages an explicit memory/CPU/PID
+      // cgroup for the launched process (see `src/cloud-hypervisor/launcher.ts`
+      // `CloudHypervisorCgroup`), which requires the cgroup v2 unified
+      // hierarchy's `cgroup.subtree_control` delegation model. A cgroup v1
+      // fallback would need separate per-controller mount points
+      // (`memory`, `cpu,cpuacct`, `pids`) that this launcher does not
+      // manage, so it is rejected explicitly rather than silently
+      // constructing a broken cgroup. GitHub-hosted Ubuntu runners (the
+      // only supported host) always run cgroup v2.
+      throw new Error(
+        'Cloud Hypervisor requires the cgroup v2 unified hierarchy ' +
+        '(/sys/fs/cgroup/cgroup.controllers); cgroup v1-only hosts are not supported: ' +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   },
   assertDockerInfrastructure: async (dockerBinaryPath) => {
@@ -131,6 +148,10 @@ const defaultDependencies: CloudHypervisorPreflightDependencies = {
       }
     }
   },
+  resolveKvmGid: async () => {
+    const stat = await fs.stat('/dev/kvm');
+    return stat.gid;
+  },
 };
 
 /** @internal Exposed only for focused host-probe tests. */
@@ -143,7 +164,9 @@ export interface CloudHypervisorPreflightResult {
   rootfsPath: string;
   supervisorPath: string;
   tools: CloudHypervisorHostToolPaths;
-  cgroupVersion: 1 | 2;
+  cgroupVersion: 2;
+  /** Group ID that owns `/dev/kvm`, retained as the launcher's sole supplementary group. */
+  kvmGid: number;
 }
 
 async function assertTrustedHostTool(label: string, filePath: string): Promise<void> {
@@ -321,6 +344,7 @@ export async function runCloudHypervisorPreflight(
       `${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  const kvmGid = await dependencies.resolveKvmGid();
   const cgroupVersion = await dependencies.assertHostPolicy();
   let dockerBinaryPath: string;
   try {
@@ -411,5 +435,6 @@ export async function runCloudHypervisorPreflight(
     supervisorPath: config.supervisorPath,
     tools,
     cgroupVersion,
+    kvmGid,
   };
 }
