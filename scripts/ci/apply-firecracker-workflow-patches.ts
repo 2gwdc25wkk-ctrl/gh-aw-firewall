@@ -15,11 +15,28 @@ const SETUP_ANCHOR =
 const SETUP_SENTINEL = '      - name: Prepare Firecracker preview host';
 const TRUSTED_CHECKOUT_SENTINEL = '      - name: Checkout trusted AWF source';
 const LOCAL_INSTALL_ANCHOR = '      - name: Install awf dependencies';
+const DETECT_ERRORS_ANCHOR = '      - name: Detect agent errors\n';
 const AWF_COMMAND_PATTERN =
   /(^\s*)awf --config "\$\{RUNNER_TEMP\}\/gh-aw\/awf-config\.json" /m;
 const FIRECRACKER_COMMAND_SENTINEL = 'sudo -E awf --config ';
 const COMPILER_MOUNT_PATTERN =
   / --mount "\$\{RUNNER_TEMP\}\/gh-aw:\$\{RUNNER_TEMP\}\/gh-aw:ro" --mount "\$\{RUNNER_TEMP\}\/gh-aw:\/host\$\{RUNNER_TEMP\}\/gh-aw:ro" \$\{GH_AW_TOOL_CACHE_MOUNT:\+--mount "\$GH_AW_TOOL_CACHE_MOUNT"\}/;
+const TOOL_CACHE_MOUNT_BLOCK =
+  '          GH_AW_TOOL_CACHE_MOUNT=""\n' +
+  '          GH_AW_TOOL_CACHE="${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE must be set}"\n' +
+  '          if [ -d "$GH_AW_TOOL_CACHE" ]; then\n' +
+  '            if [[ "$GH_AW_TOOL_CACHE" != /opt/* ]]; then\n' +
+  '              GH_AW_TOOL_CACHE_MOUNT="$GH_AW_TOOL_CACHE:$GH_AW_TOOL_CACHE:ro"\n' +
+  '            fi\n' +
+  '          fi\n';
+const FIRECRACKER_FLAG_INSERTION_ANCHOR =
+  '--firecracker-supervisor-sha256 "${FIRECRACKER_SUPERVISOR_SHA256}" ';
+const FIRECRACKER_IMAGE_FLAGS = '--skip-pull --image-tag latest ';
+const FIRECRACKER_GUEST_STATE_DIR = '/workspace/.gh-aw-firecracker';
+const SAFE_OUTPUTS_COPYBACK_SENTINEL =
+  '      - name: Copy Firecracker safe outputs to compiler path';
+const RESTORE_FIRECRACKER_ARTIFACTS_SENTINEL =
+  '      - name: Restore Firecracker guest artifacts';
 
 export const FIRECRACKER_SETUP_STEPS =
   '      - name: Set up Go for Firecracker guest build\n' +
@@ -115,6 +132,59 @@ const TRUSTED_BUILD_STEPS =
   '          ref: ${{ github.event.pull_request.base.sha || github.sha }}\n' +
   '          path: .awf-trusted-source\n';
 
+const CLAUDE_INSTALL_STEP =
+  '      - name: Install Claude Code CLI\n' +
+  '        run: |\n' +
+  '          set -euo pipefail\n' +
+  '          npm install --prefix "${RUNNER_TEMP}/gh-aw/engine-cli" @anthropic-ai/claude-code@2.1.223\n' +
+  '          CLAUDE_BIN="${RUNNER_TEMP}/gh-aw/engine-cli/node_modules/.bin/claude"\n' +
+  '          test -x "$CLAUDE_BIN" || { echo "::error::claude binary not found at $CLAUDE_BIN"; exit 1; }\n' +
+  '          "$CLAUDE_BIN" --version\n' +
+  '          echo "CLAUDE_BIN=$CLAUDE_BIN" >> "$GITHUB_ENV"\n';
+
+const CODEX_INSTALL_STEP =
+  '      - name: Install Codex CLI\n' +
+  '        run: |\n' +
+  '          set -euo pipefail\n' +
+  '          npm install --ignore-scripts --prefix "${RUNNER_TEMP}/gh-aw/engine-cli" @openai/codex@0.146.1\n' +
+  '          CODEX_BIN="${RUNNER_TEMP}/gh-aw/engine-cli/node_modules/.bin/codex"\n' +
+  '          test -x "$CODEX_BIN" || { echo "::error::codex binary not found at $CODEX_BIN"; exit 1; }\n' +
+  '          "$CODEX_BIN" --version\n' +
+  '          echo "CODEX_BIN=$CODEX_BIN" >> "$GITHUB_ENV"\n';
+
+const SAFE_OUTPUTS_COPYBACK_STEP =
+  '      - name: Copy Firecracker safe outputs to compiler path\n' +
+  '        if: always()\n' +
+  '        run: |\n' +
+  '          set -euo pipefail\n' +
+  '          FC_SO_ROOT="${RUNNER_TEMP}/firecracker-safeoutputs"\n' +
+  '          mapfile -t OUTPUTS_FILES < <(find "$FC_SO_ROOT" -maxdepth 2 -type f -name outputs.jsonl)\n' +
+  '          if [ "${#OUTPUTS_FILES[@]}" -ne 1 ] || [ ! -s "${OUTPUTS_FILES[0]}" ]; then\n' +
+  '            echo "::error::Expected exactly one non-empty Firecracker safe outputs file under $FC_SO_ROOT"\n' +
+  '            exit 1\n' +
+  '          fi\n' +
+  '          mkdir -p "${RUNNER_TEMP}/gh-aw/safeoutputs"\n' +
+  '          cp "${OUTPUTS_FILES[0]}" "${RUNNER_TEMP}/gh-aw/safeoutputs/outputs.jsonl"\n' +
+  '          echo "Copied Firecracker safe outputs from ${OUTPUTS_FILES[0]}"\n';
+
+const RESTORE_FIRECRACKER_ARTIFACTS_STEP =
+  '      - name: Restore Firecracker guest artifacts\n' +
+  '        if: always()\n' +
+  '        run: |\n' +
+  '          set -euo pipefail\n' +
+  '          FC_DIR="${GITHUB_WORKSPACE}/.gh-aw-firecracker"\n' +
+  '          if [ -f "${FC_DIR}/step-summary.md" ]; then\n' +
+  '            cp "${FC_DIR}/step-summary.md" /tmp/gh-aw/agent-step-summary.md\n' +
+  '          fi\n' +
+  '          if [ -d "${FC_DIR}/logs" ]; then\n' +
+  '            mkdir -p /tmp/gh-aw/sandbox/agent/logs\n' +
+  '            cp -rp "${FC_DIR}/logs/." /tmp/gh-aw/sandbox/agent/logs/\n' +
+  '          fi\n' +
+  '          if [ -d "${FC_DIR}/mcp-logs" ]; then\n' +
+  '            mkdir -p /tmp/gh-aw/mcp-logs\n' +
+  '            cp -rp "${FC_DIR}/mcp-logs/." /tmp/gh-aw/mcp-logs/\n' +
+  '          fi\n';
+
 const FIRECRACKER_FLAGS =
   'sudo -E awf --config ' +
   '"${RUNNER_TEMP}/gh-aw/awf-config.json" ' +
@@ -122,7 +192,7 @@ const FIRECRACKER_FLAGS =
   '--firecracker-gh-aw-runtime ' +
   '--firecracker-gh-aw-runner-temp "${RUNNER_TEMP}" ' +
   '--firecracker-gh-aw-compiler-tmp /tmp ' +
-  '--firecracker-safe-outputs-dir "${RUNNER_TEMP}/gh-aw/safeoutputs" ' +
+  '--firecracker-safe-outputs-dir "${RUNNER_TEMP}/firecracker-safeoutputs" ' +
   '--firecracker-binary "${FIRECRACKER_PLATFORM_ARTIFACTS}/firecracker" ' +
   '--firecracker-jailer-binary "${FIRECRACKER_PLATFORM_ARTIFACTS}/jailer" ' +
   '--firecracker-kernel "${FIRECRACKER_PLATFORM_ARTIFACTS}/vmlinux.bin" ' +
@@ -132,7 +202,8 @@ const FIRECRACKER_FLAGS =
   '--firecracker-jailer-sha256 "${FIRECRACKER_JAILER_SHA256}" ' +
   '--firecracker-kernel-sha256 "${FIRECRACKER_KERNEL_SHA256}" ' +
   '--firecracker-rootfs-sha256 "${FIRECRACKER_ROOTFS_SHA256}" ' +
-  '--firecracker-supervisor-sha256 "${FIRECRACKER_SUPERVISOR_SHA256}" ';
+  '--firecracker-supervisor-sha256 "${FIRECRACKER_SUPERVISOR_SHA256}" ' +
+  FIRECRACKER_IMAGE_FLAGS;
 
 export function applyFirecrackerWorkflowPatches(
   content: string,
@@ -218,10 +289,43 @@ export function applyFirecrackerWorkflowPatches(
     log.push('  Injected Firecracker preview AWF flags');
   }
 
+  const contentWithoutBuildLocal = content.replace(
+    / --build-local(?=(?:\s|\\))/g,
+    ''
+  );
+  if (contentWithoutBuildLocal !== content) {
+    content = contentWithoutBuildLocal;
+    log.push('  Removed unsupported --build-local from Firecracker AWF command');
+  }
+  const contentWithoutStandaloneImageFlags = content
+    .replace(/ --skip-pull(?=(?:\s|\\))/g, '')
+    .replace(/ --image-tag latest(?=(?:\s|\\))/g, '');
+  if (contentWithoutStandaloneImageFlags !== content) {
+    content = contentWithoutStandaloneImageFlags;
+    log.push('  Normalized Firecracker image selection flags');
+  }
+  if (
+    content.includes(FIRECRACKER_COMMAND_SENTINEL) &&
+    !content.includes(FIRECRACKER_IMAGE_FLAGS)
+  ) {
+    if (!content.includes(FIRECRACKER_FLAG_INSERTION_ANCHOR)) {
+      throw new Error(`${filename}: Firecracker image flag insertion anchor is missing`);
+    }
+    content = content.replace(
+      FIRECRACKER_FLAG_INSERTION_ANCHOR,
+      `${FIRECRACKER_FLAG_INSERTION_ANCHOR}${FIRECRACKER_IMAGE_FLAGS}`
+    );
+    log.push('  Forced Firecracker AWF to reuse trusted local images');
+  }
+
   const mountMatch = content.match(COMPILER_MOUNT_PATTERN);
   if (mountMatch) {
     content = content.replace(COMPILER_MOUNT_PATTERN, '');
     log.push('  Removed unsupported compiler volume mounts');
+  }
+  if (content.includes(TOOL_CACHE_MOUNT_BLOCK)) {
+    content = content.replace(TOOL_CACHE_MOUNT_BLOCK, '');
+    log.push('  Removed unused tool-cache mount preparation');
   }
   if (content.includes(FIRECRACKER_COMMAND_SENTINEL) && / --mount /.test(content)) {
     throw new Error(`${filename}: unsupported Firecracker mount flag remains`);
@@ -233,6 +337,138 @@ export function applyFirecrackerWorkflowPatches(
     content.includes(' --tty ')
   ) {
     throw new Error(`${filename}: unsupported Firecracker TTY flag remains`);
+  }
+
+  if (filename === 'smoke-firecracker-claude.lock.yml') {
+    const generatedInstallStep =
+      '      - name: Install Claude Code CLI\n' +
+      '        run: npm install -g @anthropic-ai/claude-code@2.1.223\n';
+    if (content.includes(generatedInstallStep)) {
+      content = content.replace(generatedInstallStep, CLAUDE_INSTALL_STEP);
+      log.push('  Rewrote Claude CLI install to staged runner-temp prefix');
+    }
+    if (
+      content.includes('actions/claude_harness.cjs claude --print')
+    ) {
+      content = content.replace(
+        'actions/claude_harness.cjs claude --print',
+        'actions/claude_harness.cjs "$CLAUDE_BIN" --print'
+      );
+      log.push('  Switched Claude guest invocation to staged absolute binary');
+    }
+    const claudeHostArtifactAnchor = '          touch /tmp/gh-aw/agent-step-summary.md\n';
+    const claudeHostArtifactSetup =
+      `          FC_DIR="\${GITHUB_WORKSPACE}/.gh-aw-firecracker"\n` +
+      '          mkdir -p "$FC_DIR/logs" "$FC_DIR/mcp-logs"\n' +
+      '          touch "$FC_DIR/step-summary.md"\n';
+    if (content.includes(claudeHostArtifactAnchor)) {
+      content = content.replace(
+        claudeHostArtifactAnchor,
+        claudeHostArtifactSetup
+      );
+      log.push('  Redirected Claude guest mutable artifacts into workspace copyback dir');
+    }
+    content = content.replace(
+      ' --debug-file /tmp/gh-aw/agent-stdio.log',
+      ` --debug-file ${FIRECRACKER_GUEST_STATE_DIR}/claude-debug.json`
+    );
+  }
+
+  if (filename === 'smoke-firecracker-codex.lock.yml') {
+    const generatedInstallStep =
+      '      - name: Install Codex CLI\n' +
+      '        run: npm install --ignore-scripts -g @openai/codex@0.146.1\n';
+    if (content.includes(generatedInstallStep)) {
+      content = content.replace(generatedInstallStep, CODEX_INSTALL_STEP);
+      log.push('  Rewrote Codex CLI install to staged runner-temp prefix');
+    }
+    if (content.includes('actions/codex_harness.cjs codex exec')) {
+      content = content.replace(
+        'actions/codex_harness.cjs codex exec',
+        'actions/codex_harness.cjs "$CODEX_BIN" exec'
+      );
+      log.push('  Switched Codex guest invocation to staged absolute binary');
+    }
+    const codexHostArtifactAnchor =
+      '          mkdir -p "$CODEX_HOME/logs" && touch /tmp/gh-aw/agent-step-summary.md\n';
+    const codexHostArtifactSetup =
+      `          FC_DIR="\${GITHUB_WORKSPACE}/.gh-aw-firecracker"\n` +
+      '          HOST_CODEX_HOME="$FC_DIR/codex-home"\n' +
+      '          mkdir -p "$HOST_CODEX_HOME/logs" "$FC_DIR/logs" "$FC_DIR/mcp-logs"\n' +
+      '          touch "$FC_DIR/step-summary.md"\n' +
+      '          if [ "/tmp/gh-aw/mcp-config/config.toml" != "${HOST_CODEX_HOME}/config.toml" ]; then cp "/tmp/gh-aw/mcp-config/config.toml" "${HOST_CODEX_HOME}/config.toml"; fi\n' +
+      '          chmod 600 "${HOST_CODEX_HOME}/config.toml"\n';
+    if (content.includes(codexHostArtifactAnchor)) {
+      content = content.replace(
+        codexHostArtifactAnchor,
+        codexHostArtifactSetup
+      );
+      log.push('  Redirected Codex guest mutable artifacts into workspace copyback dir');
+    }
+    content = content.replace(
+      '          CODEX_HOME: /tmp/gh-aw/mcp-config\n          GH_AW_MAX_TURNS:',
+      `          CODEX_HOME: ${FIRECRACKER_GUEST_STATE_DIR}/codex-home\n          GH_AW_MAX_TURNS:`
+    );
+  }
+
+  if (filename === 'smoke-firecracker-build-test.lock.yml') {
+    const buildTestHostArtifactAnchor =
+      '          touch /tmp/gh-aw/agent-step-summary.md\n';
+    const buildTestHostArtifactSetup =
+      `          FC_DIR="\${GITHUB_WORKSPACE}/.gh-aw-firecracker"\n` +
+      '          mkdir -p "$FC_DIR/logs" "$FC_DIR/mcp-logs"\n' +
+      '          touch "$FC_DIR/step-summary.md"\n';
+    if (content.includes(buildTestHostArtifactAnchor)) {
+      content = content.replace(
+        buildTestHostArtifactAnchor,
+        buildTestHostArtifactSetup
+      );
+      log.push('  Redirected Copilot guest mutable artifacts into workspace copyback dir');
+    }
+    content = content.replace(
+      ' --log-dir /tmp/gh-aw/sandbox/agent/logs/',
+      ` --log-dir ${FIRECRACKER_GUEST_STATE_DIR}/logs/`
+    );
+  }
+
+  if (!content.includes(SAFE_OUTPUTS_COPYBACK_SENTINEL)) {
+    if (!content.includes(DETECT_ERRORS_ANCHOR)) {
+      throw new Error(`${filename}: Detect agent errors anchor is missing`);
+    }
+    content = content.replace(
+      DETECT_ERRORS_ANCHOR,
+      SAFE_OUTPUTS_COPYBACK_STEP + DETECT_ERRORS_ANCHOR
+    );
+    log.push('  Injected Firecracker safe outputs copyback step');
+  }
+
+  if (!content.includes(RESTORE_FIRECRACKER_ARTIFACTS_SENTINEL)) {
+    if (!content.includes(DETECT_ERRORS_ANCHOR)) {
+      throw new Error(`${filename}: Detect agent errors anchor is missing`);
+    }
+    content = content.replace(
+      DETECT_ERRORS_ANCHOR,
+      RESTORE_FIRECRACKER_ARTIFACTS_STEP + DETECT_ERRORS_ANCHOR
+    );
+    log.push('  Injected Firecracker guest artifact restore step');
+  }
+
+  content = content.replace(
+    '          GITHUB_STEP_SUMMARY: /tmp/gh-aw/agent-step-summary.md',
+    `          GITHUB_STEP_SUMMARY: ${FIRECRACKER_GUEST_STATE_DIR}/step-summary.md`
+  );
+
+  if (
+    content.includes(FIRECRACKER_COMMAND_SENTINEL) &&
+    content.includes('--build-local')
+  ) {
+    throw new Error(`${filename}: unsupported Firecracker build-local flag remains`);
+  }
+  if (
+    content.includes(FIRECRACKER_COMMAND_SENTINEL) &&
+    !content.includes(FIRECRACKER_IMAGE_FLAGS)
+  ) {
+    throw new Error(`${filename}: Firecracker image reuse flags are missing`);
   }
 
   return { content, log };

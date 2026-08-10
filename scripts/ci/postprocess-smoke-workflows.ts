@@ -39,6 +39,12 @@ const workflowsDir = path.join(repoRoot, '.github/workflows');
 const workflowPaths = fs.readdirSync(workflowsDir)
   .filter(f => f.endsWith('.lock.yml'))
   .filter(f => !releaseModeLockFiles.has(f))
+  .filter(
+    f =>
+      !FIRECRACKER_LOCK_FILES.includes(
+        f as (typeof FIRECRACKER_LOCK_FILES)[number]
+      )
+  )
   .sort()
   .map(f => path.join(workflowsDir, f));
 
@@ -81,8 +87,10 @@ for (const filename of FIRECRACKER_LOCK_FILES) {
     console.log(`Skipping ${workflowPath}: file not found.`);
     continue;
   }
+  const generalPatched = applyGeneralWorkflowPatches(original, workflowPath);
+  generalPatched.log.forEach(msg => console.log(msg));
   const { content, log } = applyFirecrackerWorkflowPatches(
-    original,
+    generalPatched.content,
     workflowPath
   );
   log.forEach(msg => console.log(msg));

@@ -592,6 +592,8 @@ describe('Firecracker smoke workflow patches', () => {
     '      - name: Execute GitHub Copilot CLI',
     '        run: |',
     '          awf --config "${RUNNER_TEMP}/gh-aw/awf-config.json" --mount "${RUNNER_TEMP}/gh-aw:${RUNNER_TEMP}/gh-aw:ro" --mount "${RUNNER_TEMP}/gh-aw:/host${RUNNER_TEMP}/gh-aw:ro" ${GH_AW_TOOL_CACHE_MOUNT:+--mount "$GH_AW_TOOL_CACHE_MOUNT"} --tty --env-all --exclude-env SECRET --build-local -- echo',
+    '      - name: Detect agent errors',
+    '        run: true',
     '',
   ].join('\n');
 
@@ -611,9 +613,13 @@ describe('Firecracker smoke workflow patches', () => {
       expect(once).toContain('      - name: Prepare Firecracker preview host');
       expect(once).not.toContain(' --tty ');
       expect(once).not.toContain(' --mount ');
+      expect(once).not.toContain('--build-local');
+      expect(once).toContain('--skip-pull --image-tag latest');
       expect(once).toContain('ref: ${{ github.event.pull_request.base.sha || github.sha }}');
       expect(once).toContain('working-directory: .awf-trusted-source');
       expect(once).toContain('WORKSPACE_PATH="${RUNNER_TEMP}/awf-host"');
+      expect(once).toContain('Copy Firecracker safe outputs to compiler path');
+      expect(once).toContain('Restore Firecracker guest artifacts');
     }
   );
 
@@ -629,7 +635,7 @@ describe('Firecracker smoke workflow patches', () => {
         '--firecracker-gh-aw-runtime',
         '--firecracker-gh-aw-runner-temp "${RUNNER_TEMP}"',
         '--firecracker-gh-aw-compiler-tmp /tmp',
-        '--firecracker-safe-outputs-dir "${RUNNER_TEMP}/gh-aw/safeoutputs"',
+        '--firecracker-safe-outputs-dir "${RUNNER_TEMP}/firecracker-safeoutputs"',
         '--firecracker-binary "${FIRECRACKER_PLATFORM_ARTIFACTS}/firecracker"',
         '--firecracker-jailer-binary "${FIRECRACKER_PLATFORM_ARTIFACTS}/jailer"',
         '--firecracker-kernel "${FIRECRACKER_PLATFORM_ARTIFACTS}/vmlinux.bin"',
@@ -640,10 +646,12 @@ describe('Firecracker smoke workflow patches', () => {
         '--firecracker-kernel-sha256 "${FIRECRACKER_KERNEL_SHA256}"',
         '--firecracker-rootfs-sha256 "${FIRECRACKER_ROOTFS_SHA256}"',
         '--firecracker-supervisor-sha256 "${FIRECRACKER_SUPERVISOR_SHA256}"',
+        '--skip-pull --image-tag latest',
       ]) {
         expect(content).toContain(flag);
       }
       expect(content).toContain('sudo -E awf --config');
+      expect(content).not.toContain('--build-local');
     }
   );
 
@@ -685,8 +693,78 @@ describe('Firecracker smoke workflow patches', () => {
       expect(agentJob).not.toContain(
         'docker build -t ghcr.io/github/gh-aw-firewall/squid:latest containers/squid'
       );
+      expect(agentJob).not.toContain('if: false');
     }
   );
+
+  it('rewrites Claude workflow for staged CLI and guest copyback paths', () => {
+    const workflowPath = path.join(
+      repoRoot,
+      '.github/workflows',
+      'smoke-firecracker-claude.lock.yml'
+    );
+    const content = fs.readFileSync(workflowPath, 'utf8');
+
+    expect(content).toContain(
+      'npm install --prefix "${RUNNER_TEMP}/gh-aw/engine-cli" @anthropic-ai/claude-code@2.1.223'
+    );
+    expect(content).toContain('echo "CLAUDE_BIN=$CLAUDE_BIN" >> "$GITHUB_ENV"');
+    expect(content).toContain('actions/claude_harness.cjs "$CLAUDE_BIN" --print');
+    expect(content).toContain(
+      '--debug-file /workspace/.gh-aw-firecracker/claude-debug.json'
+    );
+    expect(content).toContain(
+      'GITHUB_STEP_SUMMARY: /workspace/.gh-aw-firecracker/step-summary.md'
+    );
+    expect(content).toContain('Copy Firecracker safe outputs to compiler path');
+    expect(content).toContain('Restore Firecracker guest artifacts');
+    expect(content).not.toContain('npm install -g @anthropic-ai/claude-code');
+  });
+
+  it('rewrites Codex workflow for staged CLI and guest mutable paths', () => {
+    const workflowPath = path.join(
+      repoRoot,
+      '.github/workflows',
+      'smoke-firecracker-codex.lock.yml'
+    );
+    const content = fs.readFileSync(workflowPath, 'utf8');
+
+    expect(content).toContain(
+      'npm install --ignore-scripts --prefix "${RUNNER_TEMP}/gh-aw/engine-cli" @openai/codex@0.146.1'
+    );
+    expect(content).toContain('echo "CODEX_BIN=$CODEX_BIN" >> "$GITHUB_ENV"');
+    expect(content).toContain('actions/codex_harness.cjs "$CODEX_BIN" exec');
+    expect(content).toContain(
+      'CODEX_HOME: /workspace/.gh-aw-firecracker/codex-home'
+    );
+    expect(content).toContain(
+      'HOST_CODEX_HOME="$FC_DIR/codex-home"'
+    );
+    expect(content).toContain(
+      'GITHUB_STEP_SUMMARY: /workspace/.gh-aw-firecracker/step-summary.md'
+    );
+    expect(content).toContain('Copy Firecracker safe outputs to compiler path');
+    expect(content).toContain('Restore Firecracker guest artifacts');
+    expect(content).not.toContain(
+      'npm install --ignore-scripts -g @openai/codex@0.146.1'
+    );
+  });
+
+  it('rewrites build-test workflow for guest logs and copyback paths', () => {
+    const workflowPath = path.join(
+      repoRoot,
+      '.github/workflows',
+      'smoke-firecracker-build-test.lock.yml'
+    );
+    const content = fs.readFileSync(workflowPath, 'utf8');
+
+    expect(content).toContain('--log-dir /workspace/.gh-aw-firecracker/logs/');
+    expect(content).toContain(
+      'GITHUB_STEP_SUMMARY: /workspace/.gh-aw-firecracker/step-summary.md'
+    );
+    expect(content).toContain('Copy Firecracker safe outputs to compiler path');
+    expect(content).toContain('Restore Firecracker guest artifacts');
+  });
 
   it('fails closed when the runner anchor is absent', () => {
     expect(() =>
