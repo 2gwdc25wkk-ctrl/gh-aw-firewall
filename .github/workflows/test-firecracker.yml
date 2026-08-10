@@ -140,15 +140,16 @@ jobs:
             while IFS= read -r -d '' file; do
               relative=${file#"$source_root/"}
               mkdir -p "$destination/$(dirname "$relative")"
-              cp "$file" "$destination/$relative"
+              sudo cp "$file" "$destination/$relative"
             done < <(
-              find "$source_root" -type f \
+              sudo find "$source_root" -type f \
                 \( -path '*/audit/*' \
                 -o -path '*/proxy-logs/*' \
                 -o -name 'stdout.log' \
                 -o -name 'stderr.log' \) \
                 -print0
             )
+            sudo chown -R "$(id -u):$(id -g)" "$destination"
           fi
           if grep -R --binary-files=without-match \
             -F 'awf-firecracker-real-secret-do-not-expose' \
