@@ -188,6 +188,20 @@ describe('Firecracker runtime backend', () => {
       'probe',
       'vm-stop',
     ]);
+    expect(manager.execute).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      argv: [
+        '/bin/sh',
+        '-c',
+        expect.stringContaining('timeout 5 nc 172.30.0.10 3128'),
+      ],
+    }));
+    expect(manager.execute).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      argv: [
+        '/bin/sh',
+        '-c',
+        expect.stringContaining('wget -q -T 5 -O /dev/null http://172.30.0.30:10000/reflect'),
+      ],
+    }));
     expect(manager.execute).toHaveBeenNthCalledWith(2, expect.objectContaining({
       argv: ['/bin/sh', '-lc', 'printf hello'],
       cwd: '/workspace',

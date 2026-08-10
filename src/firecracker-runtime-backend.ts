@@ -382,11 +382,10 @@ export class FirecrackerRuntimeBackend implements ExternalAgentRuntimeBackend {
       throw new Error('Firecracker guest identity is not ready');
     }
     const squidProbe =
-      `curl --silent --show-error --max-time 5 --output /dev/null ` +
-      `http://${SQUID_IP}:3128/`;
+      `printf 'GET http://localhost/ HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' ` +
+      `| timeout 5 nc ${SQUID_IP} 3128 | grep -q '^HTTP/'`;
     const apiProxyProbe = this.config.enableApiProxy
-      ? ` && curl --fail --silent --show-error --max-time 5 --noproxy '*' ` +
-        `--output /dev/null http://${API_PROXY_IP}:10000/reflect`
+      ? ` && wget -q -T 5 -O /dev/null http://${API_PROXY_IP}:10000/reflect`
       : '';
     const result = await manager.execute({
       requestId: `probe-${process.pid}-${Date.now()}`,
