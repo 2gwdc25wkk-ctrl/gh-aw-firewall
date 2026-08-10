@@ -430,11 +430,11 @@ interface DockerNetwork {
    * networks with specific subnets for avoiding conflicts with existing
    * Docker networks.
    * 
-   * @example { config: [{ subnet: '172.30.0.0/24' }] }
+   * @example { config: [{ subnet: '172.30.0.0/24', gateway: '172.30.0.1' }] }
    */
   ipam?: {
     /** Array of subnet configurations */
-    config: Array<{ subnet: string }>;
+    config: Array<{ subnet: string; gateway?: string }>;
   };
 
   /**

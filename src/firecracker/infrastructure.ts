@@ -1,7 +1,7 @@
 import execa from 'execa';
 import {
   API_PROXY_IP,
-  HOST_GATEWAY,
+  NETWORK_GATEWAY,
   NETWORK_NAME,
   NETWORK_SUBNET,
   SQUID_IP,
@@ -150,11 +150,11 @@ async function inspectInfrastructure(
   if (
     ipv4Configs.length !== 1 ||
     ipv4Configs[0].Subnet !== NETWORK_SUBNET ||
-    ipv4Configs[0].Gateway !== HOST_GATEWAY
+    ipv4Configs[0].Gateway !== NETWORK_GATEWAY
   ) {
     throw new Error(
       `Docker network "${NETWORK_NAME}" must have exactly ${NETWORK_SUBNET} ` +
-      `with gateway ${HOST_GATEWAY}`,
+      `with gateway ${NETWORK_GATEWAY}`,
     );
   }
 
@@ -182,7 +182,7 @@ async function inspectInfrastructure(
     networkId: network.Id,
     bridgeName,
     subnet: NETWORK_SUBNET,
-    gateway: HOST_GATEWAY,
+    gateway: NETWORK_GATEWAY,
     squidIp,
     ...(apiProxyIp ? { apiProxyIp } : {}),
   };

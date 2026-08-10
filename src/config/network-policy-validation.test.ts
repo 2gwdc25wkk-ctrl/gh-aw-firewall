@@ -19,6 +19,7 @@ const BASE_POLICY = {
     networkName: 'awf-net',
     externalBridgeName: 'awf-ext',
     subnet: '172.30.0.0/24',
+    gateway: '172.30.0.1',
     hosts: {
       squid: { ip: '172.30.0.10', role: 'egress-proxy', required: true, dualHomed: true },
       agent: { ip: '172.30.0.20', role: 'workload', required: true },
@@ -113,6 +114,12 @@ describe('network-policy validation errors', () => {
   });
 
   describe('assertIpv4', () => {
+    it('throws when the topology gateway is invalid', () => {
+      const policy = deepClone(BASE_POLICY);
+      policy.topology.gateway = 'not-an-ip';
+      expect(loadWithPolicy(policy)).toThrow('topology.gateway must be a valid IPv4 address');
+    });
+
     it('throws when IP has an octet > 255', () => {
       const policy = deepClone(BASE_POLICY);
       policy.topology.hosts.squid.ip = '172.30.0.300';

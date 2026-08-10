@@ -1,6 +1,10 @@
 import { DockerComposeConfig } from './types';
 import { TOPOLOGY_NETWORK_NAME } from './topology';
-import { EXTERNAL_BRIDGE_NAME, EMBEDDED_DNS_RESOLVER } from './config/network-policy';
+import {
+  EMBEDDED_DNS_RESOLVER,
+  EXTERNAL_BRIDGE_NAME,
+  NETWORK_GATEWAY,
+} from './config/network-policy';
 import { NetworkConfig } from './services/squid-service';
 
 interface BuildComposeNetworksParams {
@@ -52,7 +56,7 @@ export function buildComposeNetworks(params: BuildComposeNetworksParams): Docker
           name: TOPOLOGY_NETWORK_NAME,
           internal: true,
           ipam: {
-            config: [{ subnet: networkConfig.subnet }],
+            config: [{ subnet: networkConfig.subnet, gateway: NETWORK_GATEWAY }],
           },
         },
         [EXTERNAL_BRIDGE_NAME]: {

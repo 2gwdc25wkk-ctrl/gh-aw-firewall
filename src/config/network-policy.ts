@@ -65,6 +65,7 @@ export interface NetworkPolicy {
     readonly networkName: string;
     readonly externalBridgeName: string;
     readonly subnet: string;
+    readonly gateway: string;
     readonly hosts: {
       readonly squid: NetworkHost;
       readonly agent: NetworkHost;
@@ -201,6 +202,7 @@ function parseTopology(value: unknown): NetworkPolicy['topology'] {
     networkName: assertString(t.networkName, 'topology.networkName'),
     externalBridgeName: assertString(t.externalBridgeName, 'topology.externalBridgeName'),
     subnet: assertCidr(t.subnet, 'topology.subnet'),
+    gateway: assertIpv4(t.gateway, 'topology.gateway'),
     hosts: parseHosts(t.hosts),
   };
 }
@@ -324,6 +326,9 @@ export const EXTERNAL_BRIDGE_NAME: string = networkPolicy.topology.externalBridg
 
 /** IPv4 subnet (CIDR) of the internal topology network, shared by all runtimes. */
 export const NETWORK_SUBNET: string = networkPolicy.topology.subnet;
+
+/** Fixed gateway of the internal Docker topology network. */
+export const NETWORK_GATEWAY: string = networkPolicy.topology.gateway;
 
 /** Fixed IP of the Squid egress proxy on the internal network. */
 export const SQUID_IP: string = networkPolicy.topology.hosts.squid.ip;

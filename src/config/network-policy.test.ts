@@ -3,6 +3,7 @@ import {
   NETWORK_NAME,
   EXTERNAL_BRIDGE_NAME,
   NETWORK_SUBNET,
+  NETWORK_GATEWAY,
   SQUID_IP,
   AGENT_IP,
   API_PROXY_IP,
@@ -161,6 +162,7 @@ describe('network-policy', () => {
       expect(NETWORK_NAME).toBe('awf-net');
       expect(EXTERNAL_BRIDGE_NAME).toBe('awf-ext');
       expect(NETWORK_SUBNET).toBe('172.30.0.0/24');
+      expect(NETWORK_GATEWAY).toBe('172.30.0.1');
       expect(HOST_GATEWAY).toBe('172.30.0.1');
       expect(SQUID_IP).toBe('172.30.0.10');
       expect(AGENT_IP).toBe('172.30.0.20');

@@ -274,6 +274,7 @@ describe('generateDockerCompose', () => {
         expect(result.networks['awf-net'].external).toBeUndefined();
         expect(result.networks['awf-net'].name).toBe('awf-net');
         expect(result.networks['awf-net'].ipam?.config?.[0]?.subnet).toBe(mockNetworkConfig.subnet);
+        expect(result.networks['awf-net'].ipam?.config?.[0]?.gateway).toBe('172.30.0.1');
         expect(result.networks['awf-ext'].driver).toBe('bridge');
       });
 
