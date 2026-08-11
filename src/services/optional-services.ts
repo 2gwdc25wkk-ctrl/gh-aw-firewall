@@ -9,6 +9,8 @@ import { buildEnclaveMcpService } from './enclave-mcp-service';
 import { buildSysrootStageService, isSysrootEnabled } from './sysroot-service';
 import { resolveDockerHostGateway } from './host-gateway';
 import { runtimeUsesIptables } from '../container-runtime';
+import { applyHostPathPrefixToVolumes } from './host-path-prefix';
+import { buildCustomVolumeMounts } from './agent-volumes/workspace-mounts';
 import { NetworkConfig, ImageBuildConfig } from './squid-service';
 
 interface AssembleOptionalServicesParams {
@@ -70,8 +72,14 @@ function filterAgentVolumesForSysroot(
   ]);
   const normalizedWorkDirPrefix = config.workDir.replace(/\/+$/, '');
   const hostHomeMountPrefix = `/host${effectiveHome}`;
+  // Source:target pairs of explicitly supplied `--mount` specs.  Their sources
+  // are chosen by the caller (the gh-aw compiler or the user), who asserts the
+  // Docker daemon can resolve them, so they must survive the sysroot filter even
+  // when they target the chroot home root.  Matching on both source and target
+  // keeps AWF's own mounts to the same target subject to the filter.
+  const explicitMountSpecs = collectCustomMountSpecs(config);
 
-  return agentVolumes.filter(volume => {
+  const filtered = agentVolumes.filter(volume => {
     const parts = volume.split(':');
     if (parts.length < 2) return true; // Keep malformed entries unchanged
     const source = parts[0];
@@ -95,7 +103,14 @@ function filterAgentVolumesForSysroot(
     // Drop home dot-directory mounts (e.g. .cache, .config) — sysroot provides them.
     // Keep workspace/work paths (e.g. _work/_temp/gh-aw) since those are user-supplied
     // custom mounts or tool-cache mounts that the sysroot doesn't provide.
-    if (source.startsWith(effectiveHome) && target.startsWith(hostHomeMountPrefix)) {
+    // Keep explicitly supplied `--mount` specs: the caller vouches for their
+    // daemon visibility, and a writable `/host$HOME` is required for the
+    // credential-hiding overlays and the agent entrypoint to work.
+    if (
+      source.startsWith(effectiveHome) &&
+      target.startsWith(hostHomeMountPrefix) &&
+      !explicitMountSpecs.has(mountSpecKey(source, target))
+    ) {
       const normalizedSource = source.replace(/\/+$/, '') || '/';
       const relPath = normalizedSource.slice(effectiveHome.length);
       if (relPath.startsWith('/.') || relPath === '') return false;
@@ -103,6 +118,74 @@ function filterAgentVolumesForSysroot(
 
     return true;
   });
+
+  return dropUnbackedHostHomeOverlays(filtered, hostHomeMountPrefix);
+}
+
+/**
+ * Collects `source:target` keys for the bind mounts produced from explicitly
+ * supplied `--mount` specs, transformed exactly as `buildAgentVolumes` does
+ * (`buildCustomVolumeMounts` prefixes targets with `/host`, then the host path
+ * prefix is applied).  Keying on both ends means AWF's own mounts to the same
+ * target are still subject to the sysroot filter.
+ */
+function collectCustomMountSpecs(config: WrapperConfig): Set<string> {
+  const specs = new Set<string>();
+  const transformed = applyHostPathPrefixToVolumes(
+    buildCustomVolumeMounts(config.volumeMounts, config.dockerHostPathPrefix, { quiet: true }),
+    config.dockerHostPathPrefix,
+  );
+
+  for (const mount of transformed) {
+    const parts = mount.split(':');
+    if (parts.length < 2) continue;
+    if (!parts[0] || !parts[1]) continue;
+    specs.add(mountSpecKey(parts[0], parts[1]));
+  }
+  return specs;
+}
+
+function mountSpecKey(source: string, target: string): string {
+  const normalize = (value: string) => value.replace(/\/+$/, '') || '/';
+  return `${normalize(source)}:${normalize(target)}`;
+}
+
+/**
+ * Removes `/dev/null` credential overlays under `/host$HOME` when no writable
+ * mount backs that path.  Without a writable parent, runc cannot create the
+ * mountpoint and the agent container fails to start.  The equivalent overlays
+ * at the un-prefixed `$HOME` path (on the container's own rootfs) are kept.
+ */
+function dropUnbackedHostHomeOverlays(volumes: string[], hostHomeMountPrefix: string): string[] {
+  const hasWritableHostHome = volumes.some(volume => {
+    const parts = volume.split(':');
+    if (parts.length < 2) return false;
+    if (parts[0] === '/dev/null') return false;
+    const target = (parts[1] || '').replace(/\/+$/, '');
+    const mode = parts[2] || 'rw';
+    return target === hostHomeMountPrefix && mode !== 'ro';
+  });
+
+  if (hasWritableHostHome) return volumes;
+
+  const overlayPrefix = `${hostHomeMountPrefix}/`;
+  const kept = volumes.filter(volume => {
+    const parts = volume.split(':');
+    if (parts.length < 2) return true;
+    return !(parts[0] === '/dev/null' && (parts[1] || '').startsWith(overlayPrefix));
+  });
+
+  const dropped = volumes.length - kept.length;
+  if (dropped > 0) {
+    logger.warn(
+      `No writable ${hostHomeMountPrefix} mount survived the sysroot filter; skipping ${dropped} ` +
+      'credential-hiding overlay(s) under that path (the container could not start otherwise). ' +
+      'Credential files under the chroot home are NOT masked for this run — pass a writable ' +
+      `--mount <host-home>:${hostHomeMountPrefix.replace(/^\/host/, '')}:rw to restore masking.`,
+    );
+  }
+
+  return kept;
 }
 
 function assembleSysrootService(
