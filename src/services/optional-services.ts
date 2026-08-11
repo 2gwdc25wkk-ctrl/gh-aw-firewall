@@ -230,9 +230,8 @@ function assembleCliProxyService(params: AssembleOptionalServicesParams): void {
 
 function assembleEnclaveMcpService(params: AssembleOptionalServicesParams): void {
   const { services, config, imageConfig } = params;
-  const executors = config.enclaves?.executors;
-  if (!config.enclaves?.enabled) return;
-  if (!executors?.script.enabled && !executors?.agent.enabled) return;
+  const enclaves = config.enclaves;
+  if (!enclaves || (!enclaves.script && !enclaves.agent)) return;
   const {
     scriptImageService,
     agentImageService,

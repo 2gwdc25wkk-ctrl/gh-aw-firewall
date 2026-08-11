@@ -1,9 +1,9 @@
 /**
- * Unified trusted configuration for private-repository enclaves.
+ * Trusted configuration for private-repository enclaves.
  *
- * Executors are exposed only through an AWF-owned MCP server behind the trusted
- * gateway. Executor controls are trusted AWF configuration and are never
- * accepted from an invocation request.
+ * The AWF file contract is a keyed array. The normalized form keeps the
+ * executor-specific controls separate while carrying one case-insensitive
+ * repository union for staging and the shared server ledger.
  */
 
 export type EnclaveSensitivity = 'public' | 'internal' | 'confidential' | 'sealed';
@@ -33,72 +33,89 @@ export type EnclaveScriptInterpreter = 'python3';
 export type EnclaveAgentEngine = 'copilot' | 'claude' | 'codex' | 'gemini';
 export type EnclaveAgentProfile = 'openai' | 'anthropic';
 
-export interface EnclaveScriptExecutorConfig {
-  enabled: boolean;
+interface EnclaveExecutorConfig {
+  repositories: EnclaveRepository[];
   runtime: EnclaveRuntime;
-  /** Optional trusted image override; omission uses AWF's pinned script image. */
+  /** Optional trusted image override; omission uses AWF's pinned executor image. */
   image?: string;
-  network: 'none';
-  interpreter: EnclaveScriptInterpreter;
   timeout: number;
   memoryLimit: string;
   cpuLimit: string;
   pidsLimit: number;
   tmpfsLimit: string;
   maxOutputBytes: number;
-  maxScriptBytes: number;
   maxInvocations: number;
 }
 
-export interface EnclaveAgentExecutorConfig {
-  enabled: boolean;
-  runtime: EnclaveRuntime;
-  /** Optional trusted image override; omission uses AWF's pinned engine image. */
-  image?: string;
+export interface EnclaveScriptExecutorConfig extends EnclaveExecutorConfig {
+  network: 'none';
+  interpreter: EnclaveScriptInterpreter;
+  maxScriptBytes: number;
+}
+
+export interface EnclaveAgentExecutorConfig extends EnclaveExecutorConfig {
   network: 'api-proxy-only';
   engine: EnclaveAgentEngine;
   profile: EnclaveAgentProfile;
   model: string;
-  timeout: number;
-  memoryLimit: string;
-  cpuLimit: string;
-  pidsLimit: number;
-  tmpfsLimit: string;
-  maxOutputBytes: number;
   maxTaskBytes: number;
-  maxInvocations: number;
+  /**
+   * Compiler-facing bounds retained in the normalized contract. The current
+   * native Copilot loop has no proven per-run enforcement seam for these
+   * values, so they are not projected into the executor container.
+   */
+  maxModelRequests: number;
+  maxModelTokens: number;
 }
 
 export interface EnclavesConfig {
-  enabled: boolean;
-  privateRepos: EnclaveRepository[];
-  executors: {
-    script: EnclaveScriptExecutorConfig;
-    agent: EnclaveAgentExecutorConfig;
-  };
+  /** Case-insensitive union of script and agent repositories, staged once. */
+  repositories: EnclaveRepository[];
+  script?: EnclaveScriptExecutorConfig;
+  agent?: EnclaveAgentExecutorConfig;
 }
 
 export interface EnclaveOptions {
-  /** Present only when the config file contains an `enclaves` section. */
+  /** Present only when the config file contains a non-empty `enclaves` array. */
   enclaves?: EnclavesConfig;
 }
 
-export type RawEnclaveScriptExecutorConfig = Partial<EnclaveScriptExecutorConfig>;
-export type RawEnclaveAgentExecutorConfig = Partial<EnclaveAgentExecutorConfig>;
+interface RawEnclaveCommonConfig {
+  repos: EnclaveRepository[];
+  runtime?: EnclaveRuntime;
+  image?: string;
+  timeout?: number;
+  memoryLimit?: string;
+  cpuLimit?: string;
+  pidsLimit?: number;
+  tmpfsLimit?: string;
+  maxOutputBytes?: number;
+  maxInvocations?: number;
+}
 
-export interface RawEnclavesConfig {
-  enabled?: boolean;
-  privateRepos?: EnclaveRepository[];
-  executors?: {
-    script?: RawEnclaveScriptExecutorConfig;
-    agent?: RawEnclaveAgentExecutorConfig;
+export interface RawEnclaveScriptEntry extends RawEnclaveCommonConfig {
+  script: {
+    maxScriptBytes?: number;
   };
 }
 
+export interface RawEnclaveAgentEntry extends RawEnclaveCommonConfig {
+  agent: {
+    engine?: EnclaveAgentEngine;
+    profile?: EnclaveAgentProfile;
+    model: string;
+    maxTaskBytes?: number;
+    maxModelRequests?: number;
+    maxModelTokens?: number;
+  };
+}
+
+export type RawEnclaveEntry = RawEnclaveScriptEntry | RawEnclaveAgentEntry;
+export type RawEnclavesConfig = RawEnclaveEntry[];
+
 export const ENCLAVE_SCRIPT_EXECUTOR_DEFAULTS: Readonly<
-  Omit<EnclaveScriptExecutorConfig, 'image'>
+  Omit<EnclaveScriptExecutorConfig, 'repositories' | 'image'>
 > = {
-  enabled: false,
   runtime: 'docker',
   network: 'none',
   interpreter: 'python3',
@@ -113,14 +130,12 @@ export const ENCLAVE_SCRIPT_EXECUTOR_DEFAULTS: Readonly<
 };
 
 export const ENCLAVE_AGENT_EXECUTOR_DEFAULTS: Readonly<
-  Omit<EnclaveAgentExecutorConfig, 'image'>
+  Omit<EnclaveAgentExecutorConfig, 'repositories' | 'image' | 'model'>
 > = {
-  enabled: false,
   runtime: 'docker',
   network: 'api-proxy-only',
   engine: 'copilot',
   profile: 'openai',
-  model: '',
   timeout: 120,
   memoryLimit: '512m',
   cpuLimit: '1',
@@ -128,14 +143,7 @@ export const ENCLAVE_AGENT_EXECUTOR_DEFAULTS: Readonly<
   tmpfsLimit: '64m',
   maxOutputBytes: 8192,
   maxTaskBytes: 4096,
+  maxModelRequests: 8,
+  maxModelTokens: 1024,
   maxInvocations: 8,
-};
-
-export const ENCLAVES_DEFAULTS: Readonly<EnclavesConfig> = {
-  enabled: false,
-  privateRepos: [],
-  executors: {
-    script: ENCLAVE_SCRIPT_EXECUTOR_DEFAULTS,
-    agent: ENCLAVE_AGENT_EXECUTOR_DEFAULTS,
-  },
 };

@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { validateWithSchema } from './schema-validator';
 import type { RawEnclavesConfig } from './types/enclave-options';
+import { validateRawEnclavesConfig } from './parsers/enclave-parser';
 import type { FirecrackerArtifactDigests, CloudHypervisorArtifactDigests } from './types/runtime-options';
 
 /** @internal Used only by config-file helpers — not part of public API */
@@ -209,7 +210,10 @@ export interface AwfFileConfig {
  */
 // ts-prune-ignore-next
 export function validateAwfFileConfig(config: unknown): string[] {
-  return validateWithSchema(config);
+  const schemaErrors = validateWithSchema(config);
+  if (schemaErrors.length > 0) return schemaErrors;
+  const enclaves = (config as AwfFileConfig).enclaves;
+  return enclaves === undefined ? [] : validateRawEnclavesConfig(enclaves);
 }
 
 const readStdinSync = (): string => fs.readFileSync(process.stdin.fd, 'utf8');

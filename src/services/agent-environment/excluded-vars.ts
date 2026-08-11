@@ -69,7 +69,7 @@ export function buildExclusionSet(config: WrapperConfig): Set<string> {
     excludedEnvVars.add('GH_ACCESS_TOKEN');
   }
 
-  if (config.enclaves?.enabled) {
+  if (config.enclaves) {
     // Enclaves read private repositories on the primary agent's behalf. A
     // GitHub token in the primary environment would bypass mcpg and defeat
     // repository isolation, so strip tokens independently of proxy settings.

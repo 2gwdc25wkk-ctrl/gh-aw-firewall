@@ -137,7 +137,7 @@ function buildCleanupFn(
           error,
         );
       }
-      if (!enclaveAuditComplete && config.enclaves?.enabled) {
+      if (!enclaveAuditComplete && config.enclaves) {
         const targetAuditDir = config.auditDir || path.join(config.workDir, 'audit');
         try {
           fs.mkdirSync(targetAuditDir, { recursive: true, mode: 0o755 });

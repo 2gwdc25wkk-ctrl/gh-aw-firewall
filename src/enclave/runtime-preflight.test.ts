@@ -20,6 +20,7 @@ beforeEach(() => {
 });
 
 describe('enclave runtime preflight', () => {
+  const repositories = [{ repo: 'octo/private', sensitivity: 'internal' as const }];
   it.each([
     [undefined, 'docker'],
     ['docker', 'docker'],
@@ -67,12 +68,17 @@ describe('enclave runtime preflight', () => {
   it('fails closed when Docker is unavailable for either executor', async () => {
     dockerAvailable.mockResolvedValue(false);
     await expect(assertScriptRuntimeAvailable(
-      { ...ENCLAVE_SCRIPT_EXECUTOR_DEFAULTS, enabled: true, runtime: 'docker' },
+      { ...ENCLAVE_SCRIPT_EXECUTOR_DEFAULTS, repositories, runtime: 'docker' },
       runtimeAvailable,
       dockerAvailable,
     )).rejects.toThrow(/Docker daemon; enclaves never fall back/);
     await expect(assertAgentRuntimeAvailable(
-      { ...ENCLAVE_AGENT_EXECUTOR_DEFAULTS, enabled: true, runtime: 'docker' },
+      {
+        ...ENCLAVE_AGENT_EXECUTOR_DEFAULTS,
+        repositories,
+        model: 'gpt-test',
+        runtime: 'docker',
+      },
       runtimeAvailable,
       dockerAvailable,
     )).rejects.toThrow(/Docker daemon; enclaves never fall back/);
@@ -80,7 +86,7 @@ describe('enclave runtime preflight', () => {
 
   it('rejects the unimplemented sbx executor backend without probing alternatives', async () => {
     await expect(assertScriptRuntimeAvailable(
-      { ...ENCLAVE_SCRIPT_EXECUTOR_DEFAULTS, enabled: true, runtime: 'sbx' },
+      { ...ENCLAVE_SCRIPT_EXECUTOR_DEFAULTS, repositories, runtime: 'sbx' },
       runtimeAvailable,
       dockerAvailable,
     )).rejects.toThrow(/not implemented and never falls back/);

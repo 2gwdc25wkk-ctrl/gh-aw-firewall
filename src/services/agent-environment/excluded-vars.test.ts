@@ -2,7 +2,6 @@ import { buildExclusionSet } from './excluded-vars';
 import { PROXY_ENV_VARS } from '../../upstream-proxy';
 import { WrapperConfig } from '../../types';
 import {
-  ENCLAVE_AGENT_EXECUTOR_DEFAULTS,
   ENCLAVE_SCRIPT_EXECUTOR_DEFAULTS,
 } from '../../types/enclave-options';
 
@@ -218,11 +217,10 @@ describe('buildExclusionSet', () => {
 
   describe('when enclaves are enabled (repository credential isolation)', () => {
     const enclaves = {
-      enabled: true,
-      privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' as const }],
-      executors: {
-        script: { ...ENCLAVE_SCRIPT_EXECUTOR_DEFAULTS, enabled: true },
-        agent: ENCLAVE_AGENT_EXECUTOR_DEFAULTS,
+      repositories: [{ repo: 'octo/private', sensitivity: 'internal' as const }],
+      script: {
+        ...ENCLAVE_SCRIPT_EXECUTOR_DEFAULTS,
+        repositories: [{ repo: 'octo/private', sensitivity: 'internal' as const }],
       },
     };
 
@@ -242,25 +240,14 @@ describe('buildExclusionSet', () => {
       },
     );
 
-    it.each([
-      'GITHUB_TOKEN',
-      'GH_TOKEN',
-      'GITHUB_PERSONAL_ACCESS_TOKEN',
-      'COPILOT_GITHUB_TOKEN',
-      'GITHUB_API_TOKEN',
-      'GITHUB_PAT',
-      'GH_ACCESS_TOKEN',
-    ])(
-      'should NOT exclude %s when enclaves are configured but disabled',
-      (name) => {
-        const config = makeConfig({
-          enclaves: { ...enclaves, enabled: false },
-          enableApiProxy: false,
-          difcProxyHost: undefined,
-        });
-        expect(buildExclusionSet(config).has(name)).toBe(false);
-      },
-    );
+    it('does not exclude repository credentials when the enclaves key is absent', () => {
+      const config = makeConfig({
+        enclaves: undefined,
+        enableApiProxy: false,
+        difcProxyHost: undefined,
+      });
+      expect(buildExclusionSet(config).has('GH_TOKEN')).toBe(false);
+    });
   });
 
   describe('when excludeEnv is set', () => {

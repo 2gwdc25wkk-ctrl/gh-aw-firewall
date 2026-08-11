@@ -77,7 +77,7 @@ export function assertCloudHypervisorPreSecurityCompatibility(config: WrapperCon
   if (
     config.topologyAttach?.length ||
     config.difcProxyHost ||
-    config.enclaves?.enabled
+    config.enclaves
   ) {
     throw new Error(
       'Cloud Hypervisor preview does not yet prove the MCP gateway path; topology peers and enclaves are disabled',

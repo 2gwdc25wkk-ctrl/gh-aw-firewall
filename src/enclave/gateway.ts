@@ -24,6 +24,7 @@ const REQUEST_TIMEOUT_MS = 5_000;
 const RETRY_DELAY_MS = 500;
 const MCP_PROTOCOL_VERSION = '2025-06-18';
 const ENCLAVE_MCP_OPERATION_TIMEOUT_SECONDS = Math.max(...TIMING_BUCKETS_MS) / 1_000 + 30;
+const ENCLAVE_MCP_TRANSPORT_ALLOWANCE_SECONDS = 30;
 
 interface EnclaveGatewayContract {
   capability: string;
@@ -118,9 +119,20 @@ const agentTool = {
 
 function expectedTools(config: WrapperConfig): ReadonlyArray<Record<string, unknown>> {
   const tools: Record<string, unknown>[] = [];
-  if (config.enclaves?.executors.script.enabled) tools.push(scriptTool);
-  if (config.enclaves?.executors.agent.enabled) tools.push(agentTool);
+  if (config.enclaves?.script) tools.push(scriptTool);
+  if (config.enclaves?.agent) tools.push(agentTool);
   return tools;
+}
+
+function enclaveToolTimeout(config: WrapperConfig): number {
+  const timeouts = [
+    config.enclaves?.script?.timeout,
+    config.enclaves?.agent?.timeout,
+  ].filter((value): value is number => value !== undefined);
+  if (timeouts.length === 0) {
+    throw new Error('Cannot derive an mcpg tool timeout without a keyed enclave executor');
+  }
+  return Math.max(...timeouts) + ENCLAVE_MCP_TRANSPORT_ALLOWANCE_SECONDS;
 }
 
 /**
@@ -128,7 +140,7 @@ function expectedTools(config: WrapperConfig): ReadonlyArray<Record<string, unkn
  * static upstream route and environment-variable names, never the capability.
  */
 export function buildEnclaveMcpgUpstreamContract(config: WrapperConfig): EnclaveMcpgUpstreamContract {
-  if (!config.enclaves?.enabled) {
+  if (!config.enclaves) {
     throw new Error('Cannot build an mcpg upstream contract while enclaves are disabled');
   }
   return {
@@ -139,7 +151,7 @@ export function buildEnclaveMcpgUpstreamContract(config: WrapperConfig): Enclave
       headers: { Authorization: 'Bearer ' + '$' + `{${ENCLAVE_MCP_CAPABILITY_ENV}}` },
       tools: expectedTools(config).map((tool) => String(tool.name)),
       connectTimeout: 120,
-      toolTimeout: ENCLAVE_MCP_OPERATION_TIMEOUT_SECONDS,
+      toolTimeout: enclaveToolTimeout(config),
     },
     handoff: {
       capabilityEnv: ENCLAVE_MCP_CAPABILITY_ENV,
@@ -156,7 +168,7 @@ export function resolveEnclaveGatewayContract(
   config: WrapperConfig,
   env: NodeJS.ProcessEnv = process.env,
 ): EnclaveGatewayContract {
-  if (!config.enclaves?.enabled) {
+  if (!config.enclaves) {
     throw new Error('Enclave gateway contract requested while enclaves are disabled');
   }
   const capability = env[ENCLAVE_MCP_CAPABILITY_ENV] ?? '';
@@ -486,7 +498,7 @@ export async function shutdownEnclaveGateway(
   config: WrapperConfig,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-  if (!config.enclaves?.enabled || config.keepContainers) return;
+  if (!config.enclaves || config.keepContainers) return;
   const contract = resolveEnclaveGatewayContract(config, env);
   const drainTimeoutSeconds = ENCLAVE_MCP_OPERATION_TIMEOUT_SECONDS;
   const stopResult = await execa(
@@ -522,6 +534,7 @@ export const enclaveGatewayTestHelpers = {
   canonicalJson,
   canonicalToolSet,
   expectedTools,
+  enclaveToolTimeout,
   inspectGateway,
   proveGatewayReadiness,
   remainingRequestBudget,

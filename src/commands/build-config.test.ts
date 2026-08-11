@@ -576,20 +576,15 @@ describe('buildConfig', () => {
     const config = buildConfig(makeInputs({
       options: {
         ...makeInputs().options,
-        enclaves: {
-          enabled: true,
-          privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-          executors: { script: { enabled: true } },
-        },
+        enclaves: [{
+          script: {},
+          repos: [{ repo: 'octo/private', sensitivity: 'internal' }],
+        }],
       },
     }));
     expect(config.enclaves).toMatchObject({
-      enabled: true,
-      privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-      executors: {
-        script: { enabled: true, network: 'none' },
-        agent: { enabled: false, network: 'api-proxy-only' },
-      },
+      repositories: [{ repo: 'octo/private', sensitivity: 'internal' }],
+      script: { network: 'none' },
     });
   });
 });

@@ -91,7 +91,7 @@ export async function runMainWorkflow(
   //    probe exists;
   //  - compose generation (Step 1) can rely on the private seed layout
   //    already being present on disk.
-  if (config.enclaves?.enabled) {
+  if (config.enclaves) {
     if (!dependencies.prepareEnclaves) {
       throw new Error('Enclaves are enabled but no staging implementation was provided to runMainWorkflow');
     }
@@ -200,7 +200,7 @@ export async function runMainWorkflow(
         }
       : undefined;
 
-  const onInfrastructureReady = config.enclaves?.enabled
+  const onInfrastructureReady = config.enclaves
     ? async () => {
         if (!dependencies.connectEnclaveGateway || !dependencies.assertEnclaveGatewayReady) {
           throw new Error('Enclaves require an exclusive MCP gateway readiness implementation');

@@ -420,7 +420,7 @@ describe('Firecracker runtime backend', () => {
       config({ enableHostAccess: true }),
     )).toThrow(/host access/);
     expect(() => assertFirecrackerPreSecurityCompatibility(
-      config({ enclaves: { enabled: true } } as Partial<WrapperConfig>),
+      config({ enclaves: { repositories: [] } } as Partial<WrapperConfig>),
     )).toThrow(/MCP gateway path/);
     expect(() => assertFirecrackerSelection(
       config({ containerRuntime: 'gvisor' }),

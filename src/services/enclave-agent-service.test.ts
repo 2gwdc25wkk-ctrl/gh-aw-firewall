@@ -12,17 +12,18 @@ import {
   ENCLAVE_AGENT_SUBNET,
 } from '../enclave/network';
 
+const repository = { repo: 'octo/private', sensitivity: 'internal' as const };
+
 function config(overrides: Partial<WrapperConfig> = {}): WrapperConfig {
   return {
     workDir: '/tmp/awf-test',
     agentCommand: 'echo enclave',
     imageRegistry: 'ghcr.io/github/gh-aw-firewall',
     imageTag: 'latest',
-    enclaves: normalizeEnclavesConfig({
-      enabled: true,
-      privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-      executors: { agent: { enabled: true, model: 'trusted-model' } },
-    }),
+    enclaves: normalizeEnclavesConfig([{
+      agent: { model: 'trusted-model' },
+      repos: [repository],
+    }]),
     enableApiProxy: true,
     copilotGithubToken: 'copilot-token',
     openaiApiKey: 'openai-key',
@@ -119,27 +120,25 @@ describe('unified enclave agent executor compose assembly', () => {
   });
 
   it('derives every agent enclave control from trusted configuration', () => {
-    const enclaves = normalizeEnclavesConfig({
-      enabled: true,
-      privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-      executors: {
-        agent: {
-          enabled: true,
-          runtime: 'gvisor',
-          engine: 'copilot',
-          profile: 'anthropic',
-          model: 'trusted-model',
-          timeout: 77,
-          memoryLimit: '256m',
-          cpuLimit: '0.5',
-          pidsLimit: 32,
-          tmpfsLimit: '24m',
-          maxOutputBytes: 2048,
-          maxTaskBytes: 1024,
-          maxInvocations: 3,
-        },
+    const enclaves = normalizeEnclavesConfig([{
+      agent: {
+        engine: 'copilot',
+        profile: 'anthropic',
+        model: 'trusted-model',
+        maxTaskBytes: 1024,
+        maxModelRequests: 4,
+        maxModelTokens: 512,
       },
-    });
+      repos: [repository],
+      runtime: 'gvisor',
+      timeout: 77,
+      memoryLimit: '256m',
+      cpuLimit: '0.5',
+      pidsLimit: 32,
+      tmpfsLimit: '24m',
+      maxOutputBytes: 2048,
+      maxInvocations: 3,
+    }]);
     const environment = build({ enclaves }).service.environment as Record<string, string>;
     expect(environment).toMatchObject({
       AWF_ENCLAVE_AGENT_ENABLED: 'true',
@@ -161,6 +160,8 @@ describe('unified enclave agent executor compose assembly', () => {
     // Copilot always speaks the Copilot API-proxy port, regardless of profile.
     expect(environment.AWF_ENCLAVE_AGENT_API_ENDPOINT)
       .toBe(`http://${ENCLAVE_AGENT_API_PROXY_IP}:10002`);
+    expect(environment.AWF_ENCLAVE_AGENT_MAX_MODEL_REQUESTS).toBeUndefined();
+    expect(environment.AWF_ENCLAVE_AGENT_MAX_MODEL_TOKENS).toBeUndefined();
   });
 
   it('routes non-copilot profiles to their own API-proxy port', () => {
@@ -170,11 +171,11 @@ describe('unified enclave agent executor compose assembly', () => {
   });
 
   it('fails closed for the not-yet-proven sbx agent runtime', () => {
-    const enclaves = normalizeEnclavesConfig({
-      enabled: true,
-      privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-      executors: { agent: { enabled: true, model: 'trusted-model', runtime: 'sbx' } },
-    });
+    const enclaves = normalizeEnclavesConfig([{
+      agent: { model: 'trusted-model' },
+      repos: [repository],
+      runtime: 'sbx',
+    }]);
     expect(() => build({ enclaves }))
       .toThrow(/sbx agent enclave capability is not yet available/);
   });
@@ -185,11 +186,7 @@ describe('unified enclave agent executor compose assembly', () => {
   });
 
   it('refuses to build with no executor enabled at all', () => {
-    const enclaves = normalizeEnclavesConfig({
-      enabled: true,
-      privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-      executors: {},
-    });
+    const enclaves = { repositories: [] };
     expect(() => build({ enclaves }))
       .toThrow(/at least one enclave executor must be enabled/);
   });
@@ -219,13 +216,10 @@ describe('dedicated enclave agent API proxy', () => {
   });
 
   it('drops the copilot credential for a non-copilot engine route', () => {
-    const enclaves = normalizeEnclavesConfig({
-      enabled: true,
-      privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-      executors: {
-        agent: { enabled: true, model: 'trusted-model', engine: 'codex', profile: 'openai' },
-      },
-    });
+    const enclaves = normalizeEnclavesConfig([{
+      agent: { model: 'trusted-model', engine: 'codex', profile: 'openai' },
+      repos: [repository],
+    }]);
     const proxy = build({ enclaves }).agentApiProxyService as Record<string, any>;
     const environment = proxy.environment as Record<string, string>;
     expect(environment.OPENAI_API_KEY).toBe('openai-key');
@@ -325,11 +319,7 @@ describe('unified enclave compose topology', () => {
   });
 
   it('creates no enclave network when only the script executor runs', () => {
-    const enclaves = normalizeEnclavesConfig({
-      enabled: true,
-      privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-      executors: { script: { enabled: true } },
-    });
+    const enclaves = normalizeEnclavesConfig([{ script: {}, repos: [repository] }]);
     const compose = generateDockerCompose(composeConfig({ enclaves }), networkConfig);
     expect(compose.networks[ENCLAVE_AGENT_NETWORK]).toBeUndefined();
     expect(compose.services['enclave-agent-image']).toBeUndefined();
@@ -338,14 +328,10 @@ describe('unified enclave compose topology', () => {
   });
 
   it('runs both executors from one server, one socket, and one audit root', () => {
-    const enclaves = normalizeEnclavesConfig({
-      enabled: true,
-      privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-      executors: {
-        script: { enabled: true },
-        agent: { enabled: true, model: 'trusted-model' },
-      },
-    });
+    const enclaves = normalizeEnclavesConfig([
+      { script: {}, repos: [repository] },
+      { agent: { model: 'trusted-model' }, repos: [repository] },
+    ]);
     const compose = generateDockerCompose(composeConfig({ enclaves }), networkConfig);
     const servers = Object.keys(compose.services).filter((name) => name.includes('mcp-server'));
     expect(servers).toEqual(['enclave-mcp-server']);

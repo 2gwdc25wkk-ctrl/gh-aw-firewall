@@ -88,7 +88,7 @@ describe('Firecracker runtime validation', () => {
     [{ volumeMounts: ['/tmp:/tmp'] }, /additional host volume mounts/],
     [{ topologyAttach: ['gateway'] }, /MCP gateway path/],
     [{ difcProxyHost: 'proxy:443' }, /MCP gateway path/],
-    [{ enclaves: { enabled: true } }, /MCP gateway path/],
+    [{ enclaves: { repositories: [] } }, /MCP gateway path/],
     [{ dnsOverHttps: 'https://dns.example/dns-query' }, /DNS-over-HTTPS/],
     [{ tty: true }, /does not support --tty/],
     [{ awfDockerHost: 'tcp://localhost:2375' }, /local Unix-socket Docker daemon/],

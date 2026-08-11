@@ -64,7 +64,7 @@ export function assertFirecrackerPreSecurityCompatibility(config: WrapperConfig)
   if (
     config.topologyAttach?.length ||
     config.difcProxyHost ||
-    config.enclaves?.enabled
+    config.enclaves
   ) {
     throw new Error(
       'Firecracker preview does not yet prove the MCP gateway path; topology peers and enclaves are disabled',

@@ -236,18 +236,18 @@ function buildAgentApiProxyService(params: {
 export function buildEnclaveMcpService(params: EnclaveMcpServiceParams): EnclaveMcpBuildResult {
   const { config, imageConfig } = params;
   const enclaves = config.enclaves;
-  const script = enclaves?.executors.script;
-  const agent = enclaves?.executors.agent;
-  if (!enclaves?.enabled || (!script?.enabled && !agent?.enabled)) {
+  const script = enclaves?.script;
+  const agent = enclaves?.agent;
+  if (!enclaves || (!script && !agent)) {
     throw new Error('buildEnclaveMcpService: at least one enclave executor must be enabled');
   }
-  if (script?.enabled && script.runtime === 'sbx') {
+  if (script?.runtime === 'sbx') {
     throw new Error('buildEnclaveMcpService: sbx script enclave capability is not yet available');
   }
-  if (agent?.enabled && agent.runtime === 'sbx') {
+  if (agent?.runtime === 'sbx') {
     throw new Error('buildEnclaveMcpService: sbx agent enclave capability is not yet available');
   }
-  if (agent?.enabled && !config.enableApiProxy) {
+  if (agent && !config.enableApiProxy) {
     throw new Error(
       'buildEnclaveMcpService: the enclave agent executor requires the API proxy, which is the ' +
       "enclave's only permitted upstream egress",
@@ -264,13 +264,13 @@ export function buildEnclaveMcpService(params: EnclaveMcpServiceParams): Enclave
     AWF_ENCLAVE_HOST_WORK_DIR: toDaemonVisiblePath(paths.workDir, config.dockerHostPathPrefix),
     AWF_ENCLAVE_CAPABILITY_PATH: ENCLAVE_SERVER_CAPABILITY_PATH,
     AWF_ENCLAVE_LISTEN_HOST: '0.0.0.0',
-    AWF_ENCLAVE_SCRIPT_ENABLED: String(script?.enabled === true),
-    AWF_ENCLAVE_AGENT_ENABLED: String(agent?.enabled === true),
+    AWF_ENCLAVE_SCRIPT_ENABLED: String(script !== undefined),
+    AWF_ENCLAVE_AGENT_ENABLED: String(agent !== undefined),
   };
   const dependsOn: Record<string, Record<string, string>> = {};
   const result: EnclaveMcpBuildResult = { service: {} };
 
-  if (script?.enabled) {
+  if (script) {
     const { imageRef, source } = resolveScriptImage(imageConfig, script.image);
     result.scriptImageService = {
       ...source,
@@ -294,7 +294,7 @@ export function buildEnclaveMcpService(params: EnclaveMcpServiceParams): Enclave
     });
   }
 
-  if (agent?.enabled) {
+  if (agent) {
     if (!params.networkConfig) {
       throw new Error('buildEnclaveMcpService: the enclave agent executor requires network configuration');
     }

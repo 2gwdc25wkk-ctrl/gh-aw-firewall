@@ -444,7 +444,7 @@ describe('Cloud Hypervisor runtime backend', () => {
       config({ enableHostAccess: true }),
     )).toThrow(/host access/);
     expect(() => assertCloudHypervisorPreSecurityCompatibility(
-      config({ enclaves: { enabled: true } } as Partial<WrapperConfig>),
+      config({ enclaves: { repositories: [] } } as Partial<WrapperConfig>),
     )).toThrow(/MCP gateway path/);
     expect(() => assertCloudHypervisorSelection(
       config({ containerRuntime: 'gvisor' }),

@@ -31,15 +31,15 @@ import {
 export const ENCLAVE_RUN_LABEL = 'awf.enclave.run';
 
 export function isEnclaveScriptEnabled(config: WrapperConfig): boolean {
-  return config.enclaves?.enabled === true && config.enclaves.executors.script.enabled === true;
+  return config.enclaves?.script !== undefined;
 }
 
 export function isEnclaveAgentEnabled(config: WrapperConfig): boolean {
-  return config.enclaves?.enabled === true && config.enclaves.executors.agent.enabled === true;
+  return config.enclaves?.agent !== undefined;
 }
 
 export function isEnclavesEnabled(config: WrapperConfig): boolean {
-  return config.enclaves?.enabled === true;
+  return config.enclaves !== undefined;
 }
 
 function ensureDirectory(target: string, mode: number): void {
@@ -110,12 +110,12 @@ export async function prepareEnclaves(
   } catch (error) {
     errors.push(error instanceof Error ? error.message : 'enclave gateway handoff is invalid');
   }
-  if (enclaves.executors.script.enabled && enclaves.executors.script.runtime === 'sbx') {
-    errors.push('enclaves.executors.script.runtime "sbx" is not implemented and never falls back');
+  if (enclaves.script?.runtime === 'sbx') {
+    errors.push('enclaves script runtime "sbx" is not implemented and never falls back');
   }
-  if (enclaves.executors.agent.enabled && enclaves.executors.agent.runtime === 'sbx') {
+  if (enclaves.agent?.runtime === 'sbx') {
     errors.push(
-      'enclaves.executors.agent.runtime "sbx" is not implemented: the installed sbx runtime cannot ' +
+      'enclaves agent runtime "sbx" is not implemented: the installed sbx runtime cannot ' +
       'prove every mandatory enclave-isolation control, and enclaves never fall back to Docker or gVisor',
     );
   }
@@ -137,13 +137,13 @@ export async function prepareEnclaves(
   }
 
   await (deps.assertPrimaryAvailable ?? assertPrimaryRuntimeAvailable)(config.containerRuntime);
-  if (enclaves.executors.script.enabled) {
+  if (enclaves.script) {
     const assertScriptRuntime = deps.assertScriptRuntimeAvailable ?? assertScriptRuntimeAvailable;
-    await assertScriptRuntime(enclaves.executors.script);
+    await assertScriptRuntime(enclaves.script);
   }
-  if (enclaves.executors.agent.enabled) {
+  if (enclaves.agent) {
     const assertAgentRuntime = deps.assertAgentRuntimeAvailable ?? assertAgentRuntimeAvailable;
-    await assertAgentRuntime(enclaves.executors.agent);
+    await assertAgentRuntime(enclaves.agent);
   }
 
   const paths = resolveEnclavePaths(config.workDir);
@@ -162,7 +162,7 @@ export async function prepareEnclaves(
 
   const runId = generateEnclaveRunId();
   const staging = await stageEnclaveSeeds({
-    repos: enclaves.privateRepos,
+    repos: enclaves.repositories,
     paths,
     runId,
     token,

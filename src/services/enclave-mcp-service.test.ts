@@ -6,7 +6,8 @@ import type { WrapperConfig } from '../types';
 import { buildEnclaveMcpService } from './enclave-mcp-service';
 import { generateDockerCompose } from '../compose-generator';
 
-const workDir = fs.mkdtempSync('/tmp/awf-enclave-mcp-service-test-');
+const workDir = fs.mkdtempSync(path.join(__dirname, 'awf-enclave-mcp-service-test-'));
+const repository = { repo: 'octo/private', sensitivity: 'internal' as const };
 
 function config(overrides: Partial<WrapperConfig> = {}): WrapperConfig {
   return {
@@ -15,11 +16,7 @@ function config(overrides: Partial<WrapperConfig> = {}): WrapperConfig {
     imageTag: 'latest',
     agentCommand: 'echo test',
     allowedDomains: [],
-    enclaves: normalizeEnclavesConfig({
-      enabled: true,
-      privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-      executors: { script: { enabled: true } },
-    }),
+    enclaves: normalizeEnclavesConfig([{ script: {}, repos: [repository] }]),
     ...overrides,
   } as WrapperConfig;
 }
@@ -62,24 +59,18 @@ describe('buildEnclaveMcpService', () => {
   });
 
   it('derives all sandbox controls from trusted configuration', () => {
-    const enclaves = normalizeEnclavesConfig({
-      enabled: true,
-      privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-      executors: {
-        script: {
-          enabled: true,
-          runtime: 'gvisor',
-          timeout: 12,
-          memoryLimit: '256m',
-          cpuLimit: '0.5',
-          pidsLimit: 32,
-          tmpfsLimit: '24m',
-          maxOutputBytes: 2048,
-          maxScriptBytes: 4096,
-          maxInvocations: 3,
-        },
-      },
-    });
+    const enclaves = normalizeEnclavesConfig([{
+      script: { maxScriptBytes: 4096 },
+      repos: [repository],
+      runtime: 'gvisor',
+      timeout: 12,
+      memoryLimit: '256m',
+      cpuLimit: '0.5',
+      pidsLimit: 32,
+      tmpfsLimit: '24m',
+      maxOutputBytes: 2048,
+      maxInvocations: 3,
+    }]);
     const result = buildEnclaveMcpService({
       config: config({ enclaves }),
       imageConfig: ghcr,
@@ -98,11 +89,11 @@ describe('buildEnclaveMcpService', () => {
   });
 
   it('fails closed for the not-yet-proven sbx script runtime', () => {
-    const enclaves = normalizeEnclavesConfig({
-      enabled: true,
-      privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-      executors: { script: { enabled: true, runtime: 'sbx' } },
-    });
+    const enclaves = normalizeEnclavesConfig([{
+      script: {},
+      repos: [repository],
+      runtime: 'sbx',
+    }]);
     expect(() => buildEnclaveMcpService({ config: config({ enclaves }), imageConfig: ghcr }))
       .toThrow(/sbx script enclave capability is not yet available/);
   });
@@ -139,5 +130,17 @@ describe('buildEnclaveMcpService', () => {
     expect(JSON.stringify((agent as { networks?: unknown }).networks)).not.toContain(
       'awf-enclave-mcp-control',
     );
+  });
+
+  it('assembles no enclave infrastructure when the enclaves key is absent', () => {
+    const compose = generateDockerCompose(config({ enclaves: undefined }), {
+      subnet: '172.30.0.0/24',
+      squidIp: '172.30.0.10',
+      agentIp: '172.30.0.20',
+    });
+    expect(compose.services['enclave-script-image']).toBeUndefined();
+    expect(compose.services['enclave-agent-image']).toBeUndefined();
+    expect(compose.services['enclave-mcp-server']).toBeUndefined();
+    expect(compose.networks['awf-enclave-mcp-control']).toBeUndefined();
   });
 });

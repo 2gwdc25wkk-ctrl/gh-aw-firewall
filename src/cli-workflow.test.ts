@@ -33,11 +33,10 @@ const enclaveConfig: WrapperConfig = {
   ...baseConfig,
   networkIsolation: true,
   topologyAttach: ['awmg-mcpg'],
-  enclaves: normalizeEnclavesConfig({
-    enabled: true,
-    privateRepos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-    executors: { script: { enabled: true } },
-  }),
+  enclaves: normalizeEnclavesConfig([{
+    script: {},
+    repos: [{ repo: 'octo/private', sensitivity: 'internal' }],
+  }]),
 };
 
 const createLogger = () => ({
@@ -137,47 +136,14 @@ describe('runMainWorkflow', () => {
   it('rejects invalid enclave configuration before staging or startup', async () => {
     const prepareEnclaves = jest.fn();
     const dependencies = createWorkflowDependencies({ prepareEnclaves });
+    const enclaves = normalizeEnclavesConfig([{
+      script: {},
+      repos: [{ repo: 'octo/private', sensitivity: 'internal' }],
+    }])!;
+    enclaves.repositories.push({ repo: 'Octo/Private', sensitivity: 'internal' });
     const config: WrapperConfig = {
       ...baseConfig,
-      enclaves: {
-        enabled: true,
-        privateRepos: [
-          { repo: 'octo/private', sensitivity: 'internal' },
-          { repo: 'Octo/Private', sensitivity: 'internal' },
-        ],
-        executors: {
-          script: {
-            enabled: true,
-            runtime: 'docker',
-            network: 'none',
-            interpreter: 'python3',
-            timeout: 30,
-            memoryLimit: '512m',
-            cpuLimit: '1',
-            pidsLimit: 128,
-            tmpfsLimit: '64m',
-            maxOutputBytes: 8192,
-            maxScriptBytes: 65536,
-            maxInvocations: 32,
-          },
-          agent: {
-            enabled: false,
-            runtime: 'docker',
-            network: 'api-proxy-only',
-            engine: 'copilot',
-            profile: 'openai',
-            model: '',
-            timeout: 120,
-            memoryLimit: '512m',
-            cpuLimit: '1',
-            pidsLimit: 128,
-            tmpfsLimit: '64m',
-            maxOutputBytes: 8192,
-            maxTaskBytes: 4096,
-            maxInvocations: 8,
-          },
-        },
-      },
+      enclaves,
     };
 
     await expect(runMainWorkflow(config, dependencies, createWorkflowOptions()))

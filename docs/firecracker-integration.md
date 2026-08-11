@@ -767,7 +767,7 @@ any of them produces a hard validation failure before the VM is launched.
 | Feature | Status | Error |
 |---------|--------|-------|
 | Topology peers (`--topology-attach`) | **Rejected** | "topology peers and enclaves are disabled" |
-| Enclaves (`enclaves.enabled`) | **Rejected** | Same as above |
+| Enclaves (`enclaves` key present) | **Rejected** | Same as above |
 | Docker-in-Docker (`--enable-dind`) | **Rejected** | "does not support Docker-in-Docker or split filesystems" |
 | Split Docker host path prefix | **Rejected** | Same as above |
 | ARC DinD runner topology | **Rejected** | Same as above |

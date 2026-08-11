@@ -6,17 +6,17 @@ Layer 5 removes the legacy bounded-query and bounded-agent surfaces. AWF now doc
 
 ## Architecture
 
-AWF stages immutable repository seeds on the host, starts one AWF-owned `enclave-mcp-server`, and exposes enabled executors only through `gh-aw-mcpg`.
+AWF stages immutable repository seeds on the host, starts one AWF-owned `enclave-mcp-server`, and exposes only keyed executors through `gh-aw-mcpg`.
 
 - **Script executor** — `enclave_run_script` runs a bounded Python script in a no-network, read-only, single-use sandbox.
 - **Agent executor** — `enclave_run_agent` runs the pinned Copilot engine in a bounded single-use enclave whose only network peer is the dedicated API proxy.
-- **Shared controls** — `enclaves.privateRepos` is the only trusted repository list; script and agent calls debit the same per-run repository ledger and share one admission lane.
+- **Shared controls** — each keyed entry owns a non-empty `repos` list. AWF forms their case-insensitive union, stages every repository once, and gives script and agent calls one per-run repository ledger and admission lane.
 
 The primary agent never receives a broker socket, wrapper binary, direct MCP server URL, capability, repository seed, ledger state, or alternate transport.
 
 ## Tool contracts
 
-The AWF-owned MCP server publishes only the enabled enclave tools:
+The AWF-owned MCP server publishes only the tools selected by key presence:
 
 ```text
 enclave_run_script({
@@ -51,11 +51,12 @@ Rollout depends on both sides of the gateway contract:
 
 1. **Compiler handoff contract** — `github/gh-aw#50920` must emit the enclave upstream, capability, identity label, endpoint, and timeout handoff.
 2. **Late backend rediscovery** — `github/gh-aw-mcpg#10784` must preserve an initially unavailable HTTP backend and rediscover it later.
-3. **Gateway/runtime requirement** — this requires MCP Gateway spec **1.15.0** and the **first mcpg release after v0.4.8 containing it**.
+3. **Trusted container mount policy** — `github/gh-aw-mcpg#10928` must reject container-backed MCP mounts outside gateway-owned allowed roots.
+4. **Gateway/runtime requirement** — backend rediscovery requires MCP Gateway spec **1.15.0** and the **first mcpg release after v0.4.8 containing it**.
 
-The compiler-generated upstream uses `connectTimeout: 120` and
-`toolTimeout: 630`, covering the maximum 600-second disclosure bucket plus a
-bounded transport allowance. Its tool allowlist contains only the enabled
+The compiler-generated upstream uses `connectTimeout: 120` and a `toolTimeout`
+equal to the longest configured (or default) executor timeout plus 30 seconds.
+Its tool allowlist contains only the selected
 executor tools. The compiler generates a fresh 64-character lowercase
 hexadecimal capability, substitutes it into the mcpg authorization header, and
 passes it to AWF without exposing it to the primary agent.
@@ -81,8 +82,8 @@ The following legacy surfaces are **removed, not deprecated**:
 
 | Removed surface | Replacement |
 | --- | --- |
-| `boundedQueries` config | `enclaves.privateRepos` + `enclaves.executors.script` |
-| `boundedAgents` config | `enclaves.privateRepos` + `enclaves.executors.agent` |
+| `boundedQueries` config | A keyed `script` entry |
+| `boundedAgents` config | A keyed `agent` entry |
 | `bounded-query` wrapper / generated skill | `enclave_run_script` MCP tool |
 | `bounded-agent` wrapper / generated skill | `enclave_run_agent` MCP tool |
 | Separate per-subsystem ledgers | One shared per-repository ledger inside `enclave-mcp-server` |

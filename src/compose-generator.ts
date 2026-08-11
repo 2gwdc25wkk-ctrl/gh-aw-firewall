@@ -183,7 +183,7 @@ export function generateDockerCompose(
     networkConfig,
     namedVolumes,
   });
-  if (config.enclaves?.enabled && config.enclaves.executors.agent.enabled) {
+  if (config.enclaves?.agent) {
     // Dedicated `internal` network whose only members are unified-enclave
     // agent enclaves and the dual-homed dedicated API proxy. An explicit
     // `name:` is required because the enclave MCP server launches enclaves
@@ -205,7 +205,7 @@ export function generateDockerCompose(
       driver: 'bridge',
     };
   }
-  if (config.enclaves?.enabled) {
+  if (config.enclaves) {
     compose.networks[ENCLAVE_MCP_CONTROL_NETWORK] = {
       name: ENCLAVE_MCP_CONTROL_NETWORK,
       driver: 'bridge',
