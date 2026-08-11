@@ -1757,7 +1757,7 @@ The rollout contract depends on both upstream projects:
 
 While the backend is still starting, mcpg may return retryable HTTP `503 backend_unavailable`. AWF retries `initialize` with bounded backoff until `AWF_ENCLAVE_MCP_READINESS_TIMEOUT_MS` expires, then fails closed before the primary agent starts.
 
-The enclave upstream MUST set `toolTimeout` to at least **630 seconds**:
+The compiler emits a fixed enclave upstream `toolTimeout` of **630 seconds**:
 
 ```text
 max(TIMING_BUCKETS_MS) / 1000 + transport allowance
@@ -1770,13 +1770,14 @@ This is independent of the configured script or agent execution timeout.
 final minute for result handling and cleanup), but AWF selects the observable
 timing bucket only after result validation, executor removal, protected artifact
 preservation, and workspace cleanup. A lower `timeout + 30` value can terminate
-a valid call before its 600-second disclosure boundary. The 630-second contract
-is a minimum for canonical bounded operation, not an absolute wall-clock cap.
+a valid call before its 600-second disclosure boundary. The fixed 630-second
+mcpg enforcement value covers canonical bounded operation; it is not an
+absolute AWF wall-clock cap.
 If secret-dependent processing or cleanup has already exceeded 600 seconds when
 AWF selects a bucket, AWF returns the canonical error immediately after cleanup.
 A public host-scheduler stall after the final wait begins may instead delay the
 already computed response beyond 600 seconds, at which point mcpg may enforce
-its transport timeout.
+the fixed transport timeout.
 
 ### 14.4 Shared ledger and disclosure
 
