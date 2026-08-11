@@ -77,7 +77,15 @@ run_case() {
     tail -200 "$RUN_ROOT/$name/stderr.log" >&2
     return 1
   fi
+  # awf-resolved-config.json's own agentCommand field always contains
+  # this case's shell command verbatim; for api-proxy-reflect that
+  # command intentionally references the sentinel string itself (the
+  # pattern it greps for, to assert the sentinel's absence from `env`).
+  # That is expected, self-referential test source text, not a leak of
+  # the sentinel value into somewhere it shouldn't be -- guest stdout,
+  # proxy logs, and every other diagnostic file are still fully scanned.
   if grep -R --binary-files=without-match -F "$SECRET_SENTINEL" \
+    --exclude='awf-resolved-config.json' \
     "$RUN_ROOT/$name/stdout.log" \
     "$audit" \
     "$proxy_logs" >/dev/null 2>&1; then
@@ -154,6 +162,7 @@ keep_work="$RUN_ROOT/keep/work"
 keep_workspace="$RUN_ROOT/keep/workspace"
 keep_audit="$RUN_ROOT/keep/audit"
 mkdir -p "$keep_work" "$keep_workspace" "$keep_audit"
+set +e
 (
   export GITHUB_WORKSPACE="$keep_workspace"
   export OPENAI_API_KEY="$SECRET_SENTINEL"
@@ -164,15 +173,38 @@ mkdir -p "$keep_work" "$keep_workspace" "$keep_audit"
     --audit-dir "$keep_audit" \
     -- 'true'
 ) >"$RUN_ROOT/keep/stdout.log" 2>"$RUN_ROOT/keep/stderr.log"
+keep_status=$?
+set -e
+if [ "$keep_status" -ne 0 ]; then
+  # See the identical fix in cloud-hypervisor-live-smoke.sh: unlike
+  # run_case, this invocation is not wrapped by a helper that tails its
+  # own log on failure, so under `set -e` a non-zero exit here previously
+  # aborted the whole suite silently.
+  echo "keep-containers invocation: expected exit 0, got $keep_status" >&2
+  tail -200 "$RUN_ROOT/keep/stderr.log" >&2
+  exit 1
+fi
 sudo ip netns list | grep -q '^awffc-' || {
   echo "keep mode did not preserve the run network namespace" >&2
   exit 1
 }
-test -d "$keep_work/firecracker-jailer"
-test -f "$keep_audit/firecracker/network-plan.json"
-test -f "$keep_audit/firecracker/firecracker.log"
-test -f "$keep_audit/firecracker/firecracker.metrics.jsonl"
-find "$keep_audit/firecracker" -type f -size +1048576c -print -quit \
+sudo test -d "$keep_work/firecracker-jailer" || {
+  echo "keep mode did not preserve the firecracker-jailer work directory" >&2
+  exit 1
+}
+sudo test -f "$keep_audit/firecracker/network-plan.json" || {
+  echo "keep mode did not preserve network-plan.json" >&2
+  exit 1
+}
+sudo test -f "$keep_audit/firecracker/firecracker.log" || {
+  echo "keep mode did not preserve firecracker.log" >&2
+  exit 1
+}
+sudo test -f "$keep_audit/firecracker/firecracker.metrics.jsonl" || {
+  echo "keep mode did not preserve firecracker.metrics.jsonl" >&2
+  exit 1
+}
+sudo find "$keep_audit/firecracker" -type f -size +1048576c -print -quit \
   | grep -q . && {
     echo "Firecracker diagnostic artifact exceeded the 1 MiB bound" >&2
     exit 1

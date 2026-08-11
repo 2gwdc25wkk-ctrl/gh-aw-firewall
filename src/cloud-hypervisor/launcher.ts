@@ -60,6 +60,10 @@ export interface CloudHypervisorLaunchPaths {
   readonly runDirectory: string;
   readonly apiSocketPath: string;
   readonly vsockSocketPath: string;
+  /** Host TAP interface name (e.g. `fct<token>`), for the
+   * `/sys/class/net/<tapName>` Landlock rule — see
+   * {@link computeCloudHypervisorLandlockRules}. */
+  readonly tapName: string;
 }
 
 export interface CloudHypervisorLaunchIdentity {
@@ -79,11 +83,11 @@ export interface CloudHypervisorLaunchToolPaths {
 
 /**
  * Builds the argv AWF spawns to launch Cloud Hypervisor: join the prepared
- * network namespace, drop to the non-root operator identity with an empty
- * capability bounding set, then exec the pinned Cloud Hypervisor binary
- * with only its API socket configured (the VM itself is created and booted
- * afterwards over that socket, mirroring Firecracker's `--api-sock`-only
- * jailer invocation).
+ * network namespace, drop to the non-root operator identity retaining
+ * exactly two things it needs to configure its own virtio-net TAP device,
+ * then exec the pinned Cloud Hypervisor binary with only its API socket
+ * configured (the VM itself is created and booted afterwards over that
+ * socket, mirroring Firecracker's `--api-sock`-only jailer invocation).
  *
  * The launched process retains exactly one supplementary group: the group
  * that owns `/dev/kvm` (resolved by preflight). A blanket `--clear-groups`
@@ -92,6 +96,18 @@ export interface CloudHypervisorLaunchToolPaths {
  * (see docs/cloud-hypervisor-foundation.md), that would make every real
  * launch fail with EACCES opening `/dev/kvm` even though preflight (which
  * runs as root) passed.
+ *
+ * It also retains exactly one capability: `CAP_NET_ADMIN`, via the
+ * bounding, inheritable, and ambient sets together (ambient capabilities
+ * are what let a specific capability survive `execve()` of a plain,
+ * non-file-capability-aware binary like `cloud-hypervisor` across a uid
+ * change, even under `--no-new-privs`). Cloud Hypervisor's virtio-net
+ * backend needs it to finish configuring the already-created,
+ * already-owned TAP device (observed live: `vm.boot` otherwise fails with
+ * "Failed to read the TAP flags from sysfs: Permission denied", even
+ * though the TAP device node itself is owned by the target uid/gid). This
+ * is a deliberate, minimal, single-capability exception to an otherwise
+ * fully empty capability set — not a broad grant.
  */
 export function buildCloudHypervisorLaunchCommand(options: {
   readonly tools: CloudHypervisorLaunchToolPaths;
@@ -127,8 +143,11 @@ export function buildCloudHypervisorLaunchCommand(options: {
       // also drop kvm access).
       `--groups=${options.kvmGid}`,
       '--no-new-privs',
-      '--inh-caps=-all',
-      '--bounding-set=-all',
+      // CAP_NET_ADMIN is the sole exception to an otherwise fully empty
+      // capability set — see the function doc comment above for why.
+      '--inh-caps=-all,+net_admin',
+      '--bounding-set=-all,+net_admin',
+      '--ambient-caps=+net_admin',
       '--',
       options.cloudHypervisorBinary,
       '--api-socket', `path=${options.apiSocketPath}`,
@@ -144,9 +163,16 @@ export function buildCloudHypervisorLaunchCommand(options: {
  * own process needs after `vm.create`: read access to the kernel image,
  * read-write access to the rootfs and (if present) workspace disk images,
  * read-write access to the private run directory (for the API and vsock
- * UNIX domain sockets it creates there), and read-write access to the
- * device nodes it must reopen for virtio-net TAP attachment and KVM
- * ioctls. Any path not listed here becomes inaccessible to the Cloud
+ * UNIX domain sockets it creates there), read-write access to the device
+ * nodes it must reopen for virtio-net TAP attachment and KVM ioctls, and
+ * read access to the TAP's own sysfs device directory. Cloud Hypervisor's
+ * virtio-net setup reads `/sys/class/net/<tapName>/tun_flags` (a
+ * world-readable, `0444` file with no capability requirement of its own)
+ * to detect multi-queue support; without a Landlock rule for it, that read
+ * fails with the kernel LSM's own EACCES — observed live as `vm.boot`
+ * failing with "Failed to read the TAP flags from sysfs: Permission
+ * denied" even though ordinary Unix file permissions would have allowed
+ * the read. Any path not listed here becomes inaccessible to the Cloud
  * Hypervisor process the instant Landlock is enabled, even to a
  * hypothetical guest-escape.
  */
@@ -159,6 +185,7 @@ export function computeCloudHypervisorLandlockRules(
     { path: paths.runDirectory, access: 'rw' },
     { path: '/dev/kvm', access: 'rw' },
     { path: '/dev/net/tun', access: 'rw' },
+    { path: `/sys/class/net/${paths.tapName}`, access: 'r' },
   ];
   if (paths.workspacePath) {
     rules.push({ path: paths.workspacePath, access: 'rw' });
@@ -173,10 +200,39 @@ export interface CloudHypervisorResourceLimits {
 
 /** Fixed VMM/guest-overhead headroom added on top of configured guest memory. */
 const CGROUP_MEMORY_HEADROOM_MIB = 256;
+/**
+ * Fixed CPU headroom (in the same units as `CGROUP_V2_PERIOD_US`) added on
+ * top of the per-vCPU quota. Cloud Hypervisor's own I/O, virtio device
+ * emulation (including the tap fd read/write loop for the guest's
+ * network device), and API threads all run in this *same* cgroup as the
+ * vCPU thread(s) and compete for the *same* CPU quota -- a quota sized
+ * for "1 CPU per vCPU" alone left no dedicated room for that VMM-side
+ * work. Live-KVM validation on GitHub-hosted runners (nested KVM, so
+ * vCPU exits are unusually expensive) showed guest network I/O
+ * essentially stalled (a handful of packets relayed regardless of how
+ * long the test waited) even after ruling out tap/vnet_hdr negotiation,
+ * conntrack/offload, and Docker bridge-isolation causes -- consistent
+ * with the VMM's own non-vCPU threads being starved of their share of an
+ * already-tight, vCPU-only-sized quota.
+ */
+const CGROUP_CPU_HEADROOM_QUOTA_US = 100_000;
 /** Bounds the number of Cloud Hypervisor host threads/tasks (defense in depth; it is a single process). */
 const CGROUP_MAX_PIDS = 256;
 const CGROUP_V2_PERIOD_US = 100_000;
 const CGROUP_V2_CONTROLLERS = '+cpu +memory +pids';
+/**
+ * cgroup v2 rejects `rmdir()` on a non-empty cgroup (`EBUSY`) not only
+ * while a process is still a live member, but also for a short window
+ * after that process has fully exited: charge migration/accounting
+ * teardown for the memory controller can lag process-exit by a handful of
+ * milliseconds under load. `stop()` only calls `cleanup()` once process
+ * termination is already confirmed, so any EBUSY here is this teardown
+ * race, not a leaked process -- retry briefly instead of leaving residue.
+ * Observed live: "Cloud Hypervisor cgroup residue remains after cleanup"
+ * following a guest connectivity-probe failure and immediate teardown.
+ */
+const CGROUP_REMOVAL_RETRY_INTERVAL_MS = 100;
+const CGROUP_REMOVAL_MAX_WAIT_MS = 5_000;
 
 export interface CloudHypervisorCgroupDependencies {
   mkdir(directory: string): Promise<unknown>;
@@ -185,12 +241,14 @@ export interface CloudHypervisorCgroupDependencies {
    * controller/interface files are virtual and cannot be `unlink()`ed, so
    * this must be a plain `rmdir`, not a recursive tree removal. */
   rmdir(directory: string): Promise<void>;
+  sleep(milliseconds: number): Promise<void>;
 }
 
 const defaultCgroupDependencies: CloudHypervisorCgroupDependencies = {
   mkdir: (directory) => fs.mkdir(directory, { recursive: true, mode: 0o700 }),
   writeFile: (filePath, contents) => fs.writeFile(filePath, contents),
   rmdir: (directory) => fs.rmdir(directory),
+  sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 };
 
 /**
@@ -228,7 +286,7 @@ export class CloudHypervisorCgroup {
     this.created = true;
 
     const memoryMaxBytes = (this.limits.memoryMib + CGROUP_MEMORY_HEADROOM_MIB) * 1024 * 1024;
-    const cpuQuotaUs = this.limits.vcpuCount * CGROUP_V2_PERIOD_US;
+    const cpuQuotaUs = this.limits.vcpuCount * CGROUP_V2_PERIOD_US + CGROUP_CPU_HEADROOM_QUOTA_US;
     await this.dependencies.writeFile(path.join(this.cgroupPath, 'memory.max'), String(memoryMaxBytes));
     await this.dependencies.writeFile(
       path.join(this.cgroupPath, 'cpu.max'),
@@ -246,8 +304,22 @@ export class CloudHypervisorCgroup {
 
   async cleanup(): Promise<void> {
     if (!this.created) return;
-    await this.dependencies.rmdir(this.cgroupPath);
-    this.created = false;
+    const deadline = Date.now() + CGROUP_REMOVAL_MAX_WAIT_MS;
+    for (;;) {
+      try {
+        await this.dependencies.rmdir(this.cgroupPath);
+        this.created = false;
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        // Retry both EBUSY and ENOTEMPTY: different kernel/cgroup-v2
+        // versions have been observed to report either errno for this
+        // same "a process only just exited, controller teardown hasn't
+        // fully settled yet" race.
+        if ((code !== 'EBUSY' && code !== 'ENOTEMPTY') || Date.now() >= deadline) throw error;
+        await this.dependencies.sleep(CGROUP_REMOVAL_RETRY_INTERVAL_MS);
+      }
+    }
   }
 
   private async enableControllers(directory: string): Promise<void> {

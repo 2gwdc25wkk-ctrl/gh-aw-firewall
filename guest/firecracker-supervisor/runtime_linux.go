@@ -115,8 +115,14 @@ func mountProc() error {
 	return nil
 }
 
+// syncFilesystems is a package-level indirection over syscall.Sync so the
+// shutdown request handler's ordering (sync happens-before acknowledging
+// the request to the host) can be verified in a unit test without
+// depending on real kernel state.
+var syncFilesystems = syscall.Sync
+
 func shutdownGuest(config bootConfig) error {
-	syscall.Sync()
+	syncFilesystems()
 	if err := syscall.Unmount(config.WorkspaceMount, 0); err != nil {
 		return fmt.Errorf("unmount workspace: %w", err)
 	}
@@ -124,6 +130,15 @@ func shutdownGuest(config bootConfig) error {
 		return fmt.Errorf("power off guest: %w", err)
 	}
 	return nil
+}
+
+const workspaceFilesystemType = "ext4"
+
+// workspaceMountArgs computes the syscall.Mount() arguments for the
+// workspace device. Split out from mountWorkspace so it can be unit-tested
+// without requiring root/CAP_SYS_ADMIN to actually perform a mount.
+func workspaceMountArgs(config bootConfig) (source, target, fstype string, flags uintptr) {
+	return config.WorkspaceDevice, config.WorkspaceMount, workspaceFilesystemType, 0
 }
 
 func mountWorkspace(config bootConfig) error {
@@ -137,7 +152,19 @@ func mountWorkspace(config bootConfig) error {
 	if err := os.MkdirAll(config.WorkspaceMount, 0755); err != nil {
 		return fmt.Errorf("create workspace mount: %w", err)
 	}
-	if err := syscall.Mount(config.WorkspaceDevice, config.WorkspaceMount, "", 0, ""); err != nil {
+	// The workspace image is always formatted as ext4 by
+	// MicrovmWorkspaceImage (mkfs -t ext4; see src/microvm/workspace.ts),
+	// matching the root filesystem's `rootfstype=ext4` kernel cmdline
+	// parameter. An empty fstype string is only valid for bind/remount
+	// mounts (MS_BIND/MS_REMOUNT); passing it here for a fresh mount from a
+	// raw block device instead failed with ENODEV ("no such device"),
+	// which made this supervisor's init process return an error and the
+	// kernel panic with "Attempted to kill init!" on every single guest
+	// boot. Discovered via live-KVM validation (a genuine, pre-existing
+	// defect shared by both the Firecracker and Cloud Hypervisor backends,
+	// since they share this guest supervisor binary).
+	source, target, fstype, flags := workspaceMountArgs(config)
+	if err := syscall.Mount(source, target, fstype, flags, ""); err != nil {
 		return fmt.Errorf("mount workspace: %w", err)
 	}
 	return nil
@@ -227,6 +254,20 @@ func serveClient(connection *os.File, config bootConfig) bool {
 		case "resize":
 			s.sendError(frame.RequestID, errorTTYUnsupported, "TTY and resize are unsupported")
 		case "shutdown":
+			// syncFilesystems (syscall.Sync in production) must complete
+			// *before* acknowledging this request: once the host receives
+			// "shutting_down" it proceeds to call Cloud Hypervisor's own
+			// vm.shutdown/vmm.shutdown API, which can tear the VM down
+			// quickly enough to race ahead of shutdownGuest()'s own
+			// sync()+unmount() below (that pair only runs *after*
+			// serveClient returns to its caller). Any writes still sitting
+			// in this guest's page cache -- e.g. the agent command's own
+			// workspace writes, which have no reason to have called
+			// fsync() themselves -- could be lost before they ever reach
+			// the workspace block device, silently discarding the user's
+			// own command output from the host-side copy-back. Sync is
+			// safe to call unconditionally and idempotently here.
+			syncFilesystems()
 			_ = s.send(newFrame("shutting_down", frame.RequestID))
 			s.stopActive()
 			return true

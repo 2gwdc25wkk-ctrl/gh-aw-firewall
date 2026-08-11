@@ -295,6 +295,234 @@ describe('Cloud Hypervisor runtime backend', () => {
     expect(manager.stop).toHaveBeenCalledTimes(1);
   });
 
+  it('marks itself stopped after a successful internal cleanup on startup failure, so a later stop() call is a no-op', async () => {
+    // Regression test: main-action.ts's cleanup handler unconditionally
+    // calls backend.stop() again after any startup failure. Without
+    // marking `stopped` after the internal cleanup here already
+    // succeeded, that second call re-invoked manager.stop() a second
+    // time -- harmless on its own (network/cgroup are already cleared),
+    // but wasteful and a source of confusion when diagnosing failures.
+    const { manager, deps } = harness();
+    manager.execute.mockReset().mockResolvedValue({
+      requestId: 'probe', exitCode: 41, signal: null, timedOut: false,
+    });
+    const backend = new CloudHypervisorRuntimeBackend(config(), deps);
+
+    await expect(backend.start('/tmp/awf', ['github.com']))
+      .rejects.toThrow(/connectivity probe failed/);
+    expect(manager.stop).toHaveBeenCalledTimes(1);
+
+    await backend.stop();
+    expect(manager.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('collects diagnostics at most once even if called again after teardown, avoiding a clobbered snapshot', async () => {
+    // Regression test: main-action.ts's cleanup handler unconditionally
+    // calls backend.collectDiagnostics() during shutdown, regardless of
+    // whether start()'s own failure path already collected diagnostics
+    // via the beforeCleanup hook (before stop() tore down the
+    // network/cgroup/run directory). A second, post-teardown call would
+    // overwrite that earlier, more useful snapshot with an
+    // empty/unavailable one -- discovered via live-KVM validation
+    // (network-diagnostics.txt regressed to "network namespace not set
+    // up" after a redundant second collectDiagnostics() call).
+    const { manager, deps } = harness();
+    manager.execute.mockReset().mockResolvedValue({
+      requestId: 'probe', exitCode: 41, signal: null, timedOut: false,
+    });
+    manager.stop.mockImplementation(async (options?: { beforeCleanup?: () => Promise<void> }) => {
+      await options?.beforeCleanup?.();
+    });
+    const backend = new CloudHypervisorRuntimeBackend(
+      config({ diagnosticLogs: true } as Partial<WrapperConfig>),
+      deps,
+    );
+
+    await expect(backend.start('/tmp/awf', ['github.com']))
+      .rejects.toThrow(/connectivity probe failed/);
+    expect(manager.collectDiagnostics).toHaveBeenCalledTimes(1);
+
+    // Simulates main-action.ts's cleanup handler calling this again.
+    await backend.collectDiagnostics();
+    expect(manager.collectDiagnostics).toHaveBeenCalledTimes(1);
+  });
+
+  it('includes captured guest stdout/stderr in the readiness probe failure message', async () => {
+    // Regression test: a bare exit code alone doesn't say which leg of the
+    // compound nc-then-wget probe command failed or why. Capture (bounded)
+    // stdout/stderr from the probe execution and surface it in the thrown
+    // error for faster live-KVM triage.
+    const { manager, deps } = harness();
+    manager.execute.mockReset().mockImplementationOnce(async (request) => {
+      request.stderr?.write('wget: can\'t connect to remote host: Connection refused\n');
+      return { requestId: 'probe', exitCode: 1, signal: null, timedOut: false };
+    });
+    const backend = new CloudHypervisorRuntimeBackend(config(), deps);
+
+    await expect(backend.start('/tmp/awf', ['github.com'])).rejects.toThrow(
+      /connectivity probe failed with exit code 1 \(stderr: wget: can't connect to remote host: Connection refused\)/,
+    );
+  });
+
+  it('includes captured guest network state (ip addr/route) in the readiness probe failure message', async () => {
+    // Regression test: a probe failure with empty stdout/stderr (BusyBox
+    // nc/wget are often silent on connection failure) still needs enough
+    // context to diagnose live-KVM guest networking issues. A best-effort
+    // follow-up `ip addr show; ip route show` call is issued only after
+    // the main probe fails, and its output is folded into the error.
+    const { manager, deps } = harness();
+    manager.execute.mockReset()
+      .mockImplementationOnce(async () => ({
+        requestId: 'probe', exitCode: 1, signal: null, timedOut: false,
+      }))
+      .mockImplementationOnce(async (request) => {
+        request.stdout?.write('1: lo: <LOOPBACK,UP>\n---\ndefault via 100.115.75.109 dev eth0\n');
+        return { requestId: 'netdiag', exitCode: 0, signal: null, timedOut: false };
+      });
+    const backend = new CloudHypervisorRuntimeBackend(config(), deps);
+
+    await expect(backend.start('/tmp/awf', ['github.com'])).rejects.toThrow(
+      /guest network state: 1: lo: <LOOPBACK,UP>/,
+    );
+    expect(manager.execute).toHaveBeenCalledTimes(2);
+    const netDiagCall = manager.execute.mock.calls[1][0];
+    expect(netDiagCall.argv).toEqual(['/bin/sh', '-c', 'ip addr show; echo ---; ip route show; echo ---; ip neigh show']);
+  });
+
+  it('probes guest connectivity with nc/wget instead of curl, which the BusyBox guest rootfs lacks', async () => {
+    // Regression test: the guest rootfs is a minimal BusyBox userland (see
+    // guest/cloud-hypervisor/build-test-artifacts.sh) with no `curl`
+    // binary. The original probe shelled out to `curl`, which exits 127
+    // ("command not found") on this rootfs — discovered via live-KVM
+    // validation, where every guest boot up through vsock readiness
+    // succeeded but probeGuestConnectivity() then failed with exit 127.
+    const { manager, deps } = harness();
+    manager.execute.mockReset().mockResolvedValueOnce({
+      requestId: 'probe', exitCode: 0, signal: null, timedOut: false,
+    }).mockResolvedValueOnce({
+      requestId: 'agent', exitCode: 0, signal: null, timedOut: false,
+    });
+    const backend = new CloudHypervisorRuntimeBackend(
+      config({ enableApiProxy: true } as Partial<WrapperConfig>),
+      deps,
+    );
+
+    await backend.start('/tmp/awf', ['github.com']);
+
+    const probeCall = manager.execute.mock.calls[0][0];
+    expect(probeCall.argv[0]).toBe('/bin/sh');
+    expect(probeCall.argv[1]).toBe('-c');
+    const script = probeCall.argv[2] as string;
+    expect(script).not.toContain('curl');
+    expect(script).toContain('nc -v -z');
+    expect(script).toContain('wget');
+    // The API proxy request must bypass the guest's HTTP(S)_PROXY env vars
+    // (it targets the sidecar directly, not through Squid) and must only
+    // run if the Squid reachability check already succeeded.
+    expect(script).toMatch(/nc -v -z .* && \(unset .*HTTP_PROXY.*; wget /);
+  });
+
+  it('uses generous nc/wget timeouts and an overall probe budget tolerant of nested-KVM scheduling delays', async () => {
+    // Regression test: live-KVM validation confirmed (via captured host
+    // network diagnostics) that the tap/nftables/vnet_hdr path was fully
+    // correct -- Squid's response packets reached the host-side veth --
+    // yet the probe still timed out, because the guest's own vCPU was
+    // scheduled so rarely under nested virtualization on GitHub-hosted
+    // runners that a short-lived `nc -z -w 5` couldn't get enough real
+    // CPU time to complete its connect() within that 5-second budget.
+    // Raised both the per-command timeouts and the overall exec budget
+    // to match the same generous, nested-KVM-tolerant convention used for
+    // guest boot readiness (see CLOUD_HYPERVISOR_GUEST_READY_MAX_WAIT_MS).
+    const { manager, deps } = harness();
+    manager.execute.mockReset().mockResolvedValueOnce({
+      requestId: 'probe', exitCode: 0, signal: null, timedOut: false,
+    }).mockResolvedValueOnce({
+      requestId: 'agent', exitCode: 0, signal: null, timedOut: false,
+    });
+    const backend = new CloudHypervisorRuntimeBackend(
+      config({ enableApiProxy: true } as Partial<WrapperConfig>),
+      deps,
+    );
+
+    await backend.start('/tmp/awf', ['github.com']);
+
+    const probeCall = manager.execute.mock.calls[0][0];
+    const script = probeCall.argv[2] as string;
+    expect(script).toContain('nc -v -z -w 60');
+    expect(script).toContain('wget -q -T 20');
+    expect(probeCall.timeoutMs).toBe(90_000);
+  });
+
+  it('passes a beforeCleanup diagnostics hook to stop() on a startup failure, when --diagnostic-logs is set', async () => {
+    // Regression test: manager.stop() deletes the private run directory
+    // (including the guest serial console log) as its final step, but
+    // Cloud Hypervisor also does not flush buffered guest serial console
+    // output until its process actually exits. So collectDiagnostics()
+    // must run as a hook *inside* stop() — after process termination is
+    // confirmed (flushing buffers) but before the run directory is
+    // removed — rather than either before or after stop() entirely.
+    // Discovered via live-KVM validation: a guest boot failure produced
+    // completely empty diagnostics artifacts when collected too early.
+    const { manager, deps } = harness();
+    const order: string[] = [];
+    manager.collectDiagnostics.mockImplementation(async () => {
+      order.push('collect-diagnostics');
+    });
+    manager.stop.mockImplementation(async (options?: { beforeCleanup?: () => Promise<void> }) => {
+      order.push('stop-process-terminated');
+      await options?.beforeCleanup?.();
+      order.push('stop-directory-removed');
+    });
+    manager.startInstance.mockRejectedValue(new Error('guest disconnected before readiness'));
+    const backend = new CloudHypervisorRuntimeBackend(
+      config({ diagnosticLogs: true } as Partial<WrapperConfig>),
+      deps,
+    );
+
+    await expect(backend.start('/tmp/awf', ['github.com']))
+      .rejects.toThrow('guest disconnected before readiness');
+    expect(manager.collectDiagnostics).toHaveBeenCalledTimes(1);
+    expect(manager.stop).toHaveBeenCalledTimes(1);
+    expect(manager.stop).toHaveBeenCalledWith(
+      expect.objectContaining({ beforeCleanup: expect.any(Function) }),
+    );
+    expect(order).toEqual(['stop-process-terminated', 'collect-diagnostics', 'stop-directory-removed']);
+  });
+
+  it('does not pass a diagnostics hook to stop() on a startup failure when --diagnostic-logs is unset', async () => {
+    const { manager, deps } = harness();
+    manager.startInstance.mockRejectedValue(new Error('guest disconnected before readiness'));
+    const backend = new CloudHypervisorRuntimeBackend(
+      config({ diagnosticLogs: false } as Partial<WrapperConfig>),
+      deps,
+    );
+
+    await expect(backend.start('/tmp/awf', ['github.com']))
+      .rejects.toThrow('guest disconnected before readiness');
+    expect(manager.collectDiagnostics).not.toHaveBeenCalled();
+    expect(manager.stop).toHaveBeenCalledTimes(1);
+    expect(manager.stop).toHaveBeenCalledWith(
+      expect.objectContaining({ beforeCleanup: undefined }),
+    );
+  });
+
+  it('surfaces the original startup error even if pre-cleanup diagnostics collection itself fails', async () => {
+    const { manager, deps } = harness();
+    manager.collectDiagnostics.mockRejectedValue(new Error('diagnostics write failed'));
+    manager.stop.mockImplementation(async (options?: { beforeCleanup?: () => Promise<void> }) => {
+      await options?.beforeCleanup?.();
+    });
+    manager.startInstance.mockRejectedValue(new Error('guest disconnected before readiness'));
+    const backend = new CloudHypervisorRuntimeBackend(
+      config({ diagnosticLogs: true } as Partial<WrapperConfig>),
+      deps,
+    );
+
+    await expect(backend.start('/tmp/awf', ['github.com']))
+      .rejects.toThrow('guest disconnected before readiness');
+    expect(manager.stop).toHaveBeenCalledTimes(1);
+  });
+
   it('fails closed when manager readiness or startup cleanup is unavailable', async () => {
     const missingIp = harness();
     Reflect.set(missingIp.manager, 'guestIp', undefined);
@@ -434,6 +662,21 @@ describe('Cloud Hypervisor runtime backend', () => {
       }),
       infrastructure(),
     )).toThrow(/Refusing to pass a real provider credential/);
+  });
+
+  it('sets lowercase http_proxy so BusyBox wget honors the proxy for https:// too', () => {
+    // Regression coverage: a live-KVM connectivity investigation found
+    // BusyBox wget reads only the lowercase "http_proxy" env var for
+    // every protocol it supports, including https -- there is no
+    // https_proxy check anywhere in its proxy-detection logic. Without
+    // this (the shared container-runtime environment intentionally
+    // omits it, for curl/Ubuntu-specific reasons that don't apply to
+    // this guest's BusyBox wget), wget silently falls back to a direct,
+    // unproxied connection attempt, which fails outright since guest DNS
+    // is unconditionally blocked by network policy.
+    const environment = buildCloudHypervisorGuestEnvironment(config(), infrastructure());
+
+    expect(environment.http_proxy).toBe('http://172.30.0.10:3128');
   });
 
   it('rejects unsupported strict-security and topology combinations', () => {

@@ -230,6 +230,22 @@ describe('CloudHypervisorManager', () => {
     }));
     expect(client.vmCreate).not.toHaveBeenCalledWith(expect.objectContaining({ vsock: expect.anything() }));
     expect(client.ping).toHaveBeenCalledTimes(1);
+    // Regression test: Cloud Hypervisor defaults all three offloads to
+    // enabled, but this network path is a fully-software bridge/veth/tap
+    // chain with no real NIC downstream to finish partially-offloaded
+    // frames. Live-KVM validation showed guest-to-Squid forward traffic
+    // being accepted by nftables (visible via its per-rule counters) but
+    // the return path never matching the established/related accept
+    // rule -- disabling all three offloads removes offload-related
+    // packet malformation as a possible cause, explicitly rather than
+    // relying on Cloud Hypervisor's own defaults.
+    expect(client.vmCreate).toHaveBeenCalledWith(expect.objectContaining({
+      net: [expect.objectContaining({
+        offload_tso: false,
+        offload_ufo: false,
+        offload_csum: false,
+      })],
+    }));
     expect(deps.createCgroup).toHaveBeenCalledWith(
       expect.stringContaining('awf-cloud-hypervisor/run-1'),
       { memoryMib: 512, vcpuCount: 2 },
@@ -257,6 +273,7 @@ describe('CloudHypervisorManager', () => {
         infrastructureBridge: 'awfbr0',
         tapOwnerUid: 1000,
         tapOwnerGid: 1000,
+        tapVnetHdr: true,
       }),
       hostTools,
     );
@@ -431,6 +448,133 @@ describe('CloudHypervisorManager', () => {
     expect(order).toEqual(['extract']);
   });
 
+  it('retries the vsock connect on the guest-not-ready-yet boot race, with a fresh client each attempt', async () => {
+    // Regression test: Cloud Hypervisor's vsock-over-UDS multiplexer closes
+    // the host-facing connection immediately if the guest isn't yet
+    // listening on the target port, surfacing as "guest disconnected
+    // before readiness" even though vm.boot() itself succeeded — a real
+    // host/guest boot-timing race, not a fatal error. startInstance() must
+    // retry with a fresh client (MicrovmVsockClient cannot reconnect a
+    // socket that already closed) until the guest is ready.
+    const readyFrame = {
+      version: 1,
+      type: 'ready' as const,
+      requestId: 'control',
+      capabilities: { stdin: true, tty: false, resize: false },
+    };
+    const failingClient = {
+      connect: jest.fn().mockRejectedValue(new Error('guest disconnected before readiness')),
+      destroy: jest.fn(),
+    };
+    const succeedingClient = {
+      connect: jest.fn().mockResolvedValue(readyFrame),
+      execute: jest.fn().mockResolvedValue({
+        requestId: 'command', exitCode: 0, signal: null, timedOut: false,
+      }),
+      shutdown: jest.fn().mockResolvedValue(undefined),
+      destroy: jest.fn(),
+    };
+    const createVsockClient = jest.fn()
+      .mockReturnValueOnce(failingClient)
+      .mockReturnValueOnce(failingClient)
+      .mockReturnValueOnce(succeedingClient);
+    const deps = dependencies({
+      launch: jest.fn().mockReturnValue(processMock()),
+      createWorkspaceImage: jest.fn().mockReturnValue({
+        prepare: jest.fn().mockResolvedValue({
+          rootfsImagePath: '/tmp/rootfs.ext4',
+          workspaceImagePath: '/tmp/workspace.ext4',
+        }),
+        extractAfterStop: jest.fn().mockResolvedValue(undefined),
+        cleanup: jest.fn().mockResolvedValue(undefined),
+      }),
+      createVsockClient,
+    });
+    const manager = new CloudHypervisorManager(
+      config(),
+      '/tmp/awf',
+      deps,
+      'retry-guest',
+      networkConfig(),
+      {
+        workspacePath: '/workspace',
+        homePath: '/home/runner',
+        supervisorBinaryPath: '/opt/awf-supervisor',
+        supervisorSha256: 'a'.repeat(64),
+      },
+    );
+
+    await manager.start();
+    await manager.startInstance();
+
+    expect(createVsockClient).toHaveBeenCalledTimes(3);
+    expect(failingClient.destroy).toHaveBeenCalledTimes(2);
+    expect(succeedingClient.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('tolerates guest boot taking well beyond the old 20-second budget under slow (nested-virtualization) conditions', async () => {
+    // Regression test: live-KVM validation on GitHub-hosted runners showed
+    // guest boot legitimately taking far longer than 20 seconds of real
+    // wall-clock time under nested virtualization (severe vCPU scheduling
+    // contention advanced the guest's own boot-log clock far slower than
+    // host wall-clock time). The vsock connect-retry budget was increased
+    // from 20s to 90s so a merely-slow (not hung/crashed) guest isn't
+    // aborted early. Simulate ~21s of wall-clock time elapsing per failed
+    // connect attempt and assert the retry loop survives several such
+    // cycles — which the old 20s budget could not have tolerated even
+    // once — before finally giving up once the 90s budget is exhausted.
+    const startedAtMs = 1_000_000;
+    let elapsedMs = 0;
+    jest.spyOn(Date, 'now').mockImplementation(() => startedAtMs + elapsedMs);
+    const failingClient = {
+      connect: jest.fn().mockImplementation(() => {
+        elapsedMs += 21_000;
+        return Promise.reject(new Error('guest disconnected before readiness'));
+      }),
+      destroy: jest.fn(),
+    };
+    const createVsockClient = jest.fn().mockReturnValue(failingClient);
+    const deps = dependencies({
+      launch: jest.fn().mockReturnValue(processMock()),
+      createWorkspaceImage: jest.fn().mockReturnValue({
+        prepare: jest.fn().mockResolvedValue({
+          rootfsImagePath: '/tmp/rootfs.ext4',
+          workspaceImagePath: '/tmp/workspace.ext4',
+        }),
+        extractAfterStop: jest.fn().mockResolvedValue(undefined),
+        cleanup: jest.fn().mockResolvedValue(undefined),
+      }),
+      createVsockClient,
+    });
+    const manager = new CloudHypervisorManager(
+      config(),
+      '/tmp/awf',
+      deps,
+      'retry-guest-slow-boot',
+      networkConfig(),
+      {
+        workspacePath: '/workspace',
+        homePath: '/home/runner',
+        supervisorBinaryPath: '/opt/awf-supervisor',
+        supervisorSha256: 'a'.repeat(64),
+      },
+    );
+
+    try {
+      await manager.start();
+      await expect(manager.startInstance()).rejects.toThrow(
+        'guest disconnected before readiness',
+      );
+
+      // A 20s budget would have given up after a single ~21s attempt; the
+      // 90s budget must retry at least four times (~84s simulated) before
+      // exhausting.
+      expect(createVsockClient.mock.calls.length).toBeGreaterThanOrEqual(4);
+    } finally {
+      (Date.now as jest.Mock).mockRestore();
+    }
+  });
+
   it('delegates guest cancellation, stdin, and resize only after readiness', async () => {
     const cold = new CloudHypervisorManager(
       config(),
@@ -545,6 +689,100 @@ describe('CloudHypervisorManager', () => {
     expect(cgroup.cleanup).toHaveBeenCalledTimes(1);
   });
 
+  it('invokes a beforeCleanup hook after process termination but before run-directory removal', async () => {
+    // Regression test: Cloud Hypervisor does not flush buffered guest
+    // serial console output until its process actually exits, so
+    // diagnostics collection must happen after process termination is
+    // confirmed but before stop() removes the run directory those
+    // diagnostic files live in. Discovered via live-KVM validation: a
+    // guest boot failure produced a completely empty serial console log
+    // when diagnostics were collected any earlier (e.g. before
+    // vmm.shutdown()/process termination).
+    const child = processMock();
+    const workspace = {
+      prepare: jest.fn().mockResolvedValue({
+        workspaceImagePath: '/tmp/prepared-workspace.ext4',
+        rootfsImagePath: '/tmp/prepared-rootfs.ext4',
+        imageBytes: 1024,
+        originalManifest: new Map(),
+      }),
+      extractAfterStop: jest.fn().mockResolvedValue(undefined),
+      cleanup: jest.fn().mockResolvedValue(undefined),
+    } as unknown as MicrovmWorkspaceImage;
+    const deps = dependencies({
+      launch: jest.fn().mockReturnValue(child),
+      createWorkspaceImage: jest.fn().mockReturnValue(workspace),
+    });
+    const manager = new CloudHypervisorManager(
+      config(),
+      '/tmp/awf',
+      deps,
+      'keep',
+      networkConfig(),
+      {
+        workspacePath: '/workspace',
+        homePath: '/home/runner',
+        supervisorBinaryPath: '/opt/awf-supervisor',
+        supervisorSha256: 'a'.repeat(64),
+      },
+    );
+    await manager.start();
+
+    const beforeCleanup = jest.fn(async () => {});
+
+    await manager.stop({ beforeCleanup });
+
+    expect(beforeCleanup).toHaveBeenCalledTimes(1);
+    expect(deps.rm).toHaveBeenCalledTimes(1);
+    // beforeCleanup must run strictly before the run-directory removal
+    // call (deps.rm), i.e. after process termination is confirmed but
+    // before diagnostic files are deleted.
+    const rmCallOrder = (deps.rm as jest.Mock).mock.invocationCallOrder[0];
+    expect(beforeCleanup.mock.invocationCallOrder[0]).toBeLessThan(rmCallOrder);
+  });
+
+  it('propagates a beforeCleanup hook failure alongside other stop() errors', async () => {
+    const child = processMock();
+    const workspace = {
+      prepare: jest.fn().mockResolvedValue({
+        workspaceImagePath: '/tmp/prepared-workspace.ext4',
+        rootfsImagePath: '/tmp/prepared-rootfs.ext4',
+        imageBytes: 1024,
+        originalManifest: new Map(),
+      }),
+      extractAfterStop: jest.fn().mockResolvedValue(undefined),
+      cleanup: jest.fn().mockResolvedValue(undefined),
+    } as unknown as MicrovmWorkspaceImage;
+    const deps = dependencies({
+      launch: jest.fn().mockReturnValue(child),
+      createWorkspaceImage: jest.fn().mockReturnValue(workspace),
+    });
+    const manager = new CloudHypervisorManager(
+      config(),
+      '/tmp/awf',
+      deps,
+      'keep',
+      networkConfig(),
+      {
+        workspacePath: '/workspace',
+        homePath: '/home/runner',
+        supervisorBinaryPath: '/opt/awf-supervisor',
+        supervisorSha256: 'a'.repeat(64),
+      },
+    );
+    await manager.start();
+
+    await expect(
+      manager.stop({
+        beforeCleanup: async () => {
+          throw new Error('diagnostics write failed');
+        },
+      }),
+    ).rejects.toThrow(/diagnostics write failed/);
+    // Run-directory removal must still proceed even if beforeCleanup fails.
+    expect(deps.rm).toHaveBeenCalledTimes(1);
+  });
+
   it('builds explicit supervisor boot cmdline with PCI-required root/interface naming', () => {
     const args = buildSupervisorBootArgs({
       runId: 'run',
@@ -565,6 +803,7 @@ describe('CloudHypervisorManager', () => {
       guestMac: '02:00:00:00:00:01',
       tapOwnerUid: 1000,
       tapOwnerGid: 1000,
+      tapVnetHdr: true,
       allowedEndpoints: [],
       networkInterface: { iface_id: 'eth0', host_dev_name: 'tap' },
     }, {
@@ -784,6 +1023,126 @@ describe('CloudHypervisorManager', () => {
     expect(deps.writeFile).toHaveBeenCalledWith(
       '/tmp/diagnostics/counters.json',
       expect.stringContaining('rx_bytes'),
+      { mode: 0o600 },
+    );
+  });
+
+  it('snapshots vm.info/vm.counters before any shutdown attempt, so collectDiagnostics() via beforeCleanup still has real data', async () => {
+    // Regression test: vm.info/vm.counters require the Cloud Hypervisor
+    // API socket to still be responsive. collectDiagnostics() usually
+    // runs via stop()'s beforeCleanup hook -- deliberately placed *after*
+    // process termination is confirmed (see that hook's own comment) so
+    // buffered serial console output has been flushed. But by that point
+    // the API socket is already closed (the process was just asked to
+    // exit), so a live vmCounters()/vmInfo() call there would always
+    // fail. stop() must snapshot both *before* it calls vmmShutdown(),
+    // and collectDiagnostics() must prefer that snapshot over a live call
+    // that can no longer succeed.
+    const child = processMock();
+    const deps = dependencies({ launch: jest.fn().mockReturnValue(child) });
+    const manager = new CloudHypervisorManager(
+      config(), '/tmp/awf', deps, 'vm-info-snapshot', networkConfig(),
+    );
+    const client = await manager.start();
+    await manager.startInstance();
+
+    let diagnosticsRanWithLiveClient = false;
+    await manager.stop({
+      beforeCleanup: async () => {
+        // Simulate collectDiagnostics() running here, as it does via the
+        // real beforeCleanup wiring in cloud-hypervisor-runtime-backend.ts.
+        await manager.collectDiagnostics('/tmp/diagnostics');
+        diagnosticsRanWithLiveClient = true;
+      },
+    });
+
+    expect(diagnosticsRanWithLiveClient).toBe(true);
+    // vmCounters/vmInfo were called exactly once each: during stop()'s
+    // pre-shutdown snapshot, not again (uselessly) from inside
+    // collectDiagnostics() after the client reference is already cleared.
+    expect(client.vmCounters).toHaveBeenCalledTimes(1);
+    expect(client.vmInfo).toHaveBeenCalledTimes(1);
+    expect(deps.writeFile).toHaveBeenCalledWith(
+      '/tmp/diagnostics/counters.json',
+      expect.stringContaining('rx_bytes'),
+      { mode: 0o600 },
+    );
+    expect(deps.writeFile).toHaveBeenCalledWith(
+      '/tmp/diagnostics/vm-info.json',
+      expect.not.stringMatching(/^null$/m),
+      { mode: 0o600 },
+    );
+  });
+
+  it('captures live network diagnostics (nft ruleset + interface counters) when the network lifecycle supports it', async () => {
+    // Regression test: a live-KVM connectivity failure investigation found
+    // that a bare probe exit code, and even the static network-plan.json,
+    // weren't enough to determine whether packets were being dropped by
+    // an nftables forward-chain rule or never reaching the tap at all.
+    // collectDiagnostics() must capture this live state (via the
+    // network lifecycle's optional captureDiagnostics()) while the
+    // namespace still exists.
+    const child = processMock();
+    const captureDiagnostics = jest.fn()
+      .mockResolvedValue('--- nft list ruleset ---\n(fake ruleset)\n');
+    const deps = dependencies({
+      launch: jest.fn().mockReturnValue(child),
+      createNetwork: jest.fn((plan) => ({
+        ...networkLifecycle(plan),
+        captureDiagnostics,
+      })),
+    });
+    const manager = new CloudHypervisorManager(
+      config(), '/tmp/awf', deps, 'net-diagnostics', networkConfig(),
+    );
+
+    await manager.start();
+    await manager.collectDiagnostics('/tmp/diagnostics');
+
+    expect(captureDiagnostics).toHaveBeenCalledTimes(1);
+    expect(deps.writeFile).toHaveBeenCalledWith(
+      '/tmp/diagnostics/network-diagnostics.txt',
+      '--- nft list ruleset ---\n(fake ruleset)\n\n',
+      { mode: 0o600 },
+    );
+  });
+
+  it('reports network diagnostics as unavailable when the lifecycle does not support capture, without throwing', async () => {
+    const child = processMock();
+    const deps = dependencies({ launch: jest.fn().mockReturnValue(child) });
+    const manager = new CloudHypervisorManager(
+      config(), '/tmp/awf', deps, 'net-diagnostics-unset', networkConfig(),
+    );
+
+    await manager.start();
+    await expect(manager.collectDiagnostics('/tmp/diagnostics')).resolves.toBeUndefined();
+
+    expect(deps.writeFile).toHaveBeenCalledWith(
+      '/tmp/diagnostics/network-diagnostics.txt',
+      expect.stringContaining('network namespace not set up'),
+      { mode: 0o600 },
+    );
+  });
+
+  it('falls back to a capture-failed message rather than throwing when captureDiagnostics itself rejects', async () => {
+    const child = processMock();
+    const deps = dependencies({
+      launch: jest.fn().mockReturnValue(child),
+      createNetwork: jest.fn((plan) => ({
+        ...networkLifecycle(plan),
+        captureDiagnostics: jest.fn().mockRejectedValue(new Error('ip netns exec failed')),
+      })),
+    });
+    const manager = new CloudHypervisorManager(
+      config(), '/tmp/awf', deps, 'net-diagnostics-fail', networkConfig(),
+    );
+
+    await manager.start();
+    await expect(manager.collectDiagnostics('/tmp/diagnostics')).resolves.toBeUndefined();
+
+    expect(deps.writeFile).toHaveBeenCalledWith(
+      '/tmp/diagnostics/network-diagnostics.txt',
+      expect.stringContaining('capture failed: ip netns exec failed'),
       { mode: 0o600 },
     );
   });

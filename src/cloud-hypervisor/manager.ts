@@ -25,7 +25,11 @@ import {
   MicrovmWorkspaceImage,
   type MicrovmWorkspaceImageConfig,
 } from '../microvm/workspace';
-import { CloudHypervisorApiClient } from './api-client';
+import {
+  CloudHypervisorApiClient,
+  type CloudHypervisorVmCounters,
+  type CloudHypervisorVmInfo,
+} from './api-client';
 import {
   CLOUD_HYPERVISOR_GUEST_CID,
   CloudHypervisorCgroup,
@@ -46,6 +50,31 @@ const CLOUD_HYPERVISOR_SERIAL_LOG_NAME = 'serial.log';
 const CLOUD_HYPERVISOR_CAPTURE_LIMIT_BYTES = 1024 * 1024;
 export const CLOUD_HYPERVISOR_GUEST_VSOCK_PORT = 52;
 const CLOUD_HYPERVISOR_GUEST_SHUTDOWN_GRACE_MS = 5_000;
+/**
+ * Cloud Hypervisor's vsock-over-UDS multiplexer closes the host-facing
+ * connection immediately (rather than blocking/retrying) if the guest
+ * isn't yet listening on the target vsock port when a `CONNECT <port>`
+ * handshake arrives — observed live as `startInstance()` failing with
+ * "guest disconnected before readiness" even on a successful `vm.boot()`.
+ * This is a real host/guest boot-timing race (kernel decompression +
+ * supervisor startup take a variable, host-load-dependent amount of time),
+ * not a fatal error, so the connect is retried with a fresh client and a
+ * short backoff until the guest is actually ready or this budget elapses.
+ *
+ * The budget is deliberately generous (not a tight few-second timeout):
+ * live validation on GitHub-hosted Ubuntu runners showed the guest kernel's
+ * own internal clock advancing far slower than host wall-clock time during
+ * early PCI/virtio device enumeration (e.g. ~9-20s of host wall-clock time
+ * elapsing while the guest's own boot log timestamps were still under 1s)
+ * — consistent with the extra scheduling overhead of nested virtualization
+ * on these runners (Cloud Hypervisor itself logs running under a
+ * "Microsoft Hv" nested hypervisor there). A short budget here would abort
+ * a guest that is simply slow to be scheduled, not actually hung or
+ * crashed. This matches the smoke test's own boot-readiness ceiling
+ * (`BOOT_READINESS_CEILING_MS` in cloud-hypervisor-live-smoke.sh).
+ */
+const CLOUD_HYPERVISOR_GUEST_READY_RETRY_INTERVAL_MS = 250;
+const CLOUD_HYPERVISOR_GUEST_READY_MAX_WAIT_MS = 90_000;
 /**
  * Private run-directory root, deliberately **outside** `workDir`.
  *
@@ -243,6 +272,11 @@ export class CloudHypervisorManager {
   private cgroup: CloudHypervisorCgroup | undefined;
   private networkPlan: MicrovmNetworkPlan | undefined;
   private instanceStarted = false;
+  // Snapshotted in stop(), before any shutdown attempt, since the API
+  // socket becomes unresponsive once the process is asked to exit --
+  // see the comment at the top of stop() for why this ordering matters.
+  private lastVmInfo: CloudHypervisorVmInfo | undefined;
+  private lastVmCounters: CloudHypervisorVmCounters | undefined;
   private readonly stdoutCapture = new BoundedOutputCapture(CLOUD_HYPERVISOR_CAPTURE_LIMIT_BYTES);
   private readonly stderrCapture = new BoundedOutputCapture(CLOUD_HYPERVISOR_CAPTURE_LIMIT_BYTES);
 
@@ -280,6 +314,21 @@ export class CloudHypervisorManager {
         ...this.networkConfig,
         tapOwnerUid: identity.uid,
         tapOwnerGid: identity.gid,
+        // Cloud Hypervisor's own tap handling (Tap::open_named() in
+        // net_util/src/tap.rs) always re-opens the tap with
+        // IFF_VNET_HDR requested; the tap must be *created* with that
+        // feature available or the host and Cloud Hypervisor disagree
+        // on frame layout for the host-to-guest direction, and guest
+        // connectivity checks silently time out even though the
+        // guest's own outbound traffic (and the host-side veth/nft
+        // layer) works normally. Discovered via live-KVM validation:
+        // tap RX=10 packets (guest-to-host, unaffected) vs. TX=1 packet
+        // (host-to-guest, effectively stalled) despite response
+        // packets already having arrived on the host-side veth.
+        // Firecracker's own tap handling does not request
+        // IFF_VNET_HDR, so this is opted in here only, not changed for
+        // the shared default.
+        tapVnetHdr: true,
       });
       this.networkPlan = networkPlan;
       this.network = this.dependencies.createNetwork(networkPlan, artifacts.tools);
@@ -389,6 +438,7 @@ export class CloudHypervisorManager {
       runDirectory: this.paths.runDirectory,
       apiSocketPath: this.paths.apiSocketPath,
       vsockSocketPath: this.paths.vsockSocketPath,
+      tapName: networkPlan.tapName,
     });
     return {
       cpus: {
@@ -414,6 +464,20 @@ export class CloudHypervisorManager {
         id: 'net0',
         tap: networkPlan.networkInterface.host_dev_name,
         mac: networkPlan.networkInterface.guest_mac ?? '',
+        // Cloud Hypervisor defaults all three offloads to enabled. This
+        // entire network path is a fully-software bridge/veth/tap chain
+        // with no real NIC downstream to finish partially-offloaded
+        // (unchecksummed / not-yet-segmented) frames; live-KVM validation
+        // showed guest-to-Squid traffic being forwarded (visible in nft
+        // counters) but the return path never matching the
+        // established/related accept rule, with zero visibility into
+        // whether nftables' conntrack was marking replies as invalid.
+        // Disable all three explicitly rather than rely on Cloud
+        // Hypervisor's own defaults, removing offload-related packet
+        // malformation as a possible cause.
+        offload_tso: false,
+        offload_ufo: false,
+        offload_csum: false,
       }],
       rng: { src: '/dev/urandom' },
       serial: { mode: 'File' as const, file: this.paths.serialLogPath },
@@ -432,13 +496,41 @@ export class CloudHypervisorManager {
     await this.client.vmBoot();
     this.instanceStarted = true;
     if (this.guestConfig) {
-      this.guestClient = this.dependencies.createVsockClient(
-        this.paths.vsockSocketPath,
+      this.guestClient = await this.connectGuestWithRetry(
         this.guestConfig.vsockPort ?? CLOUD_HYPERVISOR_GUEST_VSOCK_PORT,
+      );
+    }
+  }
+
+  /**
+   * Connects to the guest supervisor over vsock, retrying on the
+   * "guest disconnected before readiness" boot-timing race documented on
+   * {@link CLOUD_HYPERVISOR_GUEST_READY_MAX_WAIT_MS} above. Each attempt
+   * uses a fresh client (MicrovmVsockClient does not support reconnecting
+   * a socket that already closed).
+   */
+  private async connectGuestWithRetry(port: number): Promise<MicrovmVsockClient> {
+    const deadline = Date.now() + CLOUD_HYPERVISOR_GUEST_READY_MAX_WAIT_MS;
+    let lastError: unknown;
+    do {
+      const client = this.dependencies.createVsockClient(
+        this.paths.vsockSocketPath,
+        port,
         this.config.apiTimeoutMs,
       );
-      await this.guestClient.connect();
-    }
+      try {
+        await client.connect();
+        return client;
+      } catch (error) {
+        lastError = error;
+        client.destroy();
+        if (Date.now() >= deadline) break;
+        await this.dependencies.sleep(CLOUD_HYPERVISOR_GUEST_READY_RETRY_INTERVAL_MS);
+      }
+    } while (Date.now() < deadline);
+    throw lastError instanceof Error
+      ? lastError
+      : new Error('Cloud Hypervisor guest vsock connection failed');
   }
 
   async execute(
@@ -478,9 +570,30 @@ export class CloudHypervisorManager {
     return this.guestClient.resize(columns, rows, requestId);
   }
 
-  async stop(options: { preserve?: boolean } = {}): Promise<void> {
+  async stop(options: { preserve?: boolean; beforeCleanup?: () => Promise<void> } = {}): Promise<void> {
     const errors: unknown[] = [];
     const instanceWasStarted = this.instanceStarted;
+    // vm.info/vm.counters require the Cloud Hypervisor API socket to
+    // still be responsive, which is only true *before* vmm.shutdown()/
+    // process termination below -- the opposite ordering constraint from
+    // serial console capture (which needs the process already exited to
+    // guarantee flushed output; see the beforeCleanup comment further
+    // down). Snapshot both here, before any shutdown attempt, so
+    // collectDiagnostics() (invoked later, via beforeCleanup, after the
+    // process has already exited) has a real, non-null snapshot to write
+    // instead of failing silently against an already-closed socket.
+    if (this.client && instanceWasStarted) {
+      try {
+        this.lastVmInfo = await this.client.vmInfo();
+      } catch {
+        this.lastVmInfo = undefined;
+      }
+      try {
+        this.lastVmCounters = await this.client.vmCounters();
+      } catch {
+        this.lastVmCounters = undefined;
+      }
+    }
     let guestShutdownAcknowledged = false;
     if (this.guestClient) {
       try {
@@ -556,6 +669,22 @@ export class CloudHypervisorManager {
     }
     this.process = undefined;
     this.client = undefined;
+
+    // Run any caller-supplied diagnostics collection now: the Cloud
+    // Hypervisor process is confirmed terminated (so any buffered guest
+    // serial console / log output has been flushed by process exit), but
+    // the run directory containing those files has not been removed yet
+    // (that happens below). Collecting diagnostics any earlier (e.g.
+    // before vmm.shutdown()/process termination above) can observe a
+    // still-empty serial console log, since Cloud Hypervisor does not
+    // guarantee flushing it before the process actually exits.
+    if (options.beforeCleanup) {
+      try {
+        await options.beforeCleanup();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
 
     if (this.workspace && instanceWasStarted) {
       try {
@@ -642,12 +771,28 @@ export class CloudHypervisorManager {
 
   async collectDiagnostics(directory: string): Promise<void> {
     await this.dependencies.mkdir(directory, { recursive: true, mode: 0o700 });
-    let counters: unknown = null;
-    if (this.client && this.instanceStarted) {
+    // Prefer the snapshot stop() takes *before* any shutdown attempt (see
+    // the comment at the top of stop()): by the time collectDiagnostics()
+    // runs via the beforeCleanup hook, the API socket is already
+    // unresponsive (process already asked to exit), so a live call here
+    // would just fail. Fall back to a live call only when this method is
+    // invoked directly, outside of stop() (e.g. --diagnostic-logs without
+    // a failure, or this method's own unit tests), where the client may
+    // still be genuinely reachable.
+    let counters: unknown = this.lastVmCounters ?? null;
+    if (counters === null && this.client && this.instanceStarted) {
       try {
         counters = await this.client.vmCounters();
       } catch {
         counters = null;
+      }
+    }
+    let vmInfo: unknown = this.lastVmInfo ?? null;
+    if (vmInfo === null && this.client && this.instanceStarted) {
+      try {
+        vmInfo = await this.client.vmInfo();
+      } catch {
+        vmInfo = null;
       }
     }
     const writeBounded = async (fileName: string, contents: Buffer): Promise<void> => {
@@ -669,9 +814,34 @@ export class CloudHypervisorManager {
       `${JSON.stringify(this.networkPlan ?? null, null, 2)}\n`,
       { mode: 0o600 },
     );
+    // Best-effort, read-only host-side network diagnostics (live nftables
+    // ruleset + interface counters), captured only while the namespace
+    // still exists (this method runs via stop()'s beforeCleanup hook,
+    // before network.cleanup() tears the namespace down). Helps diagnose
+    // a guest connectivity failure (dropped by a forward-chain rule vs.
+    // never reaching the tap at all) without guessing from the guest
+    // side alone.
+    let networkDiagnostics = '(network namespace not set up)';
+    if (this.network?.captureDiagnostics) {
+      try {
+        networkDiagnostics = await this.network.captureDiagnostics();
+      } catch (error) {
+        networkDiagnostics = `(capture failed: ${formatError(error)})`;
+      }
+    }
+    await this.dependencies.writeFile(
+      path.join(directory, 'network-diagnostics.txt'),
+      `${networkDiagnostics}\n`,
+      { mode: 0o600 },
+    );
     await this.dependencies.writeFile(
       path.join(directory, 'counters.json'),
       `${JSON.stringify(counters, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    await this.dependencies.writeFile(
+      path.join(directory, 'vm-info.json'),
+      `${JSON.stringify(vmInfo, null, 2)}\n`,
       { mode: 0o600 },
     );
     await this.dependencies.writeFile(

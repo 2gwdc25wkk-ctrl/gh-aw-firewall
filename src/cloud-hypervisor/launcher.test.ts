@@ -16,7 +16,7 @@ describe('buildCloudHypervisorLaunchCommand', () => {
     logFilePath: '/run/awf/cloud-hypervisor.log',
   };
 
-  it('joins the namespace, drops privileges but retains the kvm group, then execs Cloud Hypervisor with no shell', () => {
+  it('joins the namespace, drops privileges but retains the kvm group and CAP_NET_ADMIN, then execs Cloud Hypervisor with no shell', () => {
     const result = buildCloudHypervisorLaunchCommand(baseOptions);
     expect(result.command).toBe('/usr/sbin/ip');
     expect(result.args).toEqual([
@@ -26,8 +26,9 @@ describe('buildCloudHypervisorLaunchCommand', () => {
       '--regid=1000',
       '--groups=978',
       '--no-new-privs',
-      '--inh-caps=-all',
-      '--bounding-set=-all',
+      '--inh-caps=-all,+net_admin',
+      '--bounding-set=-all,+net_admin',
+      '--ambient-caps=+net_admin',
       '--',
       '/opt/cloud-hypervisor',
       '--api-socket', 'path=/run/awf/api.socket',
@@ -60,7 +61,7 @@ describe('buildCloudHypervisorLaunchCommand', () => {
 });
 
 describe('computeCloudHypervisorLandlockRules', () => {
-  it('restricts the VMM to exactly the staged paths plus required device nodes', () => {
+  it('restricts the VMM to exactly the staged paths plus required device nodes and TAP sysfs entry', () => {
     const rules = computeCloudHypervisorLandlockRules({
       kernelPath: '/run/awf/kernel',
       rootfsPath: '/run/awf/rootfs.ext4',
@@ -68,6 +69,7 @@ describe('computeCloudHypervisorLandlockRules', () => {
       runDirectory: '/run/awf/run',
       apiSocketPath: '/run/awf/run/api.socket',
       vsockSocketPath: '/run/awf/run/vsock.socket',
+      tapName: 'fctabc123',
     });
 
     expect(rules).toEqual([
@@ -76,6 +78,7 @@ describe('computeCloudHypervisorLandlockRules', () => {
       { path: '/run/awf/run', access: 'rw' },
       { path: '/dev/kvm', access: 'rw' },
       { path: '/dev/net/tun', access: 'rw' },
+      { path: '/sys/class/net/fctabc123', access: 'r' },
       { path: '/run/awf/workspace.ext4', access: 'rw' },
     ]);
   });
@@ -87,9 +90,28 @@ describe('computeCloudHypervisorLandlockRules', () => {
       runDirectory: '/run/awf/run',
       apiSocketPath: '/run/awf/run/api.socket',
       vsockSocketPath: '/run/awf/run/vsock.socket',
+      tapName: 'fctabc123',
     });
 
     expect(rules.some((rule) => rule.path.includes('workspace'))).toBe(false);
+  });
+
+  it('grants read access to the TAP sysfs directory so tun_flags is readable under Landlock', () => {
+    // Regression test: /sys/class/net/<tap>/tun_flags is a world-readable
+    // (0444) kernel sysfs attribute with no capability requirement of its
+    // own, but Landlock still blocks the read if the path isn't in the
+    // allowlist — observed live as vm.boot failing with "Failed to read
+    // the TAP flags from sysfs: Permission denied".
+    const rules = computeCloudHypervisorLandlockRules({
+      kernelPath: '/run/awf/kernel',
+      rootfsPath: '/run/awf/rootfs.ext4',
+      runDirectory: '/run/awf/run',
+      apiSocketPath: '/run/awf/run/api.socket',
+      vsockSocketPath: '/run/awf/run/vsock.socket',
+      tapName: 'fctabc123',
+    });
+
+    expect(rules).toContainEqual({ path: '/sys/class/net/fctabc123', access: 'r' });
   });
 });
 
@@ -98,11 +120,13 @@ describe('CloudHypervisorCgroup', () => {
     mkdir: jest.Mock;
     writeFile: jest.Mock;
     rmdir: jest.Mock;
+    sleep: jest.Mock;
   } {
     return {
       mkdir: jest.fn().mockResolvedValue(undefined),
       writeFile: jest.fn().mockResolvedValue(undefined),
       rmdir: jest.fn().mockResolvedValue(undefined),
+      sleep: jest.fn().mockResolvedValue(undefined),
     };
   }
 
@@ -166,7 +190,9 @@ describe('CloudHypervisorCgroup', () => {
     );
     expect(deps.writeFile).toHaveBeenCalledWith(
       '/sys/fs/cgroup/awf-cloud-hypervisor/run-1/cpu.max',
-      '200000 100000',
+      // (2 vCPUs * 100000us/period) + 100000us fixed VMM-thread headroom
+      // (I/O, virtio device emulation, API) -- see CGROUP_CPU_HEADROOM_QUOTA_US.
+      '300000 100000',
     );
     expect(deps.writeFile).toHaveBeenCalledWith(
       '/sys/fs/cgroup/awf-cloud-hypervisor/run-1/pids.max',
@@ -194,5 +220,70 @@ describe('CloudHypervisorCgroup', () => {
     await cgroup.cleanup();
     expect(deps.rmdir).toHaveBeenCalledWith('/sys/fs/cgroup/awf-cloud-hypervisor/run-1');
     expect(deps.rmdir).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries cleanup on EBUSY (cgroup v2 teardown race) until it succeeds', async () => {
+    // Regression test: live-KVM validation observed "Cloud Hypervisor
+    // cgroup residue remains after cleanup" after a guest-connectivity
+    // failure led to immediate teardown. cgroup v2 can reject rmdir()
+    // with EBUSY for a brief window after a process exits (memory
+    // controller charge-migration teardown lags process-exit slightly),
+    // even though stop() only calls cleanup() once process termination is
+    // already confirmed. Retry briefly instead of leaving residue.
+    const deps = dependencies();
+    const ebusy = Object.assign(new Error('rmdir failed'), { code: 'EBUSY' });
+    deps.rmdir
+      .mockRejectedValueOnce(ebusy)
+      .mockRejectedValueOnce(ebusy)
+      .mockResolvedValueOnce(undefined);
+    const cgroup = new CloudHypervisorCgroup(
+      '/sys/fs/cgroup/awf-cloud-hypervisor/run-1',
+      { memoryMib: 512, vcpuCount: 2 },
+      deps,
+    );
+    await cgroup.setup();
+
+    await cgroup.cleanup();
+
+    expect(deps.rmdir).toHaveBeenCalledTimes(3);
+    expect(deps.sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives up and surfaces the error once EBUSY persists past the retry budget', async () => {
+    const deps = dependencies();
+    const ebusy = Object.assign(new Error('rmdir failed'), { code: 'EBUSY' });
+    let now = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    deps.rmdir.mockImplementation(async () => {
+      now += 2_000; // simulate elapsed time exceeding the retry budget
+      throw ebusy;
+    });
+    const cgroup = new CloudHypervisorCgroup(
+      '/sys/fs/cgroup/awf-cloud-hypervisor/run-1',
+      { memoryMib: 512, vcpuCount: 2 },
+      deps,
+    );
+    await cgroup.setup();
+
+    try {
+      await expect(cgroup.cleanup()).rejects.toThrow('rmdir failed');
+    } finally {
+      (Date.now as jest.Mock).mockRestore();
+    }
+  });
+
+  it('does not retry and immediately surfaces non-EBUSY cleanup errors', async () => {
+    const deps = dependencies();
+    deps.rmdir.mockRejectedValue(Object.assign(new Error('permission denied'), { code: 'EACCES' }));
+    const cgroup = new CloudHypervisorCgroup(
+      '/sys/fs/cgroup/awf-cloud-hypervisor/run-1',
+      { memoryMib: 512, vcpuCount: 2 },
+      deps,
+    );
+    await cgroup.setup();
+
+    await expect(cgroup.cleanup()).rejects.toThrow('permission denied');
+    expect(deps.rmdir).toHaveBeenCalledTimes(1);
+    expect(deps.sleep).not.toHaveBeenCalled();
   });
 });
