@@ -23,8 +23,10 @@ const DEFAULT_READINESS_TIMEOUT_MS = 120_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 const RETRY_DELAY_MS = 500;
 const MCP_PROTOCOL_VERSION = '2025-06-18';
-const ENCLAVE_MCP_OPERATION_TIMEOUT_SECONDS = Math.max(...TIMING_BUCKETS_MS) / 1_000 + 30;
 const ENCLAVE_MCP_TRANSPORT_ALLOWANCE_SECONDS = 30;
+const ENCLAVE_MCP_TOOL_TIMEOUT_SECONDS =
+  Math.max(...TIMING_BUCKETS_MS) / 1_000 + ENCLAVE_MCP_TRANSPORT_ALLOWANCE_SECONDS;
+const ENCLAVE_MCP_OPERATION_TIMEOUT_SECONDS = ENCLAVE_MCP_TOOL_TIMEOUT_SECONDS;
 
 interface EnclaveGatewayContract {
   capability: string;
@@ -124,17 +126,6 @@ function expectedTools(config: WrapperConfig): ReadonlyArray<Record<string, unkn
   return tools;
 }
 
-function enclaveToolTimeout(config: WrapperConfig): number {
-  const timeouts = [
-    config.enclaves?.script?.timeout,
-    config.enclaves?.agent?.timeout,
-  ].filter((value): value is number => value !== undefined);
-  if (timeouts.length === 0) {
-    throw new Error('Cannot derive an mcpg tool timeout without a keyed enclave executor');
-  }
-  return Math.max(...timeouts) + ENCLAVE_MCP_TRANSPORT_ALLOWANCE_SECONDS;
-}
-
 /**
  * Machine-readable compiler handoff. This intentionally contains only the
  * static upstream route and environment-variable names, never the capability.
@@ -151,7 +142,10 @@ export function buildEnclaveMcpgUpstreamContract(config: WrapperConfig): Enclave
       headers: { Authorization: 'Bearer ' + '$' + `{${ENCLAVE_MCP_CAPABILITY_ENV}}` },
       tools: expectedTools(config).map((tool) => String(tool.name)),
       connectTimeout: 120,
-      toolTimeout: enclaveToolTimeout(config),
+      // Execution, result validation, container/workspace cleanup, and
+      // disclosure padding all complete before the response. Any configured
+      // executor timeout can therefore reach the final fixed timing bucket.
+      toolTimeout: ENCLAVE_MCP_TOOL_TIMEOUT_SECONDS,
     },
     handoff: {
       capabilityEnv: ENCLAVE_MCP_CAPABILITY_ENV,
@@ -534,7 +528,6 @@ export const enclaveGatewayTestHelpers = {
   canonicalJson,
   canonicalToolSet,
   expectedTools,
-  enclaveToolTimeout,
   inspectGateway,
   proveGatewayReadiness,
   remainingRequestBudget,

@@ -54,12 +54,24 @@ Rollout depends on both sides of the gateway contract:
 3. **Trusted container mount policy** — `github/gh-aw-mcpg#10928` must reject container-backed MCP mounts outside gateway-owned allowed roots.
 4. **Gateway/runtime requirement** — backend rediscovery requires MCP Gateway spec **1.15.0** and the **first mcpg release after v0.4.8 containing it**.
 
-The compiler-generated upstream uses `connectTimeout: 120` and a `toolTimeout`
-equal to the longest configured (or default) executor timeout plus 30 seconds.
-Its tool allowlist contains only the selected
-executor tools. The compiler generates a fresh 64-character lowercase
-hexadecimal capability, substitutes it into the mcpg authorization header, and
-passes it to AWF without exposing it to the primary agent.
+The compiler-generated upstream uses `connectTimeout: 120` and MUST use a
+minimum `toolTimeout` of **630 seconds**: the final externally observable timing
+bucket is 600 seconds, followed by a 30-second transport allowance. This value
+does not shrink with a lower configured executor timeout because execution,
+result validation, container removal, protected artifact preservation, and
+workspace cleanup all finish before AWF selects the response bucket. Its tool
+allowlist contains only the selected executor tools. The compiler generates a
+fresh 64-character lowercase hexadecimal capability, substitutes it into the
+mcpg authorization header, and passes it to AWF without exposing it to the
+primary agent.
+
+The 630-second value is the minimum timeout for canonical bounded operation, not
+a hard wall-clock maximum. If secret-dependent processing or cleanup has already
+exceeded 600 seconds when AWF selects a bucket, AWF fails closed with the
+canonical error immediately after cleanup. A public host-scheduler stall after
+AWF has started waiting for the final boundary may instead delay the already
+computed response beyond 600 seconds; mcpg may then enforce its transport
+timeout.
 
 `gh-aw-mcpg` may start before the enclave server. While the backend is
 unavailable, mcpg returns retryable HTTP `503 backend_unavailable`; AWF retries

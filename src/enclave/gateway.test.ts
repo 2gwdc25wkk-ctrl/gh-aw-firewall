@@ -155,7 +155,7 @@ describe('enclave mcpg handoff', () => {
         headers: { Authorization: 'Bearer ${AWF_ENCLAVE_MCP_CAPABILITY}' },
         tools: ['enclave_run_script', 'enclave_run_agent'],
         connectTimeout: 120,
-        toolTimeout: 150,
+        toolTimeout: 630,
       },
       handoff: {
         capabilityEnv: 'AWF_ENCLAVE_MCP_CAPABILITY',
@@ -212,20 +212,23 @@ describe('enclave mcpg handoff', () => {
     }, env())).toThrow(/disabled/);
   });
 
-  it('builds an agent-only timeout and tool allowlist', () => {
-    const wrapperConfig = {
-      ...config(),
-      enclaves: normalizeEnclavesConfig([{
-        agent: { model: 'gpt-test' },
-        repos: [{ repo: 'octo/private', sensitivity: 'internal' }],
-        timeout: 45,
-      }]),
-    };
-    expect(buildEnclaveMcpgUpstreamContract(wrapperConfig).server).toMatchObject({
-      tools: ['enclave_run_agent'],
-      toolTimeout: 75,
-    });
-  });
+  it.each([45, 540])(
+    'keeps the 600-second timing bucket plus transport allowance for agent timeout %s',
+    (timeout) => {
+      const wrapperConfig = {
+        ...config(),
+        enclaves: normalizeEnclavesConfig([{
+          agent: { model: 'gpt-test' },
+          repos: [{ repo: 'octo/private', sensitivity: 'internal' }],
+          timeout,
+        }]),
+      };
+      expect(buildEnclaveMcpgUpstreamContract(wrapperConfig).server).toMatchObject({
+        tools: ['enclave_run_agent'],
+        toolTimeout: 630,
+      });
+    },
+  );
 
   it('attaches only the expected labelled gateway to the private control network', async () => {
     mockExeca
