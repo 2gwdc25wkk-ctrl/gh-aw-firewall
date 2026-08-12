@@ -67,6 +67,8 @@ export interface EnclaveAgentExecutorConfig {
   maxOutputBytes: number;
   maxTaskBytes: number;
   maxInvocations: number;
+  maxModelRequests?: number;
+  maxModelTokens?: number;
 }
 
 export interface EnclavesConfig {
@@ -83,17 +85,44 @@ export interface EnclaveOptions {
   enclaves?: EnclavesConfig;
 }
 
-export type RawEnclaveScriptExecutorConfig = Partial<EnclaveScriptExecutorConfig>;
-export type RawEnclaveAgentExecutorConfig = Partial<EnclaveAgentExecutorConfig>;
+/**
+ * Raw configuration mirrors the gh-aw compiler frontmatter exactly: `enclaves`
+ * is a keyed array where every entry carries exactly one `script` or `agent`
+ * key, its own `repos` list, and an optional entry-level `timeout`.
+ */
+type RawEnclaveCommonConfig = Pick<
+  Partial<EnclaveScriptExecutorConfig>,
+  'runtime' | 'image' | 'memoryLimit' | 'cpuLimit' | 'pidsLimit' | 'tmpfsLimit'
+  | 'maxOutputBytes' | 'maxInvocations'
+>;
 
-export interface RawEnclavesConfig {
-  enabled?: boolean;
-  privateRepos?: EnclaveRepository[];
-  executors?: {
-    script?: RawEnclaveScriptExecutorConfig;
-    agent?: RawEnclaveAgentExecutorConfig;
-  };
+export type RawEnclaveScriptExecutorConfig = Pick<
+  Partial<EnclaveScriptExecutorConfig>,
+  'maxScriptBytes'
+>;
+export type RawEnclaveAgentExecutorConfig = Pick<
+  Partial<EnclaveAgentExecutorConfig>,
+  'engine' | 'profile' | 'maxTaskBytes' | 'maxModelRequests' | 'maxModelTokens'
+> & { model: string };
+
+interface RawEnclaveEntryBase extends RawEnclaveCommonConfig {
+  repos?: EnclaveRepository[];
+  timeout?: number;
 }
+
+export interface RawEnclaveScriptEntry extends RawEnclaveEntryBase {
+  script: RawEnclaveScriptExecutorConfig;
+  agent?: never;
+}
+
+export interface RawEnclaveAgentEntry extends RawEnclaveEntryBase {
+  agent: RawEnclaveAgentExecutorConfig;
+  script?: never;
+}
+
+export type RawEnclaveEntry = RawEnclaveScriptEntry | RawEnclaveAgentEntry;
+
+export type RawEnclavesConfig = RawEnclaveEntry[];
 
 export const ENCLAVE_SCRIPT_EXECUTOR_DEFAULTS: Readonly<
   Omit<EnclaveScriptExecutorConfig, 'image'>
