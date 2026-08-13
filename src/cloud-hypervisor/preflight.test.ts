@@ -111,7 +111,6 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
 
   it('runs host policy and Docker probes through the default helper', async () => {
     const defaults = cloudHypervisorPreflightTestHelpers.defaultDependencies;
-    jest.spyOn(process, 'getuid').mockReturnValue(0);
     const access = jest.spyOn(fs, 'access').mockResolvedValue(undefined);
     await expect(defaults.assertHostPolicy()).resolves.toBe(2);
     expect(access).toHaveBeenCalledWith(
@@ -136,10 +135,11 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
     expect(statSpy).toHaveBeenCalledWith('/dev/kvm');
   });
 
-  it('reports host policy and Docker probe failures', async () => {
+  it('reports Docker probe failures without requiring root', async () => {
     const defaults = cloudHypervisorPreflightTestHelpers.defaultDependencies;
     jest.spyOn(process, 'getuid').mockReturnValue(1000);
-    await expect(defaults.assertHostPolicy()).rejects.toThrow(/requires root/);
+    jest.spyOn(fs, 'access').mockResolvedValue(undefined);
+    await expect(defaults.assertHostPolicy()).resolves.toBe(2);
 
     mockedExeca.mockResolvedValue({
       exitCode: 1,
@@ -152,7 +152,6 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
 
   it('rejects cgroup v1-only hosts explicitly instead of falling back', async () => {
     const defaults = cloudHypervisorPreflightTestHelpers.defaultDependencies;
-    jest.spyOn(process, 'getuid').mockReturnValue(0);
     jest.spyOn(fs, 'access').mockImplementation(async (target) => {
       if (target === '/sys/fs/cgroup/cgroup.controllers') {
         throw new Error('no cgroup v2');

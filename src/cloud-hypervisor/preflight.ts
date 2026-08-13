@@ -99,11 +99,6 @@ const defaultDependencies: CloudHypervisorPreflightDependencies = {
     throw new Error(`required trusted host tool "${tool}" was not found on PATH`);
   },
   assertHostPolicy: async () => {
-    if (process.getuid?.() !== 0) {
-      throw new Error(
-        'Cloud Hypervisor network setup requires root; invoke awf through sudo from a non-root account',
-      );
-    }
     try {
       await fs.access('/proc/sys/net/ipv4/ip_forward', constants.R_OK);
       await fs.access('/proc/sys/net/ipv6/conf/all/disable_ipv6', constants.R_OK);
