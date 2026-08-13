@@ -50,7 +50,7 @@ sandbox:
   agent:
     id: awf
     version: v0.28.0
-    runtime: cloud-hypervisor
+    runtime: docker-sbx
     sudo: true
 strict: false
 jobs:
