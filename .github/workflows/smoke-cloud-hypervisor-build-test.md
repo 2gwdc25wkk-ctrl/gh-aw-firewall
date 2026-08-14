@@ -28,6 +28,11 @@ network:
     - github
     - node
     - go
+    - ms-feed-2.pkgs.visualstudio.com
+    - ms-feed-12.pkgs.visualstudio.com
+    - ms-feed-17.pkgs.visualstudio.com
+    - ms-feed-25.pkgs.visualstudio.com
+    - "*.vsblob.vsassets.io"
 tools:
   bash:
     - "*"
@@ -49,7 +54,7 @@ timeout-minutes: 60
 sandbox:
   agent:
     id: awf
-    version: v0.28.0
+    version: v0.28.1
     runtime: cloud-hypervisor
     sudo: true
 strict: false
@@ -146,7 +151,7 @@ HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://github.
 HTTP_CODE=${HTTP_CODE:-000}
 
 echo "::group::npm ci"
-npm ci 2>&1 | tail -5
+timeout 5m npm ci 2>&1 | tail -5
 NPM_CI_EXIT=${PIPESTATUS[0]}
 echo "::endgroup::"
 
@@ -162,7 +167,7 @@ else
 fi
 
 echo "::group::npm test"
-npx jest --ci --forceExit --maxWorkers=2 --testPathPattern='squid-config|docker-manager|logger' 2>&1 | tail -20
+npx jest --ci --forceExit --maxWorkers=2 --testPathPatterns='squid-config|docker-manager|logger' 2>&1 | tail -20
 NODE_TEST_EXIT=${PIPESTATUS[0]}
 echo "::endgroup::"
 
