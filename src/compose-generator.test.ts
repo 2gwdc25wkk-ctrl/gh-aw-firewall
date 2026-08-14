@@ -302,6 +302,66 @@ describe('generateDockerCompose', () => {
         expect(cliProxyNetworks['awf-ext']).toBeUndefined();
       });
 
+      it('keeps cli-proxy on awf-net only when the DIFC proxy is a sibling addressed by its awf-net IP', () => {
+        const config = {
+          ...mockConfig,
+          networkIsolation: true,
+          difcProxyHost: '172.30.0.60:18443',
+        };
+        const networkWithCliProxy = {
+          ...mockNetworkConfig,
+          cliProxyIp: '172.30.0.50',
+        };
+        const result = generateDockerCompose(config, networkWithCliProxy);
+
+        const cliProxyNetworks = result.services['cli-proxy'].networks as { [key: string]: { ipv4_address?: string } };
+        expect(cliProxyNetworks['awf-net'].ipv4_address).toBe('172.30.0.50');
+        expect(cliProxyNetworks['awf-ext']).toBeUndefined();
+      });
+
+      it('dual-homes only a credential-free relay when cli-proxy targets an external DIFC proxy', () => {
+        const config = {
+          ...mockConfig,
+          networkIsolation: true,
+          difcProxyHost: 'host.docker.internal:18443',
+        };
+        const networkWithCliProxy = {
+          ...mockNetworkConfig,
+          cliProxyIp: '172.30.0.50',
+        };
+        const result = generateDockerCompose(config, networkWithCliProxy);
+
+        const cliProxyNetworks = result.services['cli-proxy'].networks as { [key: string]: { ipv4_address?: string } };
+        expect(cliProxyNetworks['awf-net'].ipv4_address).toBe('172.30.0.50');
+        expect(cliProxyNetworks['awf-ext']).toBeUndefined();
+
+        const relay = result.services['cli-proxy-egress'];
+        const relayNetworks = relay.networks as Record<string, unknown>;
+        const relayEnvironment = relay.environment as Record<string, string>;
+        expect(relayNetworks['awf-net']).toBeDefined();
+        expect(relayNetworks['awf-ext']).toBeDefined();
+        expect(relayEnvironment.GH_TOKEN).toBeUndefined();
+        expect(relayEnvironment.AWF_DIFC_PROXY_HOST).toBe('host.docker.internal');
+        expect(relayEnvironment.AWF_DIFC_PROXY_PORT).toBe('18443');
+      });
+
+      it('keeps cli-proxy off awf-ext outside network-isolation mode', () => {
+        const config = {
+          ...mockConfig,
+          networkIsolation: false,
+          difcProxyHost: 'host.docker.internal:18443',
+        };
+        const networkWithCliProxy = {
+          ...mockNetworkConfig,
+          cliProxyIp: '172.30.0.50',
+        };
+        const result = generateDockerCompose(config, networkWithCliProxy);
+
+        const cliProxyNetworks = result.services['cli-proxy'].networks as { [key: string]: { ipv4_address?: string } };
+        expect(cliProxyNetworks['awf-ext']).toBeUndefined();
+        expect(result.services['cli-proxy-egress']).toBeUndefined();
+      });
+
       it('should keep the agent on awf-net only (no external network)', () => {
         const result = generateDockerCompose({ ...mockConfig, networkIsolation: true }, mockNetworkConfig);
 

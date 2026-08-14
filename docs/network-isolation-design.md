@@ -17,15 +17,25 @@ filtering:
 - The agent (and sidecars) live on `awf-net`, declared `internal: true` — an internal
   network has **no route to the host or the internet**.
 - **Squid is dual-homed** (`awf-net` + an external `awf-ext` bridge) and is therefore the
-  **sole** egress path; it still applies the same domain allowlist.
+  **sole egress path for the agent**; it still applies the same domain allowlist. The agent
+  itself never touches `awf-ext` directly.
+- The credential-bearing **cli-proxy sidecar always remains on `awf-net` only**. When its
+  `--difc-proxy-host` target is external (`host.docker.internal`, a bare IP outside
+  `awf-net`'s subnet, or a dotted DNS name), AWF creates a separate credential-free
+  `cli-proxy-egress` relay. Only this fixed-target TCP relay is dual-homed, and it can
+  forward solely to the configured DIFC host and port. This lets the cli-proxy reach the
+  host DIFC proxy without giving agent-controlled `gh` or Git subprocesses an unrestricted
+  route through `awf-ext`. When the DIFC proxy is an attached sibling container, no relay
+  is needed or created.
 - No host iptables, no `NET_ADMIN`, no `sudo`.
 
-This works today for the agent's own egress. What it does **not** yet handle is the
-**MCP gateway (mcpg)** and the **gh CLI integrity proxy (DIFC)**, both of which gh-aw runs
-as **host-network containers** reached via `--enable-host-access`. Topology mode
-deliberately rejects `--enable-host-access`, and an `internal` network has no host route
-anyway — so the standard Copilot/gh-aw harness cannot currently run under
-`--network-isolation`.
+This works today for the agent's own egress, and (through the fixed-target relay above)
+for AWF's own `--difc-proxy-host` cli-proxy sidecar. What it does **not** yet handle is gh-aw's
+**separate** integration model, where gh-aw itself launches the **MCP gateway (mcpg)** and
+the **gh CLI integrity proxy (DIFC)** as **host-network containers** reached via
+`--enable-host-access`. Topology mode deliberately rejects `--enable-host-access`, and an
+`internal` network has no host route anyway — so the standard Copilot/gh-aw harness cannot
+currently run under `--network-isolation`.
 
 This note records the analysis and the concrete path to close that gap.
 
