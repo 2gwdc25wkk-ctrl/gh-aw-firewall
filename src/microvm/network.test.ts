@@ -1,13 +1,19 @@
 import {
   LinuxNetworkCommands,
+} from './network-commands';
+import {
   MicrovmNetworkManager,
+} from './network-manager';
+import {
   createMicrovmNetworkPlan,
   generateMicrovmNftRuleset,
-  type MicrovmConnectivityProbe,
-  type MicrovmNetworkCommandOptions,
-  type MicrovmNetworkPlan,
-  type MicrovmNetworkRulesetFile,
-} from './network';
+} from './network-plan';
+import type {
+  MicrovmConnectivityProbe,
+  MicrovmNetworkCommandOptions,
+  MicrovmNetworkPlan,
+  MicrovmNetworkRulesetFile,
+} from './network-types';
 
 interface CommandCall {
   command: string;
@@ -300,6 +306,21 @@ describe('microVM network lifecycle', () => {
     expect(calls[16].args[5]).toMatch(/awf-nft-[0-9a-f]{16}\.nft$/);
     expect(calls[16].options).toEqual({ reject: true });
     expect(probe.verify).toHaveBeenCalledWith(plan);
+  });
+
+  it.each([
+    '172.30.0.0',
+    '172.30.0.0/24/extra',
+  ])('rejects malformed infrastructure CIDR %s before executing commands', async (infrastructureCidr) => {
+    const plan = {
+      ...createPlan(),
+      infrastructureCidr,
+    };
+    const { calls, commands } = commandHarness();
+
+    await expect(new MicrovmNetworkManager(plan, commands).setup())
+      .rejects.toThrow(`Invalid microVM infrastructure CIDR: ${infrastructureCidr}`);
+    expect(calls).toEqual([]);
   });
 
   it('creates the TAP with vnet_hdr only when the plan opts in (Cloud Hypervisor requires it; Firecracker does not)', async () => {
