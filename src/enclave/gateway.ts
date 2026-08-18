@@ -17,6 +17,7 @@ export const ENCLAVE_MCP_READINESS_TIMEOUT_ENV = 'AWF_ENCLAVE_MCP_READINESS_TIME
 export const ENCLAVE_MCP_GATEWAY_RUN_LABEL = 'com.github.gh-aw.mcpg.run';
 export const ENCLAVE_MCP_SERVER_NAME = 'awf-enclave';
 export const ENCLAVE_MCP_UPSTREAM_URL = 'http://awf-enclave-mcp:8080/mcp';
+const MCP_GATEWAY_API_KEY_ENV = 'MCP_GATEWAY_API_KEY';
 
 const DEFAULT_GATEWAY_CONTAINER = 'awmg-mcpg';
 const DEFAULT_READINESS_TIMEOUT_MS = 120_000;
@@ -29,6 +30,7 @@ interface EnclaveGatewayContract {
   capability: string;
   containerName: string;
   endpoint: URL;
+  gatewayApiKey: string;
   identity: string;
   expectedTools: ReadonlyArray<Record<string, unknown>>;
   readinessTimeoutMs: number;
@@ -123,6 +125,16 @@ function expectedTools(config: WrapperConfig): ReadonlyArray<Record<string, unkn
   return tools;
 }
 
+function expectedRoutedTools(
+  tools: ReadonlyArray<Record<string, unknown>>,
+): ReadonlyArray<Record<string, unknown>> {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: `[${ENCLAVE_MCP_SERVER_NAME}] ${String(tool.description)}`,
+    inputSchema: tool.inputSchema,
+  }));
+}
+
 /**
  * Machine-readable compiler handoff. This intentionally contains only the
  * static upstream route and environment-variable names, never the capability.
@@ -163,6 +175,7 @@ export function resolveEnclaveGatewayContract(
   const identity = env[ENCLAVE_MCP_GATEWAY_IDENTITY_ENV] ?? '';
   const containerName = env[ENCLAVE_MCP_GATEWAY_CONTAINER_ENV] || DEFAULT_GATEWAY_CONTAINER;
   const endpointRaw = env[ENCLAVE_MCP_GATEWAY_ENDPOINT_ENV] ?? '';
+  const gatewayApiKey = env[MCP_GATEWAY_API_KEY_ENV] ?? '';
   const timeoutRaw = env[ENCLAVE_MCP_READINESS_TIMEOUT_ENV];
 
   if (!/^[0-9a-f]{64}$/.test(capability)) {
@@ -173,6 +186,9 @@ export function resolveEnclaveGatewayContract(
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(containerName)) {
     throw new Error(`${ENCLAVE_MCP_GATEWAY_CONTAINER_ENV} is invalid`);
+  }
+  if (!/^[A-Za-z0-9_-]{32,256}$/.test(gatewayApiKey)) {
+    throw new Error(`${MCP_GATEWAY_API_KEY_ENV} is missing or invalid`);
   }
   const readinessTimeoutMs = timeoutRaw === undefined
     ? DEFAULT_READINESS_TIMEOUT_MS
@@ -206,6 +222,7 @@ export function resolveEnclaveGatewayContract(
     capability,
     containerName,
     endpoint,
+    gatewayApiKey,
     identity,
     expectedTools: expectedTools(config),
     readinessTimeoutMs,
@@ -288,6 +305,7 @@ function postJsonRpc(
   endpoint: URL,
   body: Record<string, unknown>,
   timeoutMs: number,
+  gatewayApiKey: string,
   sessionId?: string,
 ): Promise<{ response: JsonRpcResponse; sessionId?: string }> {
   return new Promise((resolve, reject) => {
@@ -307,6 +325,7 @@ function postJsonRpc(
         accept: 'application/json, text/event-stream',
         'content-type': 'application/json',
         'content-length': String(payload.length),
+        authorization: gatewayApiKey,
         ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
       },
       timeout: timeoutMs,
@@ -333,7 +352,7 @@ function postJsonRpc(
                 };
                 if (
                   unavailable.error === 'backend_unavailable'
-                  && unavailable.retryable === true
+                  && unavailable.retryable !== false
                 ) {
                   rejectBounded(new GatewayReadinessError(
                     'Gateway backend is not yet available',
@@ -431,23 +450,23 @@ async function proveGatewayReadiness(
       capabilities: {},
       clientInfo: { name: 'awf-readiness', version: '1.0.0' },
     },
-  }, remainingRequestBudget(deadline));
+  }, remainingRequestBudget(deadline), contract.gatewayApiKey);
   const result = initialized.response.result as { serverInfo?: { name?: string } } | undefined;
-  if (initialized.response.error || result?.serverInfo?.name !== 'awf-enclave') {
-    throw new Error('Gateway initialize proof did not reach the AWF enclave server');
+  if (initialized.response.error || result?.serverInfo?.name !== 'awmg-awf-enclave') {
+    throw new Error('Gateway initialize proof did not reach the routed AWF enclave server');
   }
   await postJsonRpc(contract.endpoint, {
     jsonrpc: '2.0',
     method: 'notifications/initialized',
-  }, remainingRequestBudget(deadline), initialized.sessionId);
+  }, remainingRequestBudget(deadline), contract.gatewayApiKey, initialized.sessionId);
   const listed = await postJsonRpc(contract.endpoint, {
     jsonrpc: '2.0',
     id: 2,
     method: 'tools/list',
     params: {},
-  }, remainingRequestBudget(deadline), initialized.sessionId);
+  }, remainingRequestBudget(deadline), contract.gatewayApiKey, initialized.sessionId);
   const tools = (listed.response.result as { tools?: unknown })?.tools;
-  if (canonicalToolSet(tools) !== canonicalToolSet(contract.expectedTools)) {
+  if (canonicalToolSet(tools) !== canonicalToolSet(expectedRoutedTools(contract.expectedTools))) {
     throw new Error('Gateway enclave tool contract did not exactly match the enabled executors');
   }
 }
@@ -521,6 +540,7 @@ export const enclaveGatewayTestHelpers = {
   agentTool,
   canonicalJson,
   canonicalToolSet,
+  expectedRoutedTools,
   expectedTools,
   inspectGateway,
   proveGatewayReadiness,

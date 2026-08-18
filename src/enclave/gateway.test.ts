@@ -40,6 +40,15 @@ function env(endpoint = 'http://127.0.0.1:8080/mcp/awf-enclave'): NodeJS.Process
     AWF_ENCLAVE_MCP_GATEWAY_IDENTITY: 'test-run-identity',
     AWF_ENCLAVE_MCP_GATEWAY_CONTAINER: 'awmg-mcpg',
     AWF_ENCLAVE_MCP_GATEWAY_ENDPOINT: endpoint,
+    MCP_GATEWAY_API_KEY: 'g'.repeat(48),
+  };
+}
+
+function routedTool(tool: Record<string, unknown>): Record<string, unknown> {
+  return {
+    name: tool.name,
+    description: `[awf-enclave] ${String(tool.description)}`,
+    inputSchema: tool.inputSchema,
   };
 }
 
@@ -47,9 +56,11 @@ function listen(
   tools: unknown[],
   options: {
     unavailableInitializations?: number;
+    unavailableRetryable?: boolean;
     initializationStatus?: number;
     initializationBody?: string;
     initializationRpcError?: boolean;
+    serverName?: string;
     oversizedInitialization?: boolean;
     hangInitialization?: boolean;
     trickleInitialization?: boolean;
@@ -58,11 +69,14 @@ function listen(
 ): Promise<{
   endpoint: string;
   initializeAttempts: () => number;
+  authorizationHeaders: () => Array<string | undefined>;
   close: () => Promise<void>;
 }> {
   return new Promise((resolve) => {
     let initializeAttempts = 0;
+    const authorizationHeaders: Array<string | undefined> = [];
     const server = http.createServer((request, response) => {
+      authorizationHeaders.push(request.headers.authorization);
       const chunks: Buffer[] = [];
       request.on('data', (chunk: Buffer) => chunks.push(chunk));
       request.on('end', () => {
@@ -91,7 +105,9 @@ function listen(
             response.end(JSON.stringify({
               error: 'backend_unavailable',
               message: 'Backend MCP server is not ready; retry initialization',
-              retryable: true,
+              ...(options.unavailableRetryable === undefined
+                ? {}
+                : { retryable: options.unavailableRetryable }),
             }));
             return;
           }
@@ -125,7 +141,10 @@ function listen(
           ? {
               protocolVersion: '2025-06-18',
               capabilities: { tools: { listChanged: false } },
-              serverInfo: { name: 'awf-enclave', version: '1.0.0' },
+              serverInfo: {
+                name: options.serverName ?? 'awmg-awf-enclave',
+                version: '1.0.0',
+              },
             }
           : { tools };
         const payload = JSON.stringify({ jsonrpc: '2.0', id: message.id, result });
@@ -138,6 +157,7 @@ function listen(
       resolve({
         endpoint: `http://127.0.0.1:${address.port}/mcp/awf-enclave`,
         initializeAttempts: () => initializeAttempts,
+        authorizationHeaders: () => authorizationHeaders,
         close: () => new Promise<void>((done) => server.close(() => done())),
       });
     });
@@ -174,6 +194,9 @@ describe('enclave mcpg handoff', () => {
       enclaveProtocol.TOOL,
       enclaveProtocol.AGENT_TOOL,
     ]);
+    expect(enclaveGatewayTestHelpers.expectedRoutedTools([
+      enclaveProtocol.TOOL,
+    ])).toEqual([routedTool(enclaveProtocol.TOOL)]);
   });
 
   it('rejects missing capability and non-gateway readiness routes', () => {
@@ -185,6 +208,13 @@ describe('enclave mcpg handoff', () => {
       config(),
       env('http://127.0.0.1:8080/health'),
     )).toThrow(/must address the gateway route/);
+  });
+
+  it('rejects a missing gateway API key', () => {
+    expect(() => resolveEnclaveGatewayContract(config(), {
+      ...env(),
+      MCP_GATEWAY_API_KEY: undefined,
+    })).toThrow(/MCP_GATEWAY_API_KEY/);
   });
 
   it.each([
@@ -320,43 +350,39 @@ describe('enclave mcpg handoff', () => {
 
   it('proves initialize and the exact tool contracts through the gateway', async () => {
     const contract = buildEnclaveMcpgUpstreamContract(config());
-    const server = await listen([{
-      name: 'enclave_run_script',
-      description: 'Run a bounded script against one configured private repository and return one finite value.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          privateRepo: { type: 'string', description: 'Bare configured owner/repository selector.' },
-          schema: {
-            type: 'object',
-            description: 'An AWF finite-disclosure schema (const, boolean, enum, integer, object, tuple, array, or union).',
-          },
-          script: { type: 'string', description: 'Bounded UTF-8 Python source.' },
-        },
-        required: ['privateRepo', 'schema', 'script'],
-        additionalProperties: false,
-      },
-      outputSchema: {
-        type: 'object',
-        properties: { status: { enum: ['ok', 'error'] }, result: {} },
-        required: ['status'],
-        additionalProperties: false,
-      },
-    }]);
+    const server = await listen([routedTool(enclaveProtocol.TOOL)]);
     try {
       await expect(assertEnclaveGatewayReady(config(), env(server.endpoint), 1000))
         .resolves.toBeUndefined();
       expect(contract.server.tools).toEqual(['enclave_run_script']);
+      expect(server.authorizationHeaders()).toEqual([
+        'g'.repeat(48),
+        'g'.repeat(48),
+        'g'.repeat(48),
+      ]);
     } finally {
       await server.close();
     }
   });
 
   it('accepts bounded SSE responses from the gateway', async () => {
-    const server = await listen([enclaveProtocol.TOOL], { sse: true });
+    const server = await listen([routedTool(enclaveProtocol.TOOL)], { sse: true });
     try {
       await expect(assertEnclaveGatewayReady(config(), env(server.endpoint), 1000))
         .resolves.toBeUndefined();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('rejects an initialize response outside the routed enclave endpoint', async () => {
+    const server = await listen(
+      [routedTool(enclaveProtocol.TOOL)],
+      { serverName: 'awf-enclave' },
+    );
+    try {
+      await expect(assertEnclaveGatewayReady(config(), env(server.endpoint), 1000))
+        .rejects.toThrow(/routed AWF enclave server/);
     } finally {
       await server.close();
     }
@@ -364,7 +390,7 @@ describe('enclave mcpg handoff', () => {
 
   it('retries mcpg backend_unavailable responses until initialize succeeds', async () => {
     const server = await listen(
-      [enclaveProtocol.TOOL],
+      [routedTool(enclaveProtocol.TOOL)],
       { unavailableInitializations: 1 },
     );
     try {
@@ -376,6 +402,20 @@ describe('enclave mcpg handoff', () => {
         },
       )).resolves.toBeUndefined();
       expect(server.initializeAttempts()).toBe(2);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('does not retry explicitly non-retryable backend_unavailable responses', async () => {
+    const server = await listen(
+      [],
+      { unavailableInitializations: 1, unavailableRetryable: false },
+    );
+    try {
+      await expect(assertEnclaveGatewayReady(config(), env(server.endpoint), 1000))
+        .rejects.toThrow(/readiness request failed/);
+      expect(server.initializeAttempts()).toBe(1);
     } finally {
       await server.close();
     }
