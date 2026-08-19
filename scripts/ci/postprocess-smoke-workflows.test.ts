@@ -23,11 +23,16 @@ import {
   sessionStateDirInjectionRegex,
   legacyApiProxyLogsDirRegex,
   copySessionStateStepRegex,
+  copilotCliDaemonCopyStepRegex,
+  copilotCliDaemonCopyStepSentinel,
   copilotModelOverrideRegex,
   issueDuplicationConclusionConcurrencyRegex,
   issueDuplicationConclusionConcurrencySentinel,
 } from './workflow-patch-patterns';
-import { buildCopySessionStateStep } from './workflow-step-builders';
+import {
+  buildCopySessionStateStep,
+  buildCopilotCliDaemonCopyStep,
+} from './workflow-step-builders';
 
 
 describe('installStepRegex', () => {
@@ -432,8 +437,60 @@ describe('buildCopySessionStateStep', () => {
   });
 });
 
-describe('copilotModelOverrideRegex', () => {
+describe('copilotCliDaemonCopyStepRegex', () => {
+  const ORIGINAL_STEP =
+    '      - name: Copy Copilot CLI to daemon-visible path\n' +
+    '        run: |\n' +
+    '          mkdir -p "${RUNNER_TEMP}/gh-aw/bin"\n' +
+    '          COPILOT_SRC="$(command -v copilot)"\n' +
+    '          cp "$COPILOT_SRC" "${RUNNER_TEMP}/gh-aw/bin/copilot"\n' +
+    '          chmod +x "${RUNNER_TEMP}/gh-aw/bin/copilot"\n';
+
   beforeEach(() => {
+    copilotCliDaemonCopyStepRegex.lastIndex = 0;
+  });
+
+  it('should match the compiler-emitted arc-dind copy step', () => {
+    expect(copilotCliDaemonCopyStepRegex.test(ORIGINAL_STEP)).toBe(true);
+  });
+
+  it('should capture indentation', () => {
+    const match = copilotCliDaemonCopyStepRegex.exec(ORIGINAL_STEP);
+    expect(match).not.toBeNull();
+    expect(match![1]).toBe('      ');
+  });
+
+  it('should NOT match after replacement (sentinel check)', () => {
+    const replaced = buildCopilotCliDaemonCopyStep('      ', 'claude');
+    expect(replaced).toContain(copilotCliDaemonCopyStepSentinel);
+    expect(copilotCliDaemonCopyStepRegex.test(replaced)).toBe(false);
+  });
+});
+
+describe('buildCopilotCliDaemonCopyStep', () => {
+  it('should skip the copy for non-copilot engines', () => {
+    const result = buildCopilotCliDaemonCopyStep('      ', 'claude');
+    expect(result).toContain(
+      'echo "Skipping Copilot CLI binary copy for non-copilot engine: claude" >&2'
+    );
+    expect(result).not.toContain('command -v copilot');
+  });
+
+  it('should keep fail-fast copy behaviour for the copilot engine', () => {
+    const result = buildCopilotCliDaemonCopyStep('      ', 'copilot');
+    expect(result).toContain('COPILOT_SRC="$(command -v copilot 2>/dev/null || true)"');
+    expect(result).toContain('exit 127');
+    expect(result).toContain('cp "$COPILOT_SRC" "${RUNNER_TEMP}/gh-aw/bin/copilot"');
+  });
+
+  it('should use correct YAML indentation', () => {
+    const result = buildCopilotCliDaemonCopyStep('      ', 'copilot');
+    expect(result).toMatch(/^      - name: Copy Copilot CLI to daemon-visible path\n/);
+    expect(result).toContain('        run: |\n');
+  });
+});
+
+describe('copilotModelOverrideRegex', () => {  beforeEach(() => {
     copilotModelOverrideRegex.lastIndex = 0;
   });
 

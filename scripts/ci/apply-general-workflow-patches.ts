@@ -16,6 +16,9 @@ import {
   copilotModelOverrideRegex,
   copySessionStateSentinel,
   copySessionStateStepRegex,
+  copilotCliDaemonCopyStepRegex,
+  copilotCliDaemonCopyStepSentinel,
+  compiledEngineIdRegex,
   updateCacheSetupScriptRegex,
   setupCacheMemoryStepRegex,
   stripExecBitsStepSentinel,
@@ -32,6 +35,7 @@ import {
 import {
   buildLocalInstallSteps,
   buildCopySessionStateStep,
+  buildCopilotCliDaemonCopyStep,
   buildStripExecBitsStep,
   buildScanInjectionStep,
   buildCacheDateStep,
@@ -248,6 +252,29 @@ export function applyGeneralWorkflowPatches(
     }
   } else {
     log.push(`  'Copy Copilot session state' step already updated`);
+  }
+
+  // Rewrite the compiler-emitted "Copy Copilot CLI to daemon-visible path"
+  // step (firewall + arc-dind) so it is gated on the compiled engine. gh-aw
+  // emits this step for every engine, but only the Copilot engine installs the
+  // `copilot` binary, so other engines fail on `command -v copilot` + `cp`.
+  // The engine is resolved from the lock file (GH_AW_ENGINE_ID) because shell
+  // exports of GH_AW_ENGINE do not persist across Actions steps.
+  if (!content.includes(copilotCliDaemonCopyStepSentinel)) {
+    copilotCliDaemonCopyStepRegex.lastIndex = 0;
+    const copilotCliCopyMatches = content.match(copilotCliDaemonCopyStepRegex);
+    if (copilotCliCopyMatches) {
+      const engineId = content.match(compiledEngineIdRegex)?.[1] ?? 'copilot';
+      content = content.replace(copilotCliDaemonCopyStepRegex, (_match, indent: string) =>
+        buildCopilotCliDaemonCopyStep(indent, engineId)
+      );
+      log.push(
+        `  Gated ${copilotCliCopyMatches.length} 'Copy Copilot CLI to daemon-visible path' ` +
+          `step(s) on compiled engine '${engineId}'`
+      );
+    }
+  } else {
+    log.push(`  'Copy Copilot CLI to daemon-visible path' step already engine-gated`);
   }
 
   // For issue-duplication-detector: scope the conclusion job's concurrency
