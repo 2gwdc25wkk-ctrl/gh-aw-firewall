@@ -60,22 +60,24 @@ export function fixArtifactPermissionsForRootless(
   imageRegistry: string | undefined,
   imageTag: string | undefined,
   agentImage: string | undefined,
-): void {
+  imageRefOverride?: string,
+): boolean {
   const currentUid = process.getuid?.();
   if (currentUid === undefined || currentUid === 0) {
-    return;
+    return true;
   }
 
   const existingDirs = dirs.filter(
     (dir): dir is string => typeof dir === 'string' && dir.length > 0 && fs.existsSync(dir),
   );
   if (existingDirs.length === 0) {
-    return;
+    return true;
   }
 
   const uid = getSafeHostUid();
   const gid = getSafeHostGid();
-  const imageRef = resolvePermFixerImageRef(imageRegistry, imageTag, agentImage);
+  const imageRef = imageRefOverride || resolvePermFixerImageRef(imageRegistry, imageTag, agentImage);
+  let repairedAll = true;
 
   for (const dir of existingDirs) {
     const mount = applyHostPathPrefixToVolumes([`${path.resolve(dir)}:/fix:rw`], dockerHostPathPrefix)[0];
@@ -112,10 +114,12 @@ export function fixArtifactPermissionsForRootless(
         { env: getLocalDockerEnv(), reject: false },
       );
 
-      if (typeof result.exitCode === 'number' && result.exitCode !== 0) {
+      if (result.exitCode !== 0) {
         const stderr = result.stderr?.trim();
         const stdout = result.stdout?.trim();
         const errorDetail = stderr || stdout;
+        const exitDetail =
+          typeof result.exitCode === 'number' ? `exit ${result.exitCode}` : 'exit unknown';
         // Ownership/permission repair is best-effort: the agent has already
         // finished and its artifacts are still readable by the owning user.
         // On rootless or restricted runners (e.g. ARC/DinD with a non-root
@@ -123,7 +127,7 @@ export function fixArtifactPermissionsForRootless(
         // producing "Operation not permitted" / "Permission denied". Those are
         // expected and non-fatal, so log them at debug to avoid alarming users
         // who otherwise see a scary WARN for a benign, non-blocking condition.
-        const detail = `for ${dir} (exit ${result.exitCode})` + (errorDetail ? `: ${errorDetail}` : '');
+        const detail = `for ${dir} (${exitDetail})` + (errorDetail ? `: ${errorDetail}` : '');
         if (isBenignArtifactPermissionError(errorDetail)) {
           logger.debug(
             `Rootless artifact permission repair skipped ${detail}. ` +
@@ -132,9 +136,12 @@ export function fixArtifactPermissionsForRootless(
         } else {
           logger.warn(`Rootless artifact permission repair failed ${detail}`);
         }
+        repairedAll = false;
       }
     } catch (error) {
       logger.warn(`Rootless artifact permission repair failed for ${dir}:`, error);
+      repairedAll = false;
     }
   }
+  return repairedAll;
 }
