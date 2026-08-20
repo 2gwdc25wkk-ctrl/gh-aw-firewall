@@ -171,7 +171,18 @@ AWF follows Anthropic's SDK behavior: JWT-bearer `POST /v1/oauth/token` exchange
 GitHub's [REST API authentication docs](https://docs.github.com/en/rest/authentication/authenticating-to-the-rest-api) state that both Bearer-prefixed and token-prefixed Authorization headers are generally accepted for PATs/OAuth tokens (only JWTs strictly require Bearer). The `token` prefix requirement documented here is **AWF-implementation-specific defensive behavior** for Copilot API requests, not a general GitHub REST API rule: the derived GHEC data-residency target (`copilot-api.<subdomain>.ghe.com`), the enterprise target (`api.enterprise.githubcopilot.com`), and the business target (`api.business.githubcopilot.com`) return `400 Bad Request: Authorization header is badly formatted` when sent the wrong prefix (see the regression fixed in [PR #6991](https://github.com/github/gh-aw-firewall/pull/6991) and covered by `copilot-adapter-enterprise.test.js`). AWF detects this via `copilotTargetRequiresGitHubTokenPrefix()` in `copilot-auth.js`, which matches on the specific target hostname (including an `isGhecCopilotApiTarget()` check for the `copilot-api.<subdomain>.ghe.com` shape) or GHES-detection heuristics (`AWF_PLATFORM_TYPE=ghes`, or a `GITHUB_SERVER_URL` that isn't `github.com`/`*.ghe.com`). BYOK keys always use the `Bearer` prefix regardless of target.
 :::
 
-All Copilot requests also include `Copilot-Integration-Id`. The default is `agentic-workflows`; set `COPILOT_INTEGRATION_ID` to override it.
+Copilot API host requests also include `Copilot-Integration-Id`. The default is `agentic-workflows`; set `COPILOT_INTEGRATION_ID` to override it.
+
+### Prompt-cache and attribution headers (`*.githubcopilot.com` only)
+
+When the resolved upstream host is a Copilot host (`githubcopilot.com` or a `*.githubcopilot.com` subdomain), the sidecar guarantees two non-secret headers are present on every forwarded request:
+
+| Header | Value | Purpose |
+|--------|-------|---------|
+| `X-Interaction-Id` | `${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}`, else a UUID minted once per sidecar process | CAPI prompt-cache key — must be stable for a whole run and differ across runs |
+| `Copilot-Integration-Id` | `COPILOT_INTEGRATION_ID`, else `agentic-workflows` | Attribution, quota bucket, and model allowlist |
+
+Non-empty inbound values are preserved; empty values and case-variant duplicates are replaced so exactly one instance of each header reaches CAPI. Harnesses that do not send a stable `X-Interaction-Id` themselves (aider, Pi, …) therefore still get prompt-cache hits, and a harness that owns its own session identity can override the value simply by sending the header. There is no AWF-specific override env var for `X-Interaction-Id`: outside GitHub Actions the sidecar mints one UUID per process. Neither header is injected on non-Copilot hosts, so BYOK targets (Azure OpenAI, OpenRouter, …) and the OpenAI/Anthropic/Gemini providers are unaffected.
 
 ### `/models` Endpoint (Special Case)
 
