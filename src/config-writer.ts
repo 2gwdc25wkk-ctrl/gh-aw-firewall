@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
+import execa from 'execa';
 import { WrapperConfig, API_PROXY_PORTS, DockerComposeConfig } from './types';
 import { logger } from './logger';
 import { generatePolicyManifest, generateSquidConfig } from './squid-config';
@@ -11,6 +12,7 @@ import { SslConfig, SQUID_PORT } from './host-env';
 import { generateDockerCompose, redactDockerComposeSecrets } from './compose-generator';
 import { resolveLogPaths } from './log-paths';
 import { DEFAULT_DNS_SERVERS, filterForNetworkIsolation } from './dns-resolver';
+import { getSafeHostGid, getSafeHostUid } from './host-identity';
 import {
   AGENT_IP,
   API_PROXY_IP,
@@ -71,6 +73,64 @@ function isWritable(dirPath: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Recursively transfers ownership of `targetPath` without ever dereferencing a
+ * symbolic link.
+ *
+ * Delegates to coreutils `chown`, whose recursive mode performs a physical
+ * (`-P`) descriptor-relative traversal. Re-implementing the walk in JavaScript
+ * would be racy: Node exposes no `openat`/`fchownat`, so every recursion step
+ * has to re-resolve a pathname that a process running as the target uid can
+ * swap for a symlink between the check and the chown.
+ */
+function chownTreeWithoutFollowingSymlink(targetPath: string, uid: number, gid: number): void {
+  // Built from numbers validated by the caller; passed as a single argv entry.
+  const ownerSpec = [uid, gid].join(':');
+  const result = execa.sync(
+    'chown',
+    // -h: act on symlinks themselves, -P: never traverse symlinks, -R: recurse,
+    // --: stop option parsing so paths are never interpreted as flags.
+    ['-h', '-P', '-R', '--', ownerSpec, targetPath],
+    { reject: false }
+  );
+
+  if (result.exitCode !== 0) {
+    const detail = result.stderr?.trim() || result.stdout?.trim() || `exit ${result.exitCode}`;
+    throw new Error(detail);
+  }
+}
+
+function repairRunnerTempGhAwOwnership(): void {
+  if (process.getuid?.() !== 0) {
+    return;
+  }
+
+  const runnerTemp = process.env.RUNNER_TEMP;
+  if (!runnerTemp || !path.isAbsolute(runnerTemp)) {
+    return;
+  }
+
+  const ghAwRoot = path.join(runnerTemp, 'gh-aw');
+  if (!fs.existsSync(ghAwRoot)) {
+    return;
+  }
+
+  const uid = Number.parseInt(getSafeHostUid(), 10);
+  const gid = Number.parseInt(getSafeHostGid(), 10);
+  if (!Number.isInteger(uid) || !Number.isInteger(gid) || uid <= 0 || gid <= 0) {
+    logger.warn(`Skipping ${ghAwRoot} ownership repair because the sandbox identity is invalid`);
+    return;
+  }
+
+  try {
+    chownTreeWithoutFollowingSymlink(ghAwRoot, uid, gid);
+    logger.debug(`Transferred ${ghAwRoot} ownership to sandbox user (${uid}:${gid}) before container launch`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn(`Failed to transfer ${ghAwRoot} ownership to sandbox user (${uid}:${gid}): ${message}`);
   }
 }
 
@@ -291,6 +351,7 @@ export async function writeConfigs(config: WrapperConfig): Promise<void> {
   // Phase 2: Log-path resolution and directory preparation
   const logPaths = resolveLogPaths(config);
   prepareWorkDirectories(config, logPaths);
+  repairRunnerTempGhAwOwnership();
 
   // Use fixed network configuration (network is created by host-iptables.ts)
   const networkConfig: NetworkConfig = {

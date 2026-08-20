@@ -25,6 +25,9 @@ export function hostEnvMockFactory(overrides: Record<string, unknown> = {}) {
 
 export function hostIdentityMockFactory() {
   return {
+    getSafeHostUid: jest.fn().mockReturnValue('1000'),
+    getSafeHostGid: jest.fn().mockReturnValue('1000'),
     getRealUserHome: mockGetRealUserHome,
+    isNativeRootWithoutSudo: jest.fn().mockReturnValue(false),
   };
 }

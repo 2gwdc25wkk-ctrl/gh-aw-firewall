@@ -1,8 +1,14 @@
 // Hoisted jest.mock() registrations live in the shared helper — this import must remain first.
 import './test-helpers/config-writer-dependency-mocks.test-utils';
 
+jest.mock('execa', () => ({
+  __esModule: true,
+  default: { sync: jest.fn(() => ({ exitCode: 0, stdout: '', stderr: '' })) },
+}));
+
 import * as fs from 'fs';
 import * as path from 'path';
+import execa from 'execa';
 import { writeConfigs } from './config-writer';
 import { isOpenSslAvailable } from './ssl-bump';
 import { getRealUserHome } from './host-identity';
@@ -14,16 +20,22 @@ import {
 
 describe('writeConfigs', () => {
   let tempDir: string;
+  const originalGetuid = process.getuid;
+  const originalEnv = process.env;
 
   beforeEach(() => {
     // getRealUserHome is used to locate host home subdirectories; point it at
     // tempDir so mkdirSync calls stay within the temp tree.
     tempDir = setupConfigWriterTempDir('config-writer-test-');
+    process.env = { ...originalEnv };
+    Object.defineProperty(process, 'getuid', { value: originalGetuid, configurable: true });
   });
 
   afterEach(() => {
     // Clean up tempDir and the chroot-home sibling directory that writeConfigs creates.
     cleanupConfigWriterTempDir(tempDir);
+    Object.defineProperty(process, 'getuid', { value: originalGetuid, configurable: true });
+    process.env = originalEnv;
   });
 
   describe('SSL Bump preflight guard', () => {
@@ -105,6 +117,24 @@ describe('writeConfigs', () => {
 
       const mcpLogsDirMode = fs.statSync(mcpLogsDir).mode & 0o777;
       expect(mcpLogsDirMode).toBe(0o777);
+    });
+
+    it('chowns RUNNER_TEMP gh-aw tree host-side when running as root', async () => {
+      Object.defineProperty(process, 'getuid', { value: () => 0, configurable: true });
+      process.env.RUNNER_TEMP = tempDir;
+      const ghAwRoot = path.join(tempDir, 'gh-aw');
+      const mcpConfigDir = path.join(ghAwRoot, 'mcp-config');
+      const mcpConfigPath = path.join(mcpConfigDir, 'mcp-servers.json');
+      fs.mkdirSync(mcpConfigDir, { recursive: true });
+      fs.writeFileSync(mcpConfigPath, '{}', { mode: 0o600 });
+
+      await writeConfigs(buildWriteConfig(tempDir));
+
+      expect(execa.sync).toHaveBeenCalledWith(
+        'chown',
+        ['-h', '-P', '-R', '--', '1000:1000', ghAwRoot],
+        expect.objectContaining({ reject: false })
+      );
     });
 
     it('throws when workDir path exists but is not a directory', async () => {
