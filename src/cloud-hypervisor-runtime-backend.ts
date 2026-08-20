@@ -51,6 +51,7 @@ const CLOUD_HYPERVISOR_GUEST_HOME = `${CLOUD_HYPERVISOR_GUEST_WORKSPACE}/.awf-ho
  * not one with a broken network path.
  */
 const CLOUD_HYPERVISOR_PROBE_TIMEOUT_MS = 90_000;
+const CLOUD_HYPERVISOR_GUEST_NETWORK_READY_TIMEOUT_MS = CLOUD_HYPERVISOR_PROBE_TIMEOUT_MS;
 const CLOUD_HYPERVISOR_CANCEL_GRACE_MS = 3_000;
 const CLOUD_HYPERVISOR_MAX_TIMEOUT_MS = 86_400_000;
 const MCP_GATEWAY_PORT = 8080;
@@ -247,6 +248,8 @@ export class CloudHypervisorRuntimeBackend implements ExternalAgentRuntimeBacken
       );
       stage = 'guest-boot';
       await this.manager.startInstance();
+      stage = 'guest-network-readiness';
+      await this.waitForGuestNetworkReady();
       stage = 'guest-connectivity';
       await this.probeGuestConnectivity();
       this.dependencies.logger.info('[cloud-hypervisor] stage=ready');
@@ -510,6 +513,52 @@ export class CloudHypervisorRuntimeBackend implements ExternalAgentRuntimeBacken
     this.dependencies.logger.info(
       '[cloud-hypervisor] Guest supervisor and trusted service connectivity verified',
     );
+  }
+
+  /**
+   * Verify the guest supervisor's network-readiness contract before running
+   * the more expensive service-connectivity probe. Current supervisors bring
+   * loopback up before opening the vsock listener; this bounded check also
+   * fails clearly if a mismatched guest image violates that contract.
+   */
+  private async waitForGuestNetworkReady(): Promise<void> {
+    const manager = this.manager!;
+    const environment = this.environment!;
+    const identity = this.identity;
+    if (!identity) {
+      throw new Error('guest-network-not-ready: Cloud Hypervisor guest identity is not ready');
+    }
+    const script = [
+      'attempt=1',
+      'delay=1',
+      'while [ "$attempt" -le 5 ]; do',
+      "  if ip link show dev lo 2>/dev/null | grep -q '[<,]UP[,>]'; then",
+      '    exit 0',
+      '  fi',
+      '  [ "$attempt" -eq 5 ] && break',
+      '  sleep "$delay"',
+      '  attempt=$((attempt + 1))',
+      '  [ "$delay" -ge 4 ] || delay=$((delay * 2))',
+      'done',
+      'exit 1',
+    ].join('\n');
+    try {
+      const result = await manager.execute({
+        requestId: `probe-network-ready-${process.pid}-${Date.now()}`,
+        argv: ['/bin/sh', '-c', script],
+        env: environment,
+        cwd: CLOUD_HYPERVISOR_GUEST_WORKSPACE,
+        ...identity,
+        timeoutMs: CLOUD_HYPERVISOR_GUEST_NETWORK_READY_TIMEOUT_MS,
+      });
+      if (result.exitCode === 0) return;
+      throw new Error(`loopback readiness check exited with code ${result.exitCode}`);
+    } catch (error) {
+      throw new Error(
+        `guest-network-not-ready: Cloud Hypervisor guest loopback interface lo ` +
+          `did not become UP (${formatError(error)})`,
+      );
+    }
   }
 
   /**
