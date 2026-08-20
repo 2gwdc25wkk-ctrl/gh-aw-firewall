@@ -202,6 +202,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { generateDockerCompose, redactDockerComposeSecrets } from './compose-generator';
+import { deriveSensitiveEndpointForms } from './redact-secrets';
 import { baseConfig, mockNetworkConfig } from './test-helpers/docker-test-fixtures.test-utils';
 import type { WrapperConfig } from './types';
 
@@ -262,6 +263,34 @@ describe('redactDockerComposeSecrets — service without environment (line 152)'
     // Service with sensitive key is redacted
     expect((result.services['secret-service'] as any).environment['SECRET_KEY']).toBe('[REDACTED]');
     expect((result.services['secret-service'] as any).environment['NORMAL_VAR']).toBe('kept');
+  });
+});
+
+describe('redactDockerComposeSecrets — secret-derived endpoint values', () => {
+  it('redacts sensitive endpoint values from non-secret-named env vars', () => {
+    const compose = {
+      services: {
+        'api-proxy': {
+          image: 'api-proxy:latest',
+          environment: {
+            OPENAI_API_TARGET: 'lb.internal.example.com',
+            OPENAI_ENDPOINT_OVERRIDE: 'https://lb.internal.example.com/v1',
+            NORMAL_VAR: 'kept',
+          },
+        },
+      },
+      networks: {},
+    };
+
+    const result = redactDockerComposeSecrets(
+      compose as any,
+      deriveSensitiveEndpointForms(['https://lb.internal.example.com'])
+    );
+
+    const environment = (result.services['api-proxy'] as any).environment;
+    expect(environment['OPENAI_API_TARGET']).toBe('[REDACTED]');
+    expect(environment['OPENAI_ENDPOINT_OVERRIDE']).not.toContain('lb.internal.example.com');
+    expect(environment['NORMAL_VAR']).toBe('kept');
   });
 });
 

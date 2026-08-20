@@ -19,6 +19,10 @@ jest.mock('fs', () => {
     existsSync: jest.fn(),
     lstatSync: jest.fn(),
     statSync: jest.fn(),
+    openSync: jest.fn(),
+    fchmodSync: jest.fn(),
+    fsyncSync: jest.fn(),
+    closeSync: jest.fn(),
     writeFileSync: jest.fn(),
     copyFileSync: jest.fn(),
     readFileSync: jest.fn(),
@@ -95,6 +99,7 @@ beforeEach(() => {
   // Default: not a symlink, is a directory
   fsMock.lstatSync.mockReturnValue({ isSymbolicLink: () => false } as fs.Stats);
   fsMock.statSync.mockReturnValue({ isDirectory: () => true } as fs.Stats);
+  fsMock.openSync.mockReturnValue(42);
 });
 
 // ─── validateAndPrepareWorkDir — non-directory guard ─────────────────────────
@@ -170,6 +175,27 @@ describe('config-writer: writeAuditArtifacts — non-directory auditDir (line 16
     ).toThrow(`Expected directory but found non-directory path: ${auditPath}`);
   });
 
+  it('redacts secret-derived endpoint hosts from the audited squid.conf', () => {
+    fsMock.lstatSync.mockReturnValue({ isSymbolicLink: () => false } as fs.Stats);
+    fsMock.statSync.mockReturnValue({ isDirectory: () => true } as fs.Stats);
+    fsMock.writeFileSync.mockClear();
+
+    const squidConfig = 'acl allowed_domains dstdomain .lb.secret.example.com';
+    writeAuditArtifacts(
+      makeConfig('/tmp/test-workdir', { sensitiveAllowedDomains: ['https://lb.secret.example.com'] }),
+      {} as any,
+      { services: {}, version: '3' } as any,
+      squidConfig
+    );
+
+    const squidWrite = fsMock.writeFileSync.mock.calls.find(
+      (call) => typeof call[1] === 'string' && (call[1] as string).includes('allowed_domains')
+    );
+    expect(squidWrite).toBeDefined();
+    expect(squidWrite![1]).not.toContain('lb.secret.example.com');
+    expect(squidWrite![1]).toContain('[REDACTED]');
+  });
+
   it('writes audit artifacts when auditDir is valid', () => {
     fsMock.lstatSync.mockReturnValue({ isSymbolicLink: () => false } as fs.Stats);
     fsMock.statSync.mockReturnValue({ isDirectory: () => true } as fs.Stats);
@@ -179,5 +205,13 @@ describe('config-writer: writeAuditArtifacts — non-directory auditDir (line 16
     ).not.toThrow();
 
     expect(fsMock.writeFileSync).toHaveBeenCalled();
+    expect(fsMock.openSync).toHaveBeenCalledWith(
+      expect.stringContaining('squid.conf'),
+      expect.any(Number),
+      0o600
+    );
+    expect(fsMock.fchmodSync).toHaveBeenCalledWith(42, 0o600);
+    expect(fsMock.fchmodSync).toHaveBeenCalledWith(42, 0o644);
+    expect(fsMock.closeSync).toHaveBeenCalledWith(42);
   });
 });

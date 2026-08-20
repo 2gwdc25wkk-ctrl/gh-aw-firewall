@@ -10,6 +10,7 @@ import { generateSessionCa, initSslDb, isOpenSslAvailable } from './ssl-bump';
 import { parseUrlPatterns } from './domain-matchers';
 import { SslConfig, SQUID_PORT } from './host-env';
 import { generateDockerCompose, redactDockerComposeSecrets } from './compose-generator';
+import { deriveSensitiveEndpointForms, redactSensitiveValues } from './redact-secrets';
 import { resolveLogPaths } from './log-paths';
 import { DEFAULT_DNS_SERVERS, filterForNetworkIsolation } from './dns-resolver';
 import { getSafeHostGid, getSafeHostUid } from './host-identity';
@@ -290,15 +291,24 @@ function writeAuditArtifacts(
   }
   fs.chmodSync(auditDir, 0o755);
 
-  // Save squid.conf for audit (no secrets — just domain ACLs and proxy config)
-  fs.writeFileSync(path.join(auditDir, 'squid.conf'), squidConfig, { mode: 0o644 });
+  // Secret-derived endpoints (e.g. an OpenAI base URL supplied through
+  // `apiProxy.targets.openai.baseUrlEnv`) must never appear in audit artifacts,
+  // so redact their URL/host/host:port forms from the snapshots below.
+  const sensitiveEndpointForms = deriveSensitiveEndpointForms(config.sensitiveAllowedDomains);
+
+  // Save squid.conf for audit (domain ACLs and proxy config, sensitive hosts redacted)
+  writeAuditArtifact(
+    auditDir,
+    'squid.conf',
+    redactSensitiveValues(squidConfig, sensitiveEndpointForms)
+  );
 
   // Save redacted docker-compose.yml (strip env vars that may contain secrets)
-  const redactedCompose = redactDockerComposeSecrets(dockerCompose);
-  fs.writeFileSync(
-    path.join(auditDir, 'docker-compose.redacted.yml'),
-    yaml.dump(redactedCompose, { lineWidth: -1 }),
-    { mode: 0o644 }
+  const redactedCompose = redactDockerComposeSecrets(dockerCompose, sensitiveEndpointForms);
+  writeAuditArtifact(
+    auditDir,
+    'docker-compose.redacted.yml',
+    yaml.dump(redactedCompose, { lineWidth: -1 })
   );
 
   // Generate and save policy manifest (structured description of all firewall rules)
@@ -319,13 +329,37 @@ function writeAuditArtifacts(
     // rather than misidentifying them as "unknown" or blocked.
     topologyPeers: resolveTopologyPeerHosts(config),
   });
-  fs.writeFileSync(
-    path.join(auditDir, 'policy-manifest.json'),
-    JSON.stringify(policyManifest, null, 2),
-    { mode: 0o644 }
+  writeAuditArtifact(
+    auditDir,
+    'policy-manifest.json',
+    JSON.stringify(policyManifest, null, 2)
   );
 
   logger.debug(`Audit artifacts written to: ${auditDir}`);
+}
+
+function writeAuditArtifact(auditDir: string, filename: string, contents: string): void {
+  const artifactPath = path.join(auditDir, filename);
+  const flags =
+    fs.constants.O_WRONLY |
+    fs.constants.O_CREAT |
+    fs.constants.O_TRUNC |
+    (fs.constants.O_NOFOLLOW ?? 0);
+  let fd: number | undefined;
+
+  try {
+    // Create privately and refuse a symlink target. Existing artifacts are
+    // tightened before truncation so readers cannot observe partial content.
+    fd = fs.openSync(artifactPath, flags, 0o600);
+    fs.fchmodSync(fd, 0o600);
+    fs.writeFileSync(fd, contents, { encoding: 'utf8' });
+    fs.fsyncSync(fd);
+    fs.fchmodSync(fd, 0o644);
+  } finally {
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+    }
+  }
 }
 
 /**
@@ -394,6 +428,7 @@ export async function writeConfigs(config: WrapperConfig): Promise<void> {
     // all necessary egress without exposing the sensitive hostnames in logs or
     // the audit artifact (where only config.allowedDomains is serialised).
     domains: [...config.allowedDomains, ...(config.sensitiveAllowedDomains ?? [])],
+    sensitiveDomains: config.sensitiveAllowedDomains,
     blockedDomains: config.blockedDomains,
     port: SQUID_PORT,
     sslBump: config.sslBump,
