@@ -46,6 +46,8 @@ describe('request-headers', () => {
     const req = {
       headers: {
         'x-custom': 'keep-me',
+        'copilot-session-token': 'session-jwt',
+        'x-github-tenant': 'tenant-id',
         'transfer-encoding': 'chunked',
       },
     };
@@ -58,6 +60,8 @@ describe('request-headers', () => {
     });
 
     expect(headers['x-initiator']).toBe('agent');
+    expect(headers['copilot-session-token']).toBe('session-jwt');
+    expect(headers['x-github-tenant']).toBe('tenant-id');
     expect(headers['content-length']).toBe(String(body.length));
     expect(headers['transfer-encoding']).toBeUndefined();
   });
