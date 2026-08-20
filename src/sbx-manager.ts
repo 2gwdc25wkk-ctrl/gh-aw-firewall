@@ -27,8 +27,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { copyEnvEntries } from './env-utils';
 import { logger } from './logger';
-import { HOME_TOOL_SUBDIRS } from './services/agent-volumes/home-whitelist';
-import { credentialEntriesUnderMountedParents } from './config/mount-policy';
+import {
+  credentialEntriesUnderMountedPaths,
+  HOME_TOOL_PATHS,
+} from './config/mount-policy';
+import { assertRealDirectory } from './fs-utils';
 import { getRealUserHome } from './host-identity';
 
 /** Name prefix for AWF-managed sandboxes. */
@@ -120,12 +123,14 @@ let credentialBackupRoot: string | undefined;
  * credential overlays; the credential list comes from the central mount policy
  * so the two backends can't drift.
  */
-function scrubHomeCredentials(homePath: string): void {
+function scrubHomeCredentials(
+  homePath: string,
+  mountedHomePaths: ReadonlySet<string> = new Set<string>(HOME_TOOL_PATHS),
+): void {
   scrubbedCredentials = [];
   credentialBackupRoot = undefined;
 
-  const mountedParents = new Set<string>(HOME_TOOL_SUBDIRS);
-  for (const entry of credentialEntriesUnderMountedParents(mountedParents)) {
+  for (const entry of credentialEntriesUnderMountedPaths(mountedHomePaths)) {
     const original = path.join(homePath, entry.path);
     if (!fs.existsSync(original)) continue;
 
@@ -157,6 +162,34 @@ function scrubHomeCredentials(homePath: string): void {
       `[sbx] Moved ${scrubbedCredentials.length} credential path(s) aside to ${credentialBackupRoot} for the duration of the sandbox`,
     );
   }
+}
+
+function resolveExistingHomeToolDirectory(
+  homePath: string,
+  toolPath: string,
+): { source: string; relativeHomePath?: string } | undefined {
+  const source = path.join(homePath, toolPath);
+  try {
+    assertRealDirectory(source);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+
+  const resolvedSource = fs.realpathSync(source);
+  const resolvedHome = fs.realpathSync(homePath);
+  const relativeHomePath = path.relative(resolvedHome, resolvedSource);
+  const isUnderHome = Boolean(relativeHomePath) &&
+    !relativeHomePath.startsWith('..') &&
+    !path.isAbsolute(relativeHomePath);
+  return {
+    source: resolvedSource,
+    relativeHomePath: isUnderHome
+      ? relativeHomePath.split(path.sep).join('/')
+      : undefined,
+  };
 }
 
 /**
@@ -275,9 +308,12 @@ export async function createSandbox(config: {
   // positional (host path == guest path) and cannot express the per-file
   // /dev/null credential overlays that compose mode uses (see
   // credential-hiding.ts), so the only way to keep host secrets out of the VM
-  // is to curate which $HOME subdirs are mounted. The central mount policy
-  // (HOME_TOOL_SUBDIRS) lists the allowed tool-state dirs including agent-state
-  // dirs (.copilot, .gemini). Credential stores such as ~/.aws, ~/.ssh,
+  // is to curate which $HOME paths are mounted. The central mount policy
+  // (HOME_TOOL_PATHS) lists allowed tool-state paths including agent-state
+  // dirs (.copilot, .gemini). Sensitive wholesale parents can be replaced with
+  // narrow descendants: ~/.local exposes rootless tool paths but not
+  // ~/.local/state, where sandboxd stores its CA key and microVM backing store.
+  // Credential stores such as ~/.aws, ~/.ssh,
   // ~/.docker, ~/.kube, ~/.gnupg, ~/.netrc and ~/.gitconfig are never
   // whitelisted, so they never enter the sandbox. Only paths that exist on the
   // host are mounted, because sbx requires the mount source to exist.
@@ -297,19 +333,24 @@ export async function createSandbox(config: {
   // diverge under sudo (e.g. /root vs /home/alice), mounting .local at a path
   // the guest's $HOME never points at and hiding a rootless-installed binary.
   const homePath = getRealUserHome();
-  for (const subdir of HOME_TOOL_SUBDIRS) {
-    const hostSubdir = `${homePath}/${subdir}`;
-    if (seenPaths.has(hostSubdir)) continue;
-    if (!fs.existsSync(hostSubdir)) continue;
-    seenPaths.add(hostSubdir);
-    args.push(hostSubdir);
+  const mountedHomePaths = new Set<string>();
+  for (const toolPath of HOME_TOOL_PATHS) {
+    const resolved = resolveExistingHomeToolDirectory(homePath, toolPath);
+    if (!resolved) continue;
+    const hostToolPath = resolved.source;
+    if (seenPaths.has(hostToolPath)) continue;
+    seenPaths.add(hostToolPath);
+    args.push(hostToolPath);
+    if (resolved.relativeHomePath) {
+      mountedHomePaths.add(resolved.relativeHomePath);
+    }
   }
 
   logger.info(`[sbx] Running: sbx ${args.join(' ')}`);
 
   // Move known credential stores out of the wholesale-mounted home dirs before
   // the sandbox exists, and remember them so they can be restored on teardown.
-  scrubHomeCredentials(homePath);
+  scrubHomeCredentials(homePath, mountedHomePaths);
 
   // Do NOT pass a custom `env` to sbx create. The sanitized env (which strips
   // vars matching TOKEN, SECRET, KEY, etc.) also strips variables the sbx CLI
