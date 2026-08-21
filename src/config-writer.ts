@@ -10,6 +10,7 @@ import { generateSessionCa, initSslDb, isOpenSslAvailable } from './ssl-bump';
 import { parseUrlPatterns } from './domain-matchers';
 import { SslConfig, SQUID_PORT } from './host-env';
 import { generateDockerCompose, redactDockerComposeSecrets } from './compose-generator';
+import { collectResolvedRuntimeImages } from './image-resolver';
 import { deriveSensitiveEndpointForms, redactSensitiveValues } from './redact-secrets';
 import { resolveLogPaths } from './log-paths';
 import { DEFAULT_DNS_SERVERS, filterForNetworkIsolation } from './dns-resolver';
@@ -309,6 +310,14 @@ function writeAuditArtifacts(
     auditDir,
     'docker-compose.redacted.yml',
     yaml.dump(redactedCompose, { lineWidth: -1 })
+  );
+
+  // Effective infrastructure images, recorded centrally by the image resolver
+  // so consumers that never appear in Compose (e.g. DinD staging) are included.
+  writeAuditArtifact(
+    auditDir,
+    'image-manifest.json',
+    JSON.stringify(collectResolvedRuntimeImages(config), null, 2),
   );
 
   // Generate and save policy manifest (structured description of all firewall rules)

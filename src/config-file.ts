@@ -105,6 +105,11 @@ export interface AwfFileConfig {
     };
   };
   container?: {
+    images?: Partial<Record<
+      'squid' | 'agent' | 'apiProxy' | 'cliProxy' | 'buildTools' | 'dohProxy' |
+      'enclaveScript' | 'enclaveAgent' | 'enclaveMcpServer' | 'dindStaging',
+      string
+    >>;
     memoryLimit?: string;
     pidsLimit?: number;
     agentTimeout?: number;
