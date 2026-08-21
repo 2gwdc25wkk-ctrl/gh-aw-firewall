@@ -6,6 +6,17 @@ const { URL } = require('url');
 const { computeTokenBudgetUsage } = require('./token-budget-log');
 const { applyCopilotHostHeaders, mergeInjectedHeaders } = require('./request-headers');
 
+function extractRequestModelFromUrl(url) {
+  if (typeof url !== 'string' || !url.startsWith('/')) return null;
+  try {
+    const parsed = new URL(url, 'http://awf.local');
+    const model = parsed.searchParams.get('model');
+    return model && model.length > 0 ? model : null;
+  } catch {
+    return null;
+  }
+}
+
 function createProxyErrorResponder({
   metrics,
   logRequest,
@@ -69,6 +80,7 @@ function createWebSocketTunnel({
     requestId,
     startTime,
     upstreamPath,
+    requestModel,
     onSocketsReady,
   }) {
     const { finalize, abort } = createProxyErrorResponder({
@@ -151,6 +163,7 @@ function createWebSocketTunnel({
           path: sanitizeForLog(req.url),
           startTime,
           metrics,
+          requestModel: requestModel || extractRequestModelFromUrl(req.url),
           onUsage: (normalizedUsage, model) =>
             computeTokenBudgetUsage({ logRequest, requestId, provider }, normalizedUsage, model),
         });
@@ -174,4 +187,5 @@ function createWebSocketTunnel({
 
 module.exports = {
   createWebSocketTunnel,
+  extractRequestModelFromUrl,
 };

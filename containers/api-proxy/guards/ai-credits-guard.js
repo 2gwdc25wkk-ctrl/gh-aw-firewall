@@ -27,6 +27,45 @@ const BUILTIN_FALLBACK_PRICING = Object.freeze({
   output: 15.00,
 });
 
+// Static ceiling for recognized dynamic selectors whose concrete runtime model
+// is unknown at accounting time. These rates bound every priced Copilot model
+// in the curated catalog; retain the ceiling if the catalog is unavailable.
+const DYNAMIC_SELECTOR_PRICING_CEILING = Object.freeze({
+  input: 10.00,
+  cachedInput: 1.00,
+  cacheWrite: 12.50,
+  output: 50.00,
+});
+
+function buildDynamicSelectorFallbackPricing() {
+  const pricing = { ...DYNAMIC_SELECTOR_PRICING_CEILING };
+  for (const catalogPricing of Object.values(pricingByModel)) {
+    for (const field of Object.keys(pricing)) {
+      if (typeof catalogPricing[field] === 'number') {
+        pricing[field] = Math.max(pricing[field], catalogPricing[field]);
+      }
+    }
+  }
+  return Object.freeze(pricing);
+}
+
+const DYNAMIC_SELECTOR_FALLBACK_PRICING = buildDynamicSelectorFallbackPricing();
+
+// Kept separate from the generic unknown-model fallback because a dynamic
+// selector is an explicit provider-supported request, not an unknown model.
+const DYNAMIC_SELECTOR_FALLBACK_PRICING_SOURCE = 'dynamic_selector_fallback';
+
+function getDynamicSelectorDescriptor(model, provider = undefined) {
+  if (typeof model !== 'string') return null;
+  if (provider !== PROVIDER_COPILOT) return null;
+  if (model.toLowerCase() !== 'auto') return null;
+  return { name: 'copilot:auto' };
+}
+
+function isRecognizedDynamicSelector(model, provider = undefined) {
+  return !!getDynamicSelectorDescriptor(model, provider);
+}
+
 function roundCredits(value) {
   return Math.round((value + Number.EPSILON) * 1_000_000) / 1_000_000;
 }
@@ -102,7 +141,7 @@ function resolveModelPricing(model, state = aiCreditsState, provider = undefined
     .every(field => Object.hasOwn(runtime.pricing, field))) {
     return runtime;
   }
-  const fallback = resolveLowerPriorityPricing(model, state, options);
+  const fallback = resolveLowerPriorityPricing(model, state, { ...options, provider });
   if (!runtime) return fallback;
   const mergedPricing = {};
   for (const field of ['input', 'cachedInput', 'cacheWrite', 'output']) {
@@ -145,6 +184,18 @@ function resolveLowerPriorityPricing(model, state, options = {}) {
   const catalogModel = resolveCatalogModel(model);
   if (catalogModel.pricing) {
     return { pricing: catalogModel.pricing, source: 'models.dev', tier: 'default' };
+  }
+
+  const dynamicSelector = getDynamicSelectorDescriptor(model, options.provider);
+  if (dynamicSelector) {
+    return {
+      pricing: DYNAMIC_SELECTOR_FALLBACK_PRICING,
+      source: DYNAMIC_SELECTOR_FALLBACK_PRICING_SOURCE,
+      tier: 'conservative',
+      accountingPolicy: 'dynamic_selector_fallback',
+      dynamicSelector: dynamicSelector.name,
+      usedFallbackPricing: true,
+    };
   }
 
   // Speculative callers (e.g. filtering a fallback candidate pool) pass quiet:true
@@ -249,6 +300,7 @@ function calculateAiCredits(normalizedUsage, model, state = aiCreditsState, prov
   const pricingResolution = resolveModelPricing(model, state, provider, totalInputForTier);
   if (!pricingResolution) return null;
   const { pricing } = pricingResolution;
+  const dynamicSelector = getDynamicSelectorDescriptor(model, provider);
 
   // input_tokens semantics differ by provider:
   //  - Anthropic and Copilot's precise copilot_usage report input_tokens as the
@@ -283,6 +335,13 @@ function calculateAiCredits(normalizedUsage, model, state = aiCreditsState, prov
     pricingObservedAt: pricingResolution.observedAt,
     pricingApiVersion: pricingResolution.apiVersion,
     pricingDiscountPercent: pricingResolution.discountPercent,
+    accountingPolicy: pricingResolution.accountingPolicy ||
+      (dynamicSelector ? 'dynamic_selector_runtime' : model === 'unknown' ? 'unknown_model_fallback' : 'concrete_model'),
+    usedFallbackPricing: pricingResolution.usedFallbackPricing === true ||
+      pricingResolution.source === 'configured_default' ||
+      pricingResolution.source === 'builtin_fallback' ||
+      pricingResolution.source === 'dynamic_selector_fallback',
+    dynamicSelector: pricingResolution.dynamicSelector || dynamicSelector?.name || null,
   };
 }
 
@@ -301,6 +360,9 @@ function applyAiCreditsUsage(normalizedUsage, model, provider = undefined) {
       totalCredits: 0,
       pricingSource: calc.pricingSource,
       pricingTier: calc.pricingTier,
+      accountingPolicy: calc.accountingPolicy,
+      fallbackPricingUsed: calc.usedFallbackPricing,
+      dynamicSelector: calc.dynamicSelector,
     };
   }
 
@@ -312,6 +374,9 @@ function applyAiCreditsUsage(normalizedUsage, model, provider = undefined) {
   modelBucket.totalCredits += calc.totalCredits;
   modelBucket.pricingSource = calc.pricingSource;
   modelBucket.pricingTier = calc.pricingTier;
+  modelBucket.accountingPolicy = calc.accountingPolicy;
+  modelBucket.fallbackPricingUsed = calc.usedFallbackPricing;
+  modelBucket.dynamicSelector = calc.dynamicSelector;
   aiCreditsState.totalAiCredits += calc.totalCredits;
 
   process.env.AWF_AI_CREDITS_USED = String(roundCredits(aiCreditsState.totalAiCredits));
@@ -325,6 +390,9 @@ function applyAiCreditsUsage(normalizedUsage, model, provider = undefined) {
     totalAiCredits: roundCredits(aiCreditsState.totalAiCredits),
     pricingSource: calc.pricingSource,
     pricingTier: calc.pricingTier,
+    accountingPolicy: calc.accountingPolicy,
+    fallbackPricingUsed: calc.usedFallbackPricing,
+    dynamicSelector: calc.dynamicSelector,
     ...(calc.pricingObservedAt ? { pricingObservedAt: calc.pricingObservedAt } : {}),
     ...(calc.pricingApiVersion ? { pricingApiVersion: calc.pricingApiVersion } : {}),
     ...(calc.pricingDiscountPercent !== undefined
@@ -344,6 +412,9 @@ function getAiCreditsReflectState() {
       total: roundCredits(usage.totalCredits),
       pricing_source: usage.pricingSource,
       pricing_tier: usage.pricingTier,
+      accounting_policy: usage.accountingPolicy || null,
+      fallback_pricing_used: usage.fallbackPricingUsed === true,
+      dynamic_selector: usage.dynamicSelector || null,
     };
   }
   return {
@@ -404,6 +475,7 @@ module.exports = {
   getAiCreditsBlockState,
   buildAiCreditsLimitError,
   checkUnknownModelRejection,
+  isRecognizedDynamicSelector,
   isModelPriceable,
   canonicalizeModel,
   resetAiCreditsGuardForTests,
