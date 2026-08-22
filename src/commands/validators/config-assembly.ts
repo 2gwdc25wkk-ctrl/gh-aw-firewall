@@ -14,6 +14,7 @@ import {
   assertCloudHypervisorRuntimeCompatibility,
   assertCloudHypervisorSelection,
 } from '../../cloud-hypervisor/runtime-validation';
+import { assertFilesystemWritePolicyCompatibility } from '../../filesystem-policy';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -90,6 +91,12 @@ export function assembleAndValidateConfig(
     }
   }
   applySecurityMode(config);
+  try {
+    assertFilesystemWritePolicyCompatibility(config);
+  } catch (error) {
+    logger.error(`❌ ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
   if (config.containerRuntime === 'cloud-hypervisor') {
     try {
       assertCloudHypervisorRuntimeCompatibility(config);

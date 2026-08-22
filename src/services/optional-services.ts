@@ -119,7 +119,11 @@ function filterAgentVolumesForSysroot(
     return true;
   });
 
-  return dropUnbackedHostHomeOverlays(filtered, hostHomeMountPrefix);
+  return dropUnbackedHostHomeOverlays(
+    filtered,
+    hostHomeMountPrefix,
+    config.filesystemAllowWrite !== undefined,
+  );
 }
 
 /**
@@ -156,14 +160,26 @@ function mountSpecKey(source: string, target: string): string {
  * mountpoint and the agent container fails to start.  The equivalent overlays
  * at the un-prefixed `$HOME` path (on the container's own rootfs) are kept.
  */
-function dropUnbackedHostHomeOverlays(volumes: string[], hostHomeMountPrefix: string): string[] {
+function dropUnbackedHostHomeOverlays(
+  volumes: string[],
+  hostHomeMountPrefix: string,
+  enforceWritePolicy: boolean,
+): string[] {
+  const containsPath = (parent: string, candidate: string): boolean =>
+    parent === '/' || candidate === parent || candidate.startsWith(`${parent}/`);
+  const hasHostHomeExposure = volumes.some(volume => {
+    const parts = volume.split(':');
+    const target = (parts[1] || '').replace(/\/+$/, '') || '/';
+    return parts[0] !== '/dev/null' &&
+      (containsPath(target, hostHomeMountPrefix) || containsPath(hostHomeMountPrefix, target));
+  });
   const hasWritableHostHome = volumes.some(volume => {
     const parts = volume.split(':');
     if (parts.length < 2) return false;
     if (parts[0] === '/dev/null') return false;
-    const target = (parts[1] || '').replace(/\/+$/, '');
+    const target = (parts[1] || '').replace(/\/+$/, '') || '/';
     const mode = parts[2] || 'rw';
-    return target === hostHomeMountPrefix && mode !== 'ro';
+    return containsPath(target, hostHomeMountPrefix) && mode !== 'ro';
   });
 
   if (hasWritableHostHome) return volumes;
@@ -177,6 +193,12 @@ function dropUnbackedHostHomeOverlays(volumes: string[], hostHomeMountPrefix: st
 
   const dropped = volumes.length - kept.length;
   if (dropped > 0) {
+    if (enforceWritePolicy && hasHostHomeExposure) {
+      throw new Error(
+        `filesystem.allowWrite cannot safely protect ${hostHomeMountPrefix} on an ARC/DinD sysroot ` +
+        'because doing so would disable credential-hiding overlays; allow the home mount or remove it',
+      );
+    }
     logger.warn(
       `No writable ${hostHomeMountPrefix} mount survived the sysroot filter; skipping ${dropped} ` +
       'credential-hiding overlay(s) under that path (the container could not start otherwise). ' +

@@ -72,10 +72,11 @@ following top-level properties. All are OPTIONAL:
 |----------|------|-------------|
 | `$schema` | string | JSON Schema URI for IDE validation |
 | `network` | object | Network egress configuration |
+| `filesystem` | object | Host filesystem write-boundary configuration (see §4.1) |
 | `apiProxy` | object | API proxy sidecar configuration |
 | `security` | object | Security and isolation settings |
 | `container` | object | Container and Docker settings |
-| `cloudHypervisor` | object | Cloud Hypervisor v53.0 microVM preview settings (see §4.1) |
+| `cloudHypervisor` | object | Cloud Hypervisor v53.0 microVM preview settings (see §4.2) |
 | `chroot` | object | Chroot execution overrides for split-filesystem ARC/DinD runners |
 | `dind` | object | Bootstrap helpers for ARC/DinD split runner/daemon filesystems |
 | `runner` | object | Runner topology declaration (standard vs. ARC/DinD) |
@@ -88,7 +89,21 @@ following top-level properties. All are OPTIONAL:
 Property-level constraints, types, and descriptions are defined
 normatively by `docs/awf-config.schema.json`.
 
-### 4.1 Cloud Hypervisor microVM preview
+### 4.1 Filesystem write boundary
+
+When `filesystem.allowWrite` is present, AWF MUST mount existing writable host
+binds read-only except at the listed guest-visible absolute paths. The list
+narrows existing access: it MUST NOT expose a new host path or make an
+otherwise read-only mount writable. Every listed path MUST exist within an
+existing writable host mount. An empty list makes all non-internal host bind
+mounts read-only.
+
+AWF-owned agent log and session-state mounts and required virtual devices remain
+writable so the sandbox can operate. `filesystem.allowWrite` currently supports
+Docker and gVisor compose runtimes; AWF rejects it with unsupported microVM
+runtimes.
+
+### 4.2 Cloud Hypervisor microVM preview
 
 The `cloudHypervisor` surface pins Cloud Hypervisor v53.0 artifacts and
 digests (binary, PCI-capable guest kernel, rootfs, and the shared AWF guest
@@ -224,7 +239,7 @@ AWF settings MAY be supplied via config files, including stdin (`--config -`).
 - `container.dockerHostPathPrefix` → `--docker-host-path-prefix`
 - `container.runnerToolCachePath` → *(config-only; checked first for optional read-only runner tool cache mount, before `RUNNER_TOOL_CACHE` and `/home/runner/work/_tool` auto-detection)*
 - `container.mounts[]` → `-v, --mount` *(repeatable; each array entry maps to one Docker volume mount in `/host_path:/container_path[:ro|rw]` format (both paths must be absolute; host path must exist); in chroot mode, container paths are automatically prefixed with `/host`)*
-- `container.containerRuntime` → `--container-runtime` *(user-facing runtime name: `"gvisor"` for an OCI runtime in Compose, `"sbx"` for a Docker sbx microVM, or `"cloud-hypervisor"` for the explicit Cloud Hypervisor v53.0 workload preview (GitHub-hosted Ubuntu x86_64 KVM runners only; see §4.1). gVisor translates to `"runsc"` and injects `extra_hosts` for its DNS workaround. For sbx and Cloud Hypervisor, infrastructure stays in Compose while the primary agent runs in a microVM.)*
+- `container.containerRuntime` → `--container-runtime` *(user-facing runtime name: `"gvisor"` for an OCI runtime in Compose, `"sbx"` for a Docker sbx microVM, or `"cloud-hypervisor"` for the explicit Cloud Hypervisor v53.0 workload preview (GitHub-hosted Ubuntu x86_64 KVM runners only; see §4.2). gVisor translates to `"runsc"` and injects `extra_hosts` for its DNS workaround. For sbx and Cloud Hypervisor, infrastructure stays in Compose while the primary agent runs in a microVM.)*
 - `cloudHypervisor.previewEnabled` → `--cloud-hypervisor-preview` *(requires `container.containerRuntime: "cloud-hypervisor"` and a GitHub-hosted Ubuntu x86_64 KVM runner to execute a workload)*
 - `cloudHypervisor.cloudHypervisorBinary` → `--cloud-hypervisor-binary`
 - `cloudHypervisor.kernelPath` → `--cloud-hypervisor-kernel`

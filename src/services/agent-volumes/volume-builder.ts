@@ -10,6 +10,7 @@ import { generateHostsFileMount } from './hosts-file';
 import { buildSslMounts } from './ssl-mounts';
 import { buildSystemMounts } from './system-mounts';
 import { buildCustomVolumeMounts, buildWorkspaceMounts } from './workspace-mounts';
+import { applyFilesystemWritePolicy } from './filesystem-write-policy';
 
 interface AgentVolumesParams {
   config: WrapperConfig;
@@ -62,15 +63,32 @@ export function buildAgentVolumes(params: AgentVolumesParams): string[] {
   }
   agentVolumes.push(...buildDockerSocketMount(config));
   agentVolumes.push(...buildSslMounts(sslConfig));
-  agentVolumes.push(...buildCustomVolumeMounts(config.volumeMounts, config.dockerHostPathPrefix));
+  const alwaysWritableMounts = new Set(agentVolumes.filter((spec) =>
+    spec.startsWith(`${agentLogsPath}:`) ||
+    spec.startsWith(`${sessionStatePath}:`) ||
+    spec === '/dev/null:/host/dev/null:rw'
+  ));
+  const customMounts = buildCustomVolumeMounts(config.volumeMounts, config.dockerHostPathPrefix);
+  agentVolumes.push(...customMounts);
 
   logger.debug('Using selective mounting for security (credential files hidden)');
 
   agentVolumes.push(...buildCredentialHidingOverlays(effectiveHome));
 
+  const localCustomMounts = buildCustomVolumeMounts(config.volumeMounts, undefined, { quiet: true });
+  const localSourceRoots = new Map(
+    customMounts.map((spec, index) => [spec, localCustomMounts[index]?.split(':')[0] ?? '']),
+  );
+  const policyVolumes = applyFilesystemWritePolicy(
+    agentVolumes,
+    config.filesystemAllowWrite,
+    alwaysWritableMounts,
+    localSourceRoots,
+  );
+
   if (config.dockerHostPathPrefix) {
-    return applyHostPathPrefixToVolumes(agentVolumes, config.dockerHostPathPrefix);
+    return applyHostPathPrefixToVolumes(policyVolumes, config.dockerHostPathPrefix);
   }
 
-  return agentVolumes;
+  return policyVolumes;
 }
