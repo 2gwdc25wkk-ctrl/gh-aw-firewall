@@ -15,7 +15,8 @@ export function generateSslBumpSection(
   sslDbPath: string,
   hasPlainDomains: boolean,
   hasPatterns: boolean,
-  urlPatterns?: string[]
+  urlPatterns?: string[],
+  allowCliProxyArtifactStorage = false,
 ): string {
   // Build the SSL Bump domain list for the bump directive
   let bumpAcls = '';
@@ -76,7 +77,11 @@ acl step3 at_step SslBump3
 # Peek at ClientHello to see SNI (Server Name Indication)
 ssl_bump peek step1
 
-# Stare at server certificate to validate it
+${allowCliProxyArtifactStorage ? `# Splice the CLI proxy's scoped artifact-storage connections here (before staring
+# or bumping) so signed Azure Blob URLs stay encrypted and the AWF-generated CA
+# is never presented to the CLI proxy, which only trusts its system CA bundle.
+ssl_bump splice from_cli_proxy cli_proxy_artifact_storage
+` : ''}# Stare at server certificate to validate it
 ssl_bump stare step2
 
 # Bump (intercept) connections to allowed domains
