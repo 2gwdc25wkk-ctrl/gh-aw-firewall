@@ -97,6 +97,9 @@ describe('cloud-hypervisor-live-smoke.sh', () => {
       'api-proxy-reflect',
       'workspace-live-share',
       'runtime-cache-readonly',
+      'allow-write',
+      'allow-write-none',
+      'allow-write-invalid',
       'exit-code',
       'timeout-124',
       'partial-start-cleanup',
@@ -160,6 +163,72 @@ describe('cloud-hypervisor-live-smoke.sh', () => {
     // despite the CLI help text describing it as "enabled by default".
     const source = fs.readFileSync(smokePath, 'utf-8');
     expect(source).toMatch(/COMMON=\(\n(?:.*\n)*?\s*--network-isolation\n/);
+  });
+
+  it('proves filesystem.allowWrite enforcement end to end, including fail-closed', () => {
+    const source = fs.readFileSync(smokePath, 'utf-8');
+    // Selective policy: host-visible persistence of an allowed write, plus
+    // sibling/parent/create/truncate/rename/delete denial outside the list.
+    expect(source).toContain('"allowWrite": ["/workspace/allowed", "/workspace/allowed-file.txt"]');
+    expect(source).toContain('test "$(cat "$allow_workspace/allowed/created.txt")" = guest-allowed');
+    expect(source).toContain('test "$(cat "$allow_workspace/blocked/file.txt")" = host');
+    expect(source).toContain('test ! -e "$allow_workspace/created-at-root.txt"');
+    expect(source).toContain('test ! -e "$allow_workspace/renamed.txt"');
+    // A selective export stays read-write guest-side; only the zero-overlay
+    // narrowing publishes the guest mount itself read-only.
+    expect(source).toContain('grep -q " /workspace/allowed virtiofs " /proc/mounts');
+    expect(source).toContain('grep -q " /workspace virtiofs ro," /proc/mounts');
+    // Unmatched allowlist entries abort the run instead of widening it.
+    expect(source).toContain('run_case allow-write-invalid 1');
+    expect(source).toContain("grep -q 'filesystem.allowWrite'");
+  });
+
+  it('proves every allowWrite denial probe actually executed under BusyBox ash', () => {
+    const source = fs.readFileSync(smokePath, 'utf-8');
+    // Regression: the guest shell is BusyBox ash, where a redirection failure
+    // on a POSIX *special* builtin is fatal and exits the shell. An earlier
+    // `! : > /workspace/input.txt` truncate probe therefore terminated the
+    // guest command before the rename and delete probes ran, while the host
+    // post-checks still passed vacuously -- a write never attempted also never
+    // Comment lines are excluded: the rationale above quotes the old probe.
+    const executableLines = source
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'));
+    expect(executableLines.some((line) => /!\s*:\s*>/.test(line))).toBe(false);
+    expect(source).toContain('! ( printf "" > /workspace/input.txt )');
+
+    // Every denial probe is subshell-contained (so even a fatal shell error is
+    // isolated) and followed by a sentinel that the suite then requires.
+    for (const probe of [
+      '! ( printf blocked > /workspace/blocked/file.txt )',
+      '! ( printf blocked > /workspace/created-at-root.txt )',
+      '! ( mkdir /workspace/blocked-dir )',
+      '! ( mv /workspace/rename-me.txt /workspace/renamed.txt )',
+      '! ( rm /workspace/blocked/file.txt )',
+    ]) {
+      expect(source).toContain(probe);
+    }
+
+    expect(source).toContain('assert_sentinels() {');
+    expect(source).toContain('missing sentinel $sentinel (probe never executed)');
+    for (const sentinel of [
+      'AWF-ALLOWWRITE-ALLOWED-OK',
+      'AWF-ALLOWWRITE-SIBLING-DENIED',
+      'AWF-ALLOWWRITE-CREATE-DENIED',
+      'AWF-ALLOWWRITE-MKDIR-DENIED',
+      'AWF-ALLOWWRITE-TRUNCATE-DENIED',
+      'AWF-ALLOWWRITE-RENAME-DENIED',
+      'AWF-ALLOWWRITE-DELETE-DENIED',
+      'AWF-ALLOWWRITE-NONE-READ-OK',
+      'AWF-ALLOWWRITE-NONE-WRITE-DENIED',
+      'AWF-ALLOWWRITE-NONE-CREATE-DENIED',
+    ]) {
+      // Emitted by the guest command, and separately required afterwards.
+      expect(source).toContain(`echo ${sentinel}`);
+      expect(source.split(sentinel).length - 1).toBeGreaterThanOrEqual(2);
+    }
+    expect(source).toContain('assert_sentinels allow-write \\');
+    expect(source).toContain('assert_sentinels allow-write-none \\');
   });
 
   (shellcheckAvailable() ? it : it.skip)('has no shellcheck errors', () => {
