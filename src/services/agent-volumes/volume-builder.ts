@@ -1,8 +1,11 @@
 import { SslConfig } from '../../host-env';
+import { getSafeHostGid, getSafeHostUid } from '../../host-env';
 import { logger } from '../../logger';
 import { WrapperConfig } from '../../types';
 import { applyHostPathPrefixToVolumes } from '../host-path-prefix';
-import { buildCredentialHidingOverlays } from './credential-hiding';
+import { buildCredentialHidingOverlays, pruneUnmountableCredentialOverlays } from './credential-hiding';
+import { createLocalSourceResolver } from './mount-topology';
+import { ensureNestedMountpoints } from './nested-mountpoints';
 import { buildDockerSocketMount } from './docker-socket';
 import { buildEtcMounts } from './etc-mounts';
 import { buildHomeMounts } from './home-strategy';
@@ -66,6 +69,7 @@ export function buildAgentVolumes(params: AgentVolumesParams): string[] {
   const alwaysWritableMounts = new Set(agentVolumes.filter((spec) =>
     spec.startsWith(`${agentLogsPath}:`) ||
     spec.startsWith(`${sessionStatePath}:`) ||
+    spec.startsWith(`${initSignalDir}:`) ||
     spec === '/dev/null:/host/dev/null:rw'
   ));
   const customMounts = buildCustomVolumeMounts(config.volumeMounts, config.dockerHostPathPrefix);
@@ -79,11 +83,31 @@ export function buildAgentVolumes(params: AgentVolumesParams): string[] {
   const localSourceRoots = new Map(
     customMounts.map((spec, index) => [spec, localCustomMounts[index]?.split(':')[0] ?? '']),
   );
-  const policyVolumes = applyFilesystemWritePolicy(
+  // Same pairing, keyed by source root, so topology passes can map a daemon-side
+  // custom-mount source back to the runner path (or refuse to, and fail closed).
+  const customSourceRoots = new Map(
+    customMounts.map((spec, index) => [
+      spec.split(':')[0] ?? '',
+      localCustomMounts[index]?.split(':')[0] ?? '',
+    ]),
+  );
+  const localSourceResolver = createLocalSourceResolver(customSourceRoots, config.dockerHostPathPrefix);
+
+  const policyVolumes = pruneUnmountableCredentialOverlays(applyFilesystemWritePolicy(
     agentVolumes,
     resolveComposeFilesystemAllowWrite(config),
     alwaysWritableMounts,
     localSourceRoots,
+  ), localSourceResolver);
+
+  // A read-only bind cannot host a mountpoint runc still has to create, so any
+  // internal mount nested inside one must exist up front. Derived from the final
+  // topology, so mounts added later are covered without another targeted fix.
+  ensureNestedMountpoints(
+    policyVolumes,
+    parseInt(getSafeHostUid(), 10),
+    parseInt(getSafeHostGid(), 10),
+    localSourceResolver,
   );
 
   if (config.dockerHostPathPrefix) {
