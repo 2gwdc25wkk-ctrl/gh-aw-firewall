@@ -17,17 +17,59 @@ const ENCLAVE_AUDIT_FILES = [
   { source: 'enclave.jsonl', destination: 'enclave.jsonl' },
   { source: 'runtime-telemetry.jsonl', destination: 'enclave-runtime.jsonl' },
 ] as const;
+const MAX_ENCLAVE_GITHUB_AUDIT_BYTES = 10 * 1024 * 1024;
+
+function copyRegularFileNoFollow(source: string, destination: string): void {
+  const sourceFd = fs.openSync(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const stat = fs.fstatSync(sourceFd);
+    if (!stat.isFile() || stat.size > MAX_ENCLAVE_GITHUB_AUDIT_BYTES) {
+      throw new Error('Enclave GitHub CLI audit must be a bounded regular file');
+    }
+
+    const destinationFd = fs.openSync(
+      destination,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      const buffer = Buffer.allocUnsafe(Math.min(stat.size, 64 * 1024));
+      let remaining = stat.size;
+      let bytesRead: number;
+      while (
+        remaining > 0
+        && (bytesRead = fs.readSync(sourceFd, buffer, 0, Math.min(buffer.length, remaining), null)) > 0
+      ) {
+        let offset = 0;
+        while (offset < bytesRead) {
+          offset += fs.writeSync(destinationFd, buffer, offset, bytesRead - offset, null);
+        }
+        remaining -= bytesRead;
+      }
+    } finally {
+      fs.closeSync(destinationFd);
+    }
+  } finally {
+    fs.closeSync(sourceFd);
+  }
+}
 
 /**
  * Copies the iptables audit dump from the init-signal volume to the audit directory.
  * Must be called BEFORE stopContainers() because `docker compose down -v` destroys
  * the init-signal volume.
  */
-export function preserveIptablesAudit(workDir: string, auditDir?: string): void {
+export function preserveIptablesAudit(
+  workDir: string,
+  auditDir?: string,
+  requireEnclaveGithubAudit = false,
+): boolean {
   const iptablesAuditSrc = path.join(workDir, 'init-signal', 'iptables-audit.txt');
-  const enclaveRoot = resolveEnclavePaths(workDir).root;
+  const enclavePaths = resolveEnclavePaths(workDir);
+  const enclaveRoot = enclavePaths.root;
   const targetAuditDir = auditDir || path.join(workDir, 'audit');
-  if (!fs.existsSync(targetAuditDir)) return;
+  if (!fs.existsSync(targetAuditDir)) return !requireEnclaveGithubAudit;
+  let complete = true;
 
   if (fs.existsSync(iptablesAuditSrc)) {
     try {
@@ -36,6 +78,24 @@ export function preserveIptablesAudit(workDir: string, auditDir?: string): void 
       logger.debug('Copied iptables audit state to audit directory');
     } catch (error) {
       logger.debug('Could not copy iptables audit file:', error);
+    }
+  }
+
+  const githubCliAuditSrc = path.join(enclavePaths.githubCliProxyLogsDir, 'access.jsonl');
+  try {
+    const destination = path.join(targetAuditDir, 'enclave-github-cli-access.jsonl');
+    copyRegularFileNoFollow(githubCliAuditSrc, destination);
+    fs.chmodSync(destination, 0o600);
+    logger.debug('Copied enclave GitHub CLI audit to audit directory');
+  } catch (error: unknown) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+      if (requireEnclaveGithubAudit) {
+        complete = false;
+        logger.debug('Required enclave GitHub CLI audit was not available for preservation');
+      }
+    } else {
+      complete = false;
+      logger.debug('Could not copy enclave GitHub CLI audit:', error);
     }
   }
 
@@ -52,9 +112,11 @@ export function preserveIptablesAudit(workDir: string, auditDir?: string): void 
         if (result.exitCode === 0) {
           logger.debug(`Copied enclave MCP server ${auditFile.source} to audit directory`);
         } else {
+          complete = false;
           logger.debug(`Could not copy enclave ${auditFile.source}:`, result.stderr);
         }
       } catch (error) {
+        complete = false;
         logger.debug(`Could not copy enclave ${auditFile.source}:`, error);
       }
     }
@@ -78,6 +140,7 @@ export function preserveIptablesAudit(workDir: string, auditDir?: string): void 
       logger.debug('Could not copy enclave agent sessions:', error);
     }
   }
+  return complete;
 }
 
 type PreserveDirectoryOptions = {
