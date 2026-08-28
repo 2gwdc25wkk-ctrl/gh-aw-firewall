@@ -62,4 +62,16 @@ describe('docker-manager (barrel re-exports)', () => {
     const actualExports = new Set(Object.keys(dockerManager));
     expect(actualExports).toEqual(expectedExports);
   });
+
+  it('filterCapDrop behaves as a pass-through re-export (basic sanity)', () => {
+    // Exercises the re-exported function directly for coverage of the
+    // barrel's export wiring; detailed behavior is covered in
+    // capability-filter.test.ts.
+    const result = dockerManager.filterCapDrop(['ALL'], null);
+    expect(Array.isArray(result)).toBe(true);
+  });
+
+  it('isCapDropSkipped returns a boolean via the barrel re-export', () => {
+    expect(typeof dockerManager.isCapDropSkipped()).toBe('boolean');
+  });
 });
