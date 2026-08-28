@@ -95,11 +95,13 @@ describe('unified enclave agent runner specification', () => {
       '--cpus', '0.5',
       '--pids-limit', '47',
       '--ulimit', `fsize=${ENCLAVE_MAX_FILE_BYTES}`,
+      '--shm-size', '96m',
       '--pull', 'never',
     ]));
     expect(spec.launchArgs).toContain('/tmp:rw,noexec,nosuid,nodev,size=96m');
+    expect(spec.launchArgs.join(' ')).not.toMatch(/--tmpfs \/agent:/);
     expect(spec.launchArgs).toContain(
-      '/agent:rw,nosuid,nodev,size=96m,uid=65534,gid=65534,mode=0700',
+      '/daemon/private/enclave/work/0123456789abcdef/agent:/agent:rw',
     );
     expect(spec.launchArgs).toContain(`${trustedConfig.hostSeedsDir}/${'b'.repeat(32)}:/awf/seed:ro`);
     expect(spec.launchArgs).toContain(

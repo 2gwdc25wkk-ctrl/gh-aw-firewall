@@ -18,6 +18,8 @@ SCHEMA_PATH = Path("/awf/schema.json")
 OUT_PATH = Path("/awf/out")
 SESSION_LOG_PATH = Path("/awf/session.jsonl")
 AGENT_DIR = Path("/agent")
+TEMP_DIR = Path("/tmp")
+SHARED_MEMORY_DIR = Path("/dev/shm")
 COPILOT_BIN = "/usr/local/bin/copilot"
 
 MAX_INPUT_BYTES = 64 * 1024
@@ -25,6 +27,7 @@ MAX_TRANSCRIPT_BYTES = 1024 * 1024
 MAX_ENGINE_STREAM_BYTES = MAX_TRANSCRIPT_BYTES // 4
 MAX_DIAGNOSTIC_BYTES = 256 * 1024
 MAX_DIAGNOSTIC_FILES = 32
+MAX_RESOURCE_ENTRIES = 10_000
 MAX_STARTUP_RETRIES = 2
 STARTUP_CRASH_WINDOW_SECONDS = 30
 EXIT_CONFIGURATION_INVALID = 10
@@ -79,6 +82,110 @@ def redact_diagnostics(value: str) -> str:
 
 def append_progress(stage: str, **metadata) -> None:
     append_event({"event": "progress", "stage": stage, **metadata})
+
+
+def directory_usage(path: Path) -> dict:
+    total_bytes = 0
+    largest_file_bytes = 0
+    entries = 0
+    truncated = False
+    try:
+        for root, directories, files in os.walk(path):
+            for name in directories + files:
+                entries += 1
+                if entries > MAX_RESOURCE_ENTRIES:
+                    truncated = True
+                    break
+                try:
+                    entry_stat = (Path(root) / name).lstat()
+                    total_bytes += entry_stat.st_size
+                    if stat.S_ISREG(entry_stat.st_mode):
+                        largest_file_bytes = max(largest_file_bytes, entry_stat.st_size)
+                except OSError:
+                    continue
+            if truncated:
+                break
+    except OSError:
+        pass
+    return {
+        "entries": min(entries, MAX_RESOURCE_ENTRIES),
+        "bytes": total_bytes,
+        "largestFileBytes": largest_file_bytes,
+        "truncated": truncated,
+    }
+
+
+def read_cgroup_value(name: str) -> int | None:
+    try:
+        value = (Path("/sys/fs/cgroup") / name).read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if value == "max":
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def read_cgroup_events() -> dict:
+    allowed = {"high", "max", "oom", "oom_kill"}
+    events = {}
+    try:
+        lines = Path("/sys/fs/cgroup/memory.events").read_text(encoding="ascii").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return events
+    for line in lines:
+        key, separator, value = line.partition(" ")
+        if separator and key in allowed:
+            try:
+                parsed = int(value)
+            except ValueError:
+                continue
+            if parsed >= 0:
+                events[key] = parsed
+    return events
+
+
+def append_resource_snapshot(stage: str) -> None:
+    filesystems = []
+    directories = []
+    for identifier, path in (
+        ("agent-directory", AGENT_DIR),
+        ("temporary-directory", TEMP_DIR),
+        ("shared-memory", SHARED_MEMORY_DIR),
+    ):
+        try:
+            filesystem = os.statvfs(path)
+            filesystems.append({
+                "path": identifier,
+                "capacityBytes": filesystem.f_blocks * filesystem.f_frsize,
+                "availableBytes": filesystem.f_bavail * filesystem.f_frsize,
+            })
+        except OSError:
+            pass
+        directories.append({"path": identifier, **directory_usage(path)})
+
+    memory = {}
+    for field, cgroup_name in (
+        ("currentBytes", "memory.current"),
+        ("peakBytes", "memory.peak"),
+        ("limitBytes", "memory.max"),
+    ):
+        value = read_cgroup_value(cgroup_name)
+        if value is not None:
+            memory[field] = value
+    events = read_cgroup_events()
+    if events:
+        memory["events"] = events
+    append_event({
+        "event": "resource-snapshot",
+        "stage": stage,
+        "filesystems": filesystems,
+        "directories": directories,
+        "memory": memory,
+    })
 
 
 def safe_os_error(error: OSError, operation: str) -> None:
@@ -217,15 +324,17 @@ def build_prompt(task: str, schema_text: str) -> str:
     schema = json.loads(schema_text)
     if schema.get("type") == "boolean":
         output_contract = (
-            "Your final response MUST be exactly the lowercase JSON literal true or false. "
-            "Do not use quotes, a JSON object, a Markdown fence, an explanation, or any "
-            "surrounding text.\n"
+            "Before finishing, use a shell command to replace /awf/out with exactly the "
+            "lowercase JSON literal true or false. Do not write quotes, a JSON object, a "
+            "Markdown fence, an explanation, or any surrounding text to /awf/out. "
+            "Your conversational response is not the result channel.\n"
         )
     else:
         output_contract = (
-            "Your final response MUST be exactly one JSON value conforming to this finite "
-            "schema, with no Markdown fence, explanation, surrounding text, or repeated "
-            f"schema:\n{schema_text}\n"
+            "Before finishing, use a shell command to replace /awf/out with exactly one JSON "
+            "value conforming to this finite schema. Do not write a Markdown fence, "
+            "explanation, surrounding text, or repeated schema to /awf/out. Your "
+            f"conversational response is not the result channel:\n{schema_text}\n"
         )
     github_access = ""
     if os.environ.get("AWF_ENCLAVE_AGENT_GITHUB_ENABLED") == "true":
@@ -239,7 +348,8 @@ def build_prompt(task: str, schema_text: str) -> str:
     return (
         "You are the native GitHub Copilot CLI running in an AWF enclave-agent enclave.\n"
         "The repository root is your current directory and is mounted read-only at /awf/seed. "
-        "/agent and /tmp are bounded writable tmpfs storage. You may use your built-in shell, "
+        "/agent is an invocation-private writable runtime directory and /tmp is bounded tmpfs. "
+        "You may use your built-in shell, "
         "bash, file-reading, and search tools. You have no GitHub MCP, no credentials, no host "
         "filesystem, and no network route except AWF's model and optional GitHub proxies."
         f"{github_access}\n\n"
@@ -247,18 +357,6 @@ def build_prompt(task: str, schema_text: str) -> str:
         f"{task}\n\n"
         f"{output_contract}"
     )
-
-
-def normalize_copilot_output(stdout: str, schema_text: str) -> str:
-    result = stdout.strip()
-    result = re.sub(r"^●\s*", "", result, count=1)
-    schema_suffix = schema_text.strip()
-    if len(result) > len(schema_suffix) and result.endswith(schema_suffix):
-        result = result[:-len(schema_suffix)].strip()
-    schema = json.loads(schema_text)
-    if schema.get("type") == "boolean" and result in {"True", "False"}:
-        result = result.lower()
-    return result
 
 
 def append_engine_result(completed: subprocess.CompletedProcess) -> tuple[str, str]:
@@ -330,6 +428,12 @@ def main() -> int:
             append_event({"event": "engine-diagnostics", "log": diagnostics})
         append_event({"event": "failure", "category": "engine-failed"})
         return EXIT_ENGINE_FAILED
+    try:
+        OUT_PATH.write_text("", encoding="utf-8")
+    except OSError as error:
+        safe_os_error(error, "output-reset")
+        append_event({"event": "failure", "category": "result-write-failed"})
+        return EXIT_RESULT_WRITE_FAILED
 
     command = [
         COPILOT_BIN,
@@ -355,6 +459,7 @@ def main() -> int:
     deadline = time.monotonic() + timeout
     completed = None
     stdout = ""
+    append_resource_snapshot("before-engine")
     for attempt in range(MAX_STARTUP_RETRIES + 1):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -394,6 +499,7 @@ def main() -> int:
                 diagnostics = read_copilot_diagnostics(copilot_logs)
                 if diagnostics:
                     append_event({"event": "engine-diagnostics", "log": diagnostics})
+                append_resource_snapshot("after-engine")
                 append_event({"event": "failure", "category": "deadline-exceeded"})
                 return EXIT_DEADLINE_EXCEEDED
             completed = subprocess.CompletedProcess(
@@ -407,11 +513,13 @@ def main() -> int:
             diagnostics = read_copilot_diagnostics(copilot_logs)
             if diagnostics:
                 append_event({"event": "engine-diagnostics", "log": diagnostics})
+            append_resource_snapshot("after-engine")
             append_event({"event": "failure", "category": "engine-failed"})
             return EXIT_ENGINE_FAILED
 
         stdout, _ = append_engine_result(completed)
         runtime = time.monotonic() - started
+        append_resource_snapshot("after-engine")
         append_progress(
             "engine-completed",
             attempt=attempt + 1,
@@ -442,8 +550,21 @@ def main() -> int:
         append_event({"event": "failure", "category": "engine-failed"})
         return EXIT_ENGINE_FAILED
     append_progress("output-normalization-started")
-    result = normalize_copilot_output(stdout, schema_text)
-    if not result or len(result.encode("utf-8")) > max_output:
+    try:
+        result_bytes = OUT_PATH.read_bytes()
+    except OSError as error:
+        safe_os_error(error, "output-read")
+        append_event({"event": "failure", "category": "result-write-failed"})
+        return EXIT_RESULT_WRITE_FAILED
+    if not result_bytes or len(result_bytes) > max_output:
+        append_event({"event": "failure", "category": "result-write-failed"})
+        return EXIT_RESULT_WRITE_FAILED
+    try:
+        result = result_bytes.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        append_event({"event": "failure", "category": "result-write-failed"})
+        return EXIT_RESULT_WRITE_FAILED
+    if not result:
         append_event({"event": "failure", "category": "result-write-failed"})
         return EXIT_RESULT_WRITE_FAILED
     append_progress("output-normalized", outputBytes=len(result.encode("utf-8")))

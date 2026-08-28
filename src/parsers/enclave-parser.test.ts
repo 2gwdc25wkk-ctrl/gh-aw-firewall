@@ -48,6 +48,16 @@ describe('normalizeEnclavesConfig', () => {
     expect(config?.executors.agent.timeout).toBe(120);
   });
 
+  it('provides memory headroom beyond the bounded agent tmpfs mounts', () => {
+    const config = normalizeEnclavesConfig([
+      { agent: { model: 'gpt-5' }, repos: [repository] },
+    ]);
+    expect(config?.executors.agent.memoryLimit).toBe('1g');
+    expect(config?.executors.agent.tmpfsLimit).toBe('256m');
+    expect(config?.executors.script.memoryLimit).toBe('512m');
+    expect(config?.executors.script.tmpfsLimit).toBe('64m');
+  });
+
   it('preserves trusted executor overrides', () => {
     expect(normalizeEnclavesConfig([
       { script: {}, runtime: 'gvisor', image: 'registry/script@sha256:abc', repos: [repository] },
@@ -195,10 +205,13 @@ describe('enclaves JSON Schema', () => {
       }],
     })).toEqual([]);
     expect(validateAwfFileConfig({
-      enclaves: [{ script: {}, repos: [repository], timeout: 541 }],
+      enclaves: [{ agent: { model: 'gpt-5' }, repos: [repository], timeout: 4740 }],
+    })).toEqual([]);
+    expect(validateAwfFileConfig({
+      enclaves: [{ script: {}, repos: [repository], timeout: 4741 }],
     }).length).toBeGreaterThan(0);
     expect(validateAwfFileConfig({
-      enclaves: [{ agent: { model: 'gpt-5' }, repos: [repository], timeout: 541 }],
+      enclaves: [{ agent: { model: 'gpt-5' }, repos: [repository], timeout: 4741 }],
     }).length).toBeGreaterThan(0);
   });
 });

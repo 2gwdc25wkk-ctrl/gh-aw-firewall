@@ -11,7 +11,7 @@ env:
 name: Smoke Enclave Issues Read
 engine:
   id: copilot
-  version: 1.0.34
+  version: 1.0.80
 network:
   allowed:
     - defaults
@@ -22,7 +22,7 @@ tools:
     allowed: []
 enclaves:
   - agent:
-      model: gpt-5
+      model: claude-sonnet-5
       github:
         cli: issues-read-v1
     repos:
@@ -43,7 +43,7 @@ sandbox:
     id: awf
     version: v0.28.9
   mcp:
-    version: v0.4.12
+    version: v0.4.13
 strict: false
 concurrency:
   group: smoke-enclave-issues-read
