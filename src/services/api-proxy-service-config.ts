@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   API_PROXY_CONTAINER_NAME,
 } from '../constants';
@@ -7,7 +9,11 @@ import { getSafeHostGid, getSafeHostUid } from '../host-identity';
 import { NetworkConfig, ImageBuildConfig } from './squid-service';
 import { applyHostPathPrefixToVolumes } from './host-path-prefix';
 import { buildContainerSecurityHardening } from './service-security';
-import { buildApiProxyBaseEnv, resolveApiProxyShutdownTimeoutMs } from './api-proxy-env-config';
+import {
+  API_PROXY_UPSTREAM_CA_CERT_CONTAINER_PATH,
+  buildApiProxyBaseEnv,
+  resolveApiProxyShutdownTimeoutMs,
+} from './api-proxy-env-config';
 import { buildApiProxyLifecycleConfig } from './api-proxy-lifecycle-config';
 
 interface ApiProxyServiceConfigParams {
@@ -15,6 +21,24 @@ interface ApiProxyServiceConfigParams {
   networkConfig: NetworkConfig;
   apiProxyLogsPath: string;
   imageConfig: ImageBuildConfig;
+}
+
+function resolveApiProxyCaCertPath(source: string): string {
+  if (!source.trim()) {
+    throw new Error('apiProxy.caCert must be a non-empty path');
+  }
+
+  const resolvedPath = path.resolve(process.cwd(), source);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(resolvedPath);
+  } catch {
+    throw new Error(`apiProxy.caCert file does not exist: ${resolvedPath}`);
+  }
+  if (!stat.isFile()) {
+    throw new Error(`apiProxy.caCert must refer to a file: ${resolvedPath}`);
+  }
+  return resolvedPath;
 }
 
 export function buildApiProxyServiceConfig(params: ApiProxyServiceConfigParams): any {
@@ -25,6 +49,9 @@ export function buildApiProxyServiceConfig(params: ApiProxyServiceConfigParams):
   const { useGHCR, registry, parsedTag, projectRoot, resolveImage } = imageConfig;
   const shutdownTimeoutMs = resolveApiProxyShutdownTimeoutMs(config);
   const stopGracePeriodSeconds = Math.ceil((shutdownTimeoutMs + 2000) / 1000);
+  const apiProxyCaCertPath = config.apiProxyCaCert === undefined
+    ? undefined
+    : resolveApiProxyCaCertPath(config.apiProxyCaCert);
 
   const proxyService: any = {
     container_name: API_PROXY_CONTAINER_NAME,
@@ -34,6 +61,7 @@ export function buildApiProxyServiceConfig(params: ApiProxyServiceConfigParams):
       [
         // Mount log directory for api-proxy logs
         `${apiProxyLogsPath}:/var/log/api-proxy:rw`,
+        ...(apiProxyCaCertPath ? [`${apiProxyCaCertPath}:${API_PROXY_UPSTREAM_CA_CERT_CONTAINER_PATH}:ro`] : []),
       ],
       config.dockerHostPathPrefix,
     ),
