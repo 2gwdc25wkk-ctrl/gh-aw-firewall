@@ -34,7 +34,8 @@ function createProxyHandler(adapter, checkRateLimit, proxyRequest) {
       adapter.name,
       adapter.getBasePath(req),
       adapter.getBodyTransform(),
-      adapter.getRequestSigner ? adapter.getRequestSigner() : null
+      adapter.getRequestSigner ? adapter.getRequestSigner() : null,
+      adapter.getTargetScheme ? adapter.getTargetScheme(req) : 'https'
     );
   };
 }
@@ -111,6 +112,7 @@ function createWebSocketUpgradeHandler(adapter, proxyWebSocket) {
           trackUpgradeSocket(clientSocket);
           trackUpgradeSocket(upstreamSocket);
         },
+        targetScheme: adapter.getTargetScheme ? adapter.getTargetScheme(req) : 'https',
       }
     );
   };
