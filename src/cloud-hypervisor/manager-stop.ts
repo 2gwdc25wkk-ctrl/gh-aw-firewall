@@ -12,6 +12,7 @@ import type { CloudHypervisorCgroup } from './launcher';
 import type { MicrovmRootfsPreparer } from '../microvm/rootfs';
 import type { VirtiofsdManager, VirtiofsdDevice } from './virtiofsd';
 import type { CloudHypervisorGuestChannel } from './guest-execution';
+import type { CloudHypervisorVmmIdentityManager } from './vmm-identity';
 
 const SHUTDOWN_GRACE_MS = 5_000;
 
@@ -28,6 +29,7 @@ export interface CloudHypervisorStopContext {
   fsDevices: VirtiofsdDevice[];
   guest?: CloudHypervisorGuestChannel;
   cgroup?: CloudHypervisorCgroup;
+  vmmIdentity?: CloudHypervisorVmmIdentityManager;
   instanceStarted: boolean;
   lastVmInfo?: CloudHypervisorVmInfo;
   lastVmCounters?: CloudHypervisorVmCounters;
@@ -42,6 +44,7 @@ export interface CloudHypervisorStopContext {
   setFsDevices(devices: VirtiofsdDevice[]): void;
   setGuest(guest: CloudHypervisorGuestChannel | undefined): void;
   setCgroup(cgroup: CloudHypervisorCgroup | undefined): void;
+  setVmmIdentity(identity: CloudHypervisorVmmIdentityManager | undefined): void;
   setInstanceStarted(started: boolean): void;
   setLastVmInfo(info: CloudHypervisorVmInfo | undefined): void;
   setLastVmCounters(counters: CloudHypervisorVmCounters | undefined): void;
@@ -49,6 +52,7 @@ export interface CloudHypervisorStopContext {
 
 export async function stopCloudHypervisor(context: CloudHypervisorStopContext): Promise<void> {
   const errors: unknown[] = [];
+  let identityResourcesRemoved = true;
   const instanceWasStarted = context.instanceStarted;
   if (context.client && instanceWasStarted) {
     try { context.setLastVmInfo(await context.client.vmInfo()); } catch { context.setLastVmInfo(undefined); }
@@ -121,7 +125,7 @@ export async function stopCloudHypervisor(context: CloudHypervisorStopContext): 
     return;
   }
   try { await context.network?.cleanup(); context.setNetwork(undefined); context.setNetworkPlan(undefined); }
-  catch (error) { errors.push(error); }
+  catch (error) { identityResourcesRemoved = false; errors.push(error); }
   try { await context.cgroup?.cleanup(); } catch (error) { errors.push(error); }
   context.setCgroup(undefined);
   if (!instanceWasStarted || terminationConfirmed) {
@@ -130,7 +134,19 @@ export async function stopCloudHypervisor(context: CloudHypervisorStopContext): 
         path.join(context.paths.runBaseDir, path.basename(context.config.cloudHypervisorBinary), context.paths.runId),
         { recursive: true, force: true },
       );
-    } catch (error) { errors.push(error); }
+    } catch (error) { identityResourcesRemoved = false; errors.push(error); }
+  }
+  if (identityResourcesRemoved) {
+    try {
+      await context.vmmIdentity?.cleanup();
+      context.setVmmIdentity(undefined);
+    } catch (error) {
+      errors.push(error);
+    }
+  } else if (context.vmmIdentity) {
+    errors.push(new Error(
+      'Cloud Hypervisor VMM identity retained because owned run resources could not be fully removed',
+    ));
   }
   throwCleanupErrors(errors, 'Cloud Hypervisor cleanup failed: ');
 }

@@ -45,7 +45,10 @@ import {
   type CloudHypervisorRunPaths,
 } from './manager-types';
 import { runCloudHypervisorPreflight } from './preflight';
-import type { CloudHypervisorHostToolPaths } from './preflight';
+import type {
+  CloudHypervisorHostToolPaths,
+  CloudHypervisorPreflightResult,
+} from './preflight';
 import {
   verifyCloudHypervisorConfinement,
   type CloudHypervisorConfinementEvidence,
@@ -53,6 +56,7 @@ import {
 import { startCloudHypervisor } from './manager-start';
 import { stopCloudHypervisor } from './manager-stop';
 import { VirtiofsdManager, type VirtiofsdDevice } from './virtiofsd';
+import { CloudHypervisorVmmIdentityManager } from './vmm-identity';
 
 export {
   CLOUD_HYPERVISOR_GUEST_VSOCK_PORT,
@@ -113,6 +117,7 @@ const defaultDependencies: CloudHypervisorManagerDependencies = {
   }),
   createCgroup: (cgroupPath, limits) => new CloudHypervisorCgroup(cgroupPath, limits),
   verifyConfinement: verifyCloudHypervisorConfinement,
+  createVmmIdentity: (runId, tools) => new CloudHypervisorVmmIdentityManager(runId, tools),
   resolveIdentity: resolveCloudHypervisorIdentity,
 };
 
@@ -170,6 +175,7 @@ export class CloudHypervisorManager {
   private fsDevices: VirtiofsdDevice[] = [];
   private guest: CloudHypervisorGuestChannel | undefined;
   private cgroup: CloudHypervisorCgroup | undefined;
+  private vmmIdentity: CloudHypervisorVmmIdentityManager | undefined;
   private networkPlan: MicrovmNetworkPlan | undefined;
   private confinementEvidence: CloudHypervisorConfinementEvidence | undefined;
   private instanceStarted = false;
@@ -212,6 +218,7 @@ export class CloudHypervisorManager {
     runId?: string,
     private readonly networkConfig?: CloudHypervisorManagerNetworkConfig,
     private readonly guestConfig?: CloudHypervisorManagerGuestConfig,
+    private readonly verifiedArtifacts?: CloudHypervisorPreflightResult,
   ) {
     this.paths = createCloudHypervisorRunPaths(config.cloudHypervisorBinary, runId);
   }
@@ -224,12 +231,14 @@ export class CloudHypervisorManager {
       paths: this.paths,
       networkConfig: this.networkConfig,
       guestConfig: this.guestConfig,
+      verifiedArtifacts: this.verifiedArtifacts,
       stdoutCapture: this.stdoutCapture,
       stderrCapture: this.stderrCapture,
       setNetworkPlan: (value) => { this.networkPlan = value; },
       setNetwork: (value) => { this.network = value; },
       setRootfsPreparer: (value) => { this.rootfsPreparer = value; },
       setCgroup: (value) => { this.cgroup = value; },
+      setVmmIdentity: (value) => { this.vmmIdentity = value; },
       setProcess: (value) => { this.process = value; },
       setClient: (value) => { this.client = value; },
       setConfinementEvidence: (value) => { this.confinementEvidence = value; },
@@ -245,6 +254,10 @@ export class CloudHypervisorManager {
     await this.client.vmBoot();
     this.instanceStarted = true;
     if (this.guestConfig) {
+      if (!this.vmmIdentity) {
+        throw new Error('Cloud Hypervisor VMM identity is not configured');
+      }
+      await this.vmmIdentity.validateOwnedPaths([this.paths.vsockSocketPath]);
       this.guest = await CloudHypervisorGuestChannel.connect(
         this.dependencies,
         this.paths.vsockSocketPath,
@@ -309,6 +322,7 @@ export class CloudHypervisorManager {
       fsDevices: this.fsDevices,
       guest: this.guest,
       cgroup: this.cgroup,
+      vmmIdentity: this.vmmIdentity,
       instanceStarted: this.instanceStarted,
       lastVmInfo: this.lastVmInfo,
       lastVmCounters: this.lastVmCounters,
@@ -322,6 +336,7 @@ export class CloudHypervisorManager {
       setFsDevices: (value) => { this.fsDevices = value; },
       setGuest: (value) => { this.guest = value; },
       setCgroup: (value) => { this.cgroup = value; },
+      setVmmIdentity: (value) => { this.vmmIdentity = value; },
       setInstanceStarted: (value) => { this.instanceStarted = value; },
       setLastVmInfo: (value) => { this.lastVmInfo = value; },
       setLastVmCounters: (value) => { this.lastVmCounters = value; },

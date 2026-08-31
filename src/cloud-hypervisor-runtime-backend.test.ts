@@ -99,6 +99,10 @@ const preflightResult = {
   cgroupVersion: 2 as const,
   kvmGid: 978,
   tools: {
+    getfacl: '/usr/bin/getfacl',
+    getent: '/usr/bin/getent',
+    groupdel: '/usr/sbin/groupdel',
+    id: '/usr/bin/id',
     ip: '/usr/bin/ip',
     nft: '/usr/sbin/nft',
     sysctl: '/usr/sbin/sysctl',
@@ -110,6 +114,9 @@ const preflightResult = {
     mount: '/usr/bin/mount',
     umount: '/usr/bin/umount',
     setpriv: '/usr/bin/setpriv',
+    setfacl: '/usr/bin/setfacl',
+    useradd: '/usr/sbin/useradd',
+    userdel: '/usr/sbin/userdel',
   },
 };
 
@@ -243,6 +250,8 @@ describe('Cloud Hypervisor runtime backend', () => {
         infrastructure(),
         [{ tag: 'workspace', source: '/workspace', target: '/workspace', mode: 'rw' }],
         { uid: 1000, gid: 1000 },
+        undefined,
+        preflightResult,
       )).toBeDefined();
       expect(createCloudHypervisorRuntimeBackend(config(), startInfrastructure))
         .toEqual(expect.objectContaining({ runtime: 'cloud-hypervisor' }));
@@ -302,6 +311,7 @@ describe('Cloud Hypervisor runtime backend', () => {
             },
           ],
         },
+        preflightResult,
       );
       expect(deps.logger.info).toHaveBeenCalledWith(
         '[cloud-hypervisor] stage=filesystem-write-policy boundary /workspace=ro ' +
@@ -325,7 +335,8 @@ describe('Cloud Hypervisor runtime backend', () => {
       { tag: 'workspace', source: '/workspace-host', target: '/workspace', mode: 'rw' },
     ]);
     expect(call[5]).toBeUndefined();
-    expect(call).toHaveLength(6);
+    expect(call[6]).toBe(preflightResult);
+    expect(call).toHaveLength(7);
     expect(deps.logger.info).not.toHaveBeenCalledWith(
       expect.stringContaining('stage=filesystem-write-policy'),
     );

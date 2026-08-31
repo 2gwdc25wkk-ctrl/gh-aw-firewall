@@ -268,7 +268,7 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
       constants.R_OK | constants.W_OK,
     );
     expect(deps.sha256).toHaveBeenCalledTimes(5);
-    expect(deps.assertToolAvailable).toHaveBeenCalledTimes(12);
+    expect(deps.assertToolAvailable).toHaveBeenCalledTimes(20);
     expect(deps.assertDockerInfrastructure).toHaveBeenCalledWith('/usr/bin/docker');
     expect(deps.verifyManifestAttestation).toHaveBeenCalledWith(
       '/usr/bin/gh',
@@ -276,6 +276,10 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
       '/snapshot/manifest.sigstore.jsonl',
     );
     expect(result.tools).toEqual({
+      getfacl: '/usr/bin/getfacl',
+      getent: '/usr/bin/getent',
+      groupdel: '/usr/bin/groupdel',
+      id: '/usr/bin/id',
       ip: '/usr/bin/ip',
       nft: '/usr/bin/nft',
       sysctl: '/usr/bin/sysctl',
@@ -287,6 +291,9 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
       mount: '/usr/bin/mount',
       umount: '/usr/bin/umount',
       setpriv: '/usr/bin/setpriv',
+      setfacl: '/usr/bin/setfacl',
+      useradd: '/usr/bin/useradd',
+      userdel: '/usr/bin/userdel',
     });
   });
 
