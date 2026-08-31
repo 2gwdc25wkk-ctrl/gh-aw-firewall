@@ -113,12 +113,14 @@ export async function verifyVirtiofsdSandbox(
     assertSameIdentity(options.parentIdentity, currentParent, 'parent');
     assertLaunchCommand(currentParent, options);
 
-    const workerPid = await waitForWorker(options.parentIdentity.pid, dependencies);
-    const workerIdentity = await captureVirtiofsdProcessIdentity(workerPid, dependencies);
-    assertExecutable(workerIdentity.executable, options.expectedExecutable, 'worker');
-    await options.assignToCgroup(workerPid);
-    const currentWorker = await captureVirtiofsdProcessIdentity(workerPid, dependencies);
-    assertSameIdentity(workerIdentity, currentWorker, 'worker');
+    const workerIdentity = await waitForWorker(
+      options.parentIdentity.pid,
+      options.expectedExecutable,
+      options.assignToCgroup,
+      dependencies,
+    );
+    const workerPid = workerIdentity.pid;
+    const currentWorker = workerIdentity;
 
     const parent = await collectProcessEvidence(currentParent, options.cgroupPath, dependencies);
     const worker = await collectProcessEvidence(currentWorker, options.cgroupPath, dependencies);
@@ -219,8 +221,10 @@ export async function verifyVirtiofsdSandbox(
 
 async function waitForWorker(
   parentPid: number,
+  expectedExecutable: string,
+  assignToCgroup: (pid: number) => Promise<void>,
   dependencies: VirtiofsdSandboxDependencies,
-): Promise<number> {
+): Promise<VirtiofsdProcessIdentity> {
   const deadline = Date.now() + WORKER_READY_TIMEOUT_MS;
   do {
     const children = (
@@ -229,11 +233,41 @@ async function waitForWorker(
     for (const value of children) {
       const candidate = Number(value);
       if (!Number.isSafeInteger(candidate) || candidate <= 1) continue;
+      let identity: VirtiofsdProcessIdentity;
       try {
         const comm = await dependencies.readFile(`/proc/${candidate}/comm`, 'utf8');
-        if (comm.trim() === 'virtiofsd') return candidate;
+        if (comm.trim() !== 'virtiofsd') continue;
+        identity = await captureVirtiofsdProcessIdentity(candidate, dependencies);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ESRCH') continue;
+        throw error;
+      }
+      assertExecutable(identity.executable, expectedExecutable, 'worker');
+      try {
+        await assignToCgroup(candidate);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ESRCH') continue;
+        if (code === 'ENOENT') {
+          try {
+            await captureVirtiofsdProcessIdentity(candidate, dependencies);
+          } catch (identityError) {
+            const identityCode = (identityError as NodeJS.ErrnoException).code;
+            if (identityCode === 'ENOENT' || identityCode === 'ESRCH') continue;
+            throw identityError;
+          }
+        }
+        throw error;
+      }
+      try {
+        const current = await captureVirtiofsdProcessIdentity(candidate, dependencies);
+        assertSameIdentity(identity, current, 'worker');
+        return current;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ESRCH') continue;
+        throw error;
       }
     }
     await dependencies.sleep(WORKER_READY_INTERVAL_MS);
