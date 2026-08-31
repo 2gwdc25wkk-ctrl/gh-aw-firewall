@@ -79,7 +79,8 @@ AWF performs these steps for each run:
    executable, credentials, capabilities, `no_new_privs`, seccomp worker,
    network namespace, cgroup membership, or resource limits differ from the
    launch policy.
-8. Start one sandboxed `virtiofsd` process for each validated export.
+8. Start one sandboxed `virtiofsd` process for each validated export and verify
+   its live confinement state from procfs.
 9. Create and boot the VM, connect to the guest supervisor over VSOCK, verify
    loopback plus the configured guest interface, address, and route, and probe
    each trusted infrastructure service with bounded retries. An exhausted
@@ -145,6 +146,40 @@ not copy unbounded `/proc` content.
 The private run directory is under
 `/run/awf-cloud-hypervisor/<binary>/<runId>/`. Its per-run leaf is accessible
 only to the selected non-root identity and root.
+
+### virtiofsd confinement
+
+AWF launches the pinned `virtiofsd` binary as root because its namespace
+sandbox must create the export mount tree, unshare namespaces, and pivot its
+worker root. Root launch is not treated as proof that the sandbox succeeded.
+Before any virtio-fs socket is included in the Cloud Hypervisor VM
+configuration, AWF verifies the live parent and worker through `/proc`:
+
+- the parent PID still has its launch-time start value, trusted executable, and
+  exact socket, export, sandbox, and seccomp arguments;
+- parent and worker UIDs/GIDs match the reviewed root namespace identity;
+- every parent capability set is empty, while the worker effective and
+  permitted masks equal the pinned minimal virtiofsd set, its inheritable and
+  ambient sets are empty, and its bounding set contains the capabilities
+  needed during sandbox setup (rendered non-acquirable after `NoNewPrivs`);
+- the worker has `NoNewPrivs: 1` and seccomp filter mode `2`;
+- the worker mount, PID, and network namespaces differ from the host;
+- the worker root inode is the inode of the declared export, proving the
+  namespace sandbox pivoted to the intended tree;
+- parent and worker belong only to the run's bounded cgroup v2 leaf; and
+- parent and worker environments contain only `PATH`, `HOME`, `LANG`, and
+  `LC_ALL`, with no inherited provider credentials or other host variables.
+
+Any mismatch terminates all partially started daemons and aborts startup before
+`vm.create`. The observations are written with mode `0600` to
+`virtiofs-<index>-confinement.json` in the private run directory and copied into
+the diagnostic bundle as
+`virtiofs-<index>-<tag>-confinement.json`. When verification itself rejects
+startup, AWF preserves the failure record under
+`<workDir>/diagnostics/cloud-hypervisor/startup-<runId>/` before partial-start
+cleanup removes the private run directory. This verification follows the
+proven post-launch model from `agent-microvm` v0.9.0 rather than relying only on
+`--sandbox=namespace` and socket existence.
 
 ### Credential isolation
 

@@ -84,6 +84,7 @@ describe('buildCloudHypervisorVmConfig', () => {
         },
         socketPath: '/run/virtiofs.sock',
         logPath: '/run/virtiofs.log',
+        evidencePath: '/run/virtiofs-confinement.json',
       }],
     });
 
