@@ -29,6 +29,7 @@ import {
   issueDuplicationConclusionConcurrencyRegex,
   issueDuplicationConclusionConcurrencySentinel,
   ripgrepInstallStepRegex,
+  patchLocalBuildCloudHypervisorArtifacts,
 } from './workflow-patch-patterns';
 import {
   buildCopySessionStateStep,
@@ -104,6 +105,42 @@ describe('ripgrepInstallStepRegex', () => {
 
     expect(ripgrepInstallStepRegex.test(input)).toBe(true);
     ripgrepInstallStepRegex.lastIndex = 0;
+  });
+
+  describe('patchLocalBuildCloudHypervisorArtifacts', () => {
+    it('enables the development bypass with all five artifact digests', () => {
+      const input =
+        '        env:\n' +
+        '          AWF_REFLECT_ENABLED: 1\n' +
+        '          sudo awf --cloud-hypervisor-supervisor "${GH_AW_CLOUD_HYPERVISOR_SUPERVISOR}" ' +
+        '--cloud-hypervisor-artifact-manifest "$MANIFEST" --cloud-hypervisor-preview --build-local\n';
+
+      const output = patchLocalBuildCloudHypervisorArtifacts(input);
+
+      expect(output).toContain('--cloud-hypervisor-artifact-manifest "$MANIFEST"');
+      expect(output).toContain('--cloud-hypervisor-mount-policy workspace-and-tool-cache');
+      expect(output).toContain('AWF_CLOUD_HYPERVISOR_DEVELOPMENT_ALLOW_UNATTESTED_ARTIFACTS: "1"');
+      expect(output).toContain('--cloud-hypervisor-development-allow-unattested-artifacts');
+      for (const artifact of ['binary', 'virtiofsd', 'kernel', 'rootfs', 'supervisor']) {
+        expect(output).toContain(`--cloud-hypervisor-${artifact}-sha256`);
+      }
+      for (const manifestKey of ['cloudHypervisor', 'virtiofsd', 'kernel', 'rootfs', 'supervisor']) {
+        expect(output).toContain(`.artifacts.${manifestKey}.sha256`);
+      }
+    });
+
+    it('is idempotent when the local-build workflow is already patched', () => {
+      const input =
+        '        env:\n' +
+        '          AWF_CLOUD_HYPERVISOR_DEVELOPMENT_ALLOW_UNATTESTED_ARTIFACTS: "1"\n' +
+        '          AWF_REFLECT_ENABLED: 1\n' +
+        'sudo awf --cloud-hypervisor-supervisor "${GH_AW_CLOUD_HYPERVISOR_SUPERVISOR}" ' +
+        '--cloud-hypervisor-binary-sha256 "$DIGEST" --cloud-hypervisor-preview ' +
+        '--cloud-hypervisor-development-allow-unattested-artifacts ' +
+        '--cloud-hypervisor-mount-policy workspace-and-tool-cache --build-local\n';
+
+      expect(patchLocalBuildCloudHypervisorArtifacts(input)).toBe(input);
+    });
   });
 
   it('matches an installer that already has a step timeout', () => {
