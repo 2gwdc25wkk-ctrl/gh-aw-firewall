@@ -11,6 +11,17 @@ PLAYWRIGHT_LOG="$RESULT_DIR/playwright.log"
 BLOCKED_LOG="$RESULT_DIR/blocked-egress.log"
 SERVER_PID=
 EXPECTED_RUNTIME="${1:?usage: run-playwright-loopback-smoke.sh <runtime>}"
+PLAYWRIGHT_ROOT=/tmp/gh-aw/playwright
+PLAYWRIGHT_CLI_ROOT="$PLAYWRIGHT_ROOT/cli"
+PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$PLAYWRIGHT_ROOT/browsers}"
+PLAYWRIGHT_SYSROOT="$PLAYWRIGHT_ROOT/sysroot"
+
+export PATH="$PLAYWRIGHT_CLI_ROOT/node_modules/.bin:$PATH"
+export PLAYWRIGHT_BROWSERS_PATH
+
+if [[ "$EXPECTED_RUNTIME" == "docker-sbx" || "$EXPECTED_RUNTIME" == "cloud-hypervisor" ]]; then
+  export LD_LIBRARY_PATH="$PLAYWRIGHT_SYSROOT/lib/x86_64-linux-gnu:$PLAYWRIGHT_SYSROOT/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 
 mkdir -p "$RESULT_DIR"
 : > "$SERVER_LOG"
@@ -27,8 +38,31 @@ cleanup() {
 }
 trap cleanup EXIT
 
+print_failure_diagnostics() {
+  status=$?
+  echo "Playwright loopback fixture failed with exit code $status" >&2
+  for log_file in "$PLAYWRIGHT_LOG" "$BLOCKED_LOG" "$SERVER_LOG"; do
+    if [ -s "$log_file" ]; then
+      echo "===== $log_file =====" >&2
+      tail -n 100 "$log_file" >&2
+    fi
+  done
+  exit "$status"
+}
+trap print_failure_diagnostics ERR
+
 if ! command -v playwright-cli >/dev/null 2>&1; then
-  echo "playwright-cli is not available inside the agent sandbox" >&2
+  echo "Pre-staged playwright-cli is not available inside the agent sandbox" >&2
+  exit 1
+fi
+
+if [ ! -d "$PLAYWRIGHT_BROWSERS_PATH" ]; then
+  echo "Pre-staged Playwright browser directory is not available inside the agent sandbox" >&2
+  exit 1
+fi
+
+if [ ! -d "$PLAYWRIGHT_SYSROOT/usr/lib/x86_64-linux-gnu" ]; then
+  echo "Pre-staged Playwright runtime libraries are not available inside the agent sandbox" >&2
   exit 1
 fi
 
@@ -86,9 +120,17 @@ const fs = require("node:fs");
 
 fs.writeFileSync(process.argv[2], JSON.stringify({
   browser: {
+    browserName: "chromium",
     isolated: true,
     launchOptions: {
       headless: true,
+      chromiumSandbox: false,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+      ],
       proxy: {
         server: process.argv[3],
         bypass: "localhost,127.0.0.1",
@@ -99,9 +141,6 @@ fs.writeFileSync(process.argv[2], JSON.stringify({
   outputMode: "stdout",
 }, null, 2), { mode: 0o600 });
 NODE
-
-playwright-cli install-browser chromium \
-  >>"$PLAYWRIGHT_LOG" 2>&1
 
 node "$SERVER_SCRIPT" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
@@ -144,14 +183,19 @@ if [ "$TITLE_OBSERVED" != true ]; then
   exit 1
 fi
 
-set +e
-playwright-cli goto https://example.com \
-  >"$BLOCKED_LOG" 2>&1
-BLOCKED_EXIT=$?
-set -e
+if playwright-cli goto https://example.com >"$BLOCKED_LOG" 2>&1; then
+  BLOCKED_EXIT=0
+else
+  BLOCKED_EXIT=$?
+fi
 if [ "$BLOCKED_EXIT" -eq 0 ]; then
-  echo "Playwright unexpectedly reached non-allowlisted example.com" >&2
-  exit 1
+  BLOCKED_TITLE=$(playwright-cli --raw eval "() => document.title" 2>>"$BLOCKED_LOG")
+  printf 'Blocked navigation title: %s\n' "$BLOCKED_TITLE" >>"$BLOCKED_LOG"
+  if [[ "$BLOCKED_TITLE" != ERROR:* ]]; then
+    echo "Playwright unexpectedly reached non-allowlisted example.com" >&2
+    cat "$BLOCKED_LOG" >&2
+    exit 1
+  fi
 fi
 
 cat > "$RESULT_FILE" <<EOF

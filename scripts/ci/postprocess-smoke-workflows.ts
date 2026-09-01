@@ -234,3 +234,80 @@ for (const sbxLockPath of sbxLockPaths) {
     console.log(`Skipping ${sbxLockPath}: file not found.`);
   }
 }
+
+// The current local AWF requires attested Cloud Hypervisor manifests, while the
+// latest published test bundle predates manifest attestations. Keep the local
+// build covered by the smoke workflow using AWF's explicit dual development
+// opt-in until a release publishes the new attestation artifact.
+const playwrightCloudLockPath = path.join(
+  workflowsDir,
+  'smoke-playwright-cloud-hypervisor.lock.yml',
+);
+try {
+  const cloudOriginal = fs.readFileSync(playwrightCloudLockPath, 'utf-8');
+  let cloudContent = cloudOriginal;
+
+  if (!cloudContent.includes('--cloud-hypervisor-development-allow-unattested-artifacts')) {
+    cloudContent = cloudContent.replace(
+      '--cloud-hypervisor-preview ',
+      '--cloud-hypervisor-preview --cloud-hypervisor-development-allow-unattested-artifacts ',
+    );
+  }
+  if (!cloudContent.includes('--cloud-hypervisor-mount-policy workspace-and-tool-cache')) {
+    cloudContent = cloudContent.replace(
+      '--cloud-hypervisor-preview ',
+      '--cloud-hypervisor-preview --cloud-hypervisor-mount-policy workspace-and-tool-cache ',
+    );
+  }
+  if (!cloudContent.includes('AWF_CLOUD_HYPERVISOR_DEVELOPMENT_ALLOW_UNATTESTED_ARTIFACTS: "1"')) {
+    cloudContent = cloudContent.replace(
+      '        env:\n          AWF_REFLECT_ENABLED: 1\n',
+      '        env:\n' +
+        '          AWF_CLOUD_HYPERVISOR_DEVELOPMENT_ALLOW_UNATTESTED_ARTIFACTS: "1"\n' +
+        '          AWF_REFLECT_ENABLED: 1\n',
+    );
+  }
+
+  if (cloudContent !== cloudOriginal) {
+    fs.writeFileSync(playwrightCloudLockPath, cloudContent);
+    console.log('  Enabled explicit development artifacts for Cloud Hypervisor smoke');
+    console.log(`Updated ${playwrightCloudLockPath}`);
+  } else {
+    console.log(`Skipping ${playwrightCloudLockPath}: Cloud Hypervisor smoke already patched.`);
+  }
+} catch {
+  console.log(`Skipping ${playwrightCloudLockPath}: file not found.`);
+}
+
+const playwrightRuntimeLockPaths = new Map([
+  ['smoke-playwright-runc.lock.yml', 'docker-runc'],
+  ['smoke-playwright-gvisor.lock.yml', 'gvisor'],
+  ['smoke-playwright-docker-sbx.lock.yml', 'docker-sbx'],
+  ['smoke-playwright-cloud-hypervisor.lock.yml', 'cloud-hypervisor'],
+]);
+for (const [lockFile, runtime] of playwrightRuntimeLockPaths) {
+  const lockPath = path.join(workflowsDir, lockFile);
+  try {
+    const original = fs.readFileSync(lockPath, 'utf-8');
+    const fixtureCommand = `bash scripts/ci/run-playwright-loopback-smoke.sh ${runtime} && `;
+    if (original.includes(fixtureCommand)) {
+      console.log(`Skipping ${lockPath}: Playwright fixture already injected.`);
+      continue;
+    }
+    const harnessCommand =
+      '"$GH_AW_NODE_EXEC" "${RUNNER_TEMP}/gh-aw/actions/copilot_harness.cjs"';
+    const content = original.replace(
+      harnessCommand,
+      `${fixtureCommand}${harnessCommand}`,
+    );
+    if (content === original) {
+      console.log(`  WARNING: Could not inject Playwright fixture into ${lockPath}`);
+      continue;
+    }
+    fs.writeFileSync(lockPath, content);
+    console.log(`  Injected Playwright ${runtime} fixture into AWF command`);
+    console.log(`Updated ${lockPath}`);
+  } catch {
+    console.log(`Skipping ${lockPath}: file not found.`);
+  }
+}

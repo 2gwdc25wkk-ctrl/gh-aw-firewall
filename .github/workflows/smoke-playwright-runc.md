@@ -21,17 +21,13 @@ engine:
   version: 1.0.34
 network:
   allowed:
-    - cdn.playwright.dev
-    - playwright.download.prss.microsoft.com
     - packagefeedproxy.microsoft.io
     - "*.pkgs.visualstudio.com"
   blocked:
     - node
 steps:
-  - name: Install Playwright CLI from Microsoft registry
-    run: |
-      test "$(npm view @playwright/cli@0.1.18 version --registry="$NPM_CONFIG_REGISTRY")" = "0.1.18"
-      npm install -g @playwright/cli@0.1.18 --registry="$NPM_CONFIG_REGISTRY"
+  - name: Stage Playwright CLI and browser
+    run: bash scripts/ci/stage-playwright-loopback-smoke.sh
     timeout-minutes: 10
 tools:
   bash:
@@ -53,10 +49,10 @@ post-steps:
 
 # Smoke Test: Playwright CLI Loopback on Docker/runc
 
-Run `bash scripts/ci/run-playwright-loopback-smoke.sh docker-runc` exactly once. This starts
-a server and Playwright browser inside the agent sandbox, verifies JavaScript
-rendering over loopback, and verifies browser egress to a non-allowlisted domain
-is blocked.
+The deterministic Playwright fixture completed inside the agent sandbox before
+this agent started. It launched a loopback server and browser, verified
+JavaScript rendering, and verified browser egress to a non-allowlisted domain
+was blocked.
 
 Read `/tmp/gh-aw/agent/playwright-loopback-results.json` and report the observed
 results. On a pull request trigger, call `add_comment` with
