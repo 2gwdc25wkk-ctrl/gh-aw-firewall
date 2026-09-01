@@ -755,9 +755,16 @@ printf '%s' "$vmm_name" | grep -Eq '^awfvmm-[0-9a-f]{20}$' \
   || fail_security "Cloud Hypervisor account name is not a random per-run name: $vmm_name"
 [ "$(id -G "$vmm_name")" = "$vmm_gid" ] \
   || fail_security "Cloud Hypervisor account inherited supplementary groups"
-getfacl --absolute-names --numeric /dev/kvm 2>/dev/null \
-  | grep -q "^user:$proc_uid:rw-" \
-  || fail_security "Cloud Hypervisor uid lacks its scoped /dev/kvm ACL"
+kvm_acl=$(sudo getfacl --absolute-names --numeric /dev/kvm 2>/dev/null)
+if grep -q "^user:$proc_uid:" <<<"$kvm_acl"; then
+  printf '%s\n' "$kvm_acl" >&2
+  fail_security "Cloud Hypervisor uid retains /dev/kvm access after VM creation"
+fi
+tun_acl=$(sudo getfacl --absolute-names --numeric /dev/net/tun 2>/dev/null)
+if grep -q "^user:$proc_uid:" <<<"$tun_acl"; then
+  printf '%s\n' "$tun_acl" >&2
+  fail_security "Cloud Hypervisor uid retains /dev/net/tun access after VM creation"
+fi
 
 # Every capability set is empty. In particular, a zero CapBnd prevents the
 # non-root VMM from regaining CAP_NET_ADMIN after exec.
@@ -973,10 +980,12 @@ assert_no_residue
 if getent passwd "$vmm_name" >/dev/null; then
   fail_security "per-run Cloud Hypervisor account remains after cancellation: $vmm_name"
 fi
-if getfacl --absolute-names --numeric /dev/kvm 2>/dev/null | grep -q "^user:$proc_uid:"; then
+kvm_acl=$(sudo getfacl --absolute-names --numeric /dev/kvm 2>/dev/null)
+if grep -q "^user:$proc_uid:" <<<"$kvm_acl"; then
   fail_security "per-run /dev/kvm ACL remains after cancellation for uid $proc_uid"
 fi
-if getfacl --absolute-names --numeric /dev/net/tun 2>/dev/null | grep -q "^user:$proc_uid:"; then
+tun_acl=$(sudo getfacl --absolute-names --numeric /dev/net/tun 2>/dev/null)
+if grep -q "^user:$proc_uid:" <<<"$tun_acl"; then
   fail_security "per-run /dev/net/tun ACL remains after cancellation for uid $proc_uid"
 fi
 

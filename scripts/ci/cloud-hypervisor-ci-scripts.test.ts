@@ -95,6 +95,12 @@ describe('cloud-hypervisor-host-preflight.sh', () => {
     expect(source).not.toMatch(/\$ARTIFACT_DIR\/jailer/);
   });
 
+  it('requires KVM access only for the privileged AWF orchestrator', () => {
+    const source = fs.readFileSync(preflightPath, 'utf-8');
+    expect(source).toContain('sudo -n test -r /dev/kvm -a -w /dev/kvm');
+    expect(source).not.toContain('workflow user');
+  });
+
   it('checks for Landlock LSM support and pins Cloud Hypervisor v53.0', () => {
     const source = fs.readFileSync(preflightPath, 'utf-8');
     expect(source).toContain('/sys/kernel/security/lsm');
@@ -162,6 +168,12 @@ describe('cloud-hypervisor-live-smoke.sh', () => {
     expect(source).toContain('landlock_enable');
     expect(source).toContain('"/tun_flags"');
     expect(source).toContain('cgroup.procs');
+    expect(
+      source.match(/sudo getfacl --absolute-names --numeric \/dev\/kvm/g),
+    ).toHaveLength(2);
+    expect(source).toContain(
+      'sudo getfacl --absolute-names --numeric /dev/net/tun',
+    );
   });
 
   it('measures non-flaky boot-readiness and cleanup-time baselines', () => {

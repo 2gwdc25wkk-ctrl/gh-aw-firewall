@@ -123,6 +123,15 @@ describe('Cloud Hypervisor CI workflow', () => {
     expect(restoreStep.run).toContain('cloud-hypervisor-test-x86_64/awf-supervisor');
   });
 
+  it('does not grant the workflow user direct KVM access', () => {
+    const doc = loadWorkflow();
+    const source = (doc.jobs['live-kvm'].steps ?? [])
+      .map((step) => step.run ?? '')
+      .join('\n');
+    expect(source).not.toContain('setfacl');
+    expect(source).not.toContain('chmod 666 /dev/kvm');
+  });
+
   it('verifies digests before running the live suite and cleans up unconditionally', () => {
     const doc = loadWorkflow();
     const live = doc.jobs['live-kvm'];
