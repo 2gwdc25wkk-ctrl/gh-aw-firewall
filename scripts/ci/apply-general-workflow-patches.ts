@@ -71,6 +71,25 @@ export function applyGeneralWorkflowPatches(
 ): PatchResult {
   const log: string[] = [];
 
+  if (workflowPath.endsWith('smoke-enclave-issues-read.lock.yml')) {
+    const original = content;
+    content = content
+      .split('\n')
+      .map(line =>
+        line.includes('"agentPolicies":')
+          ? line.replace(/"safe-outputs"/g, '"safeoutputs"')
+          : line
+      )
+      .join('\n');
+    content = content.replace(
+      '"GITHUB_TOOLSETS": "context"',
+      '"GITHUB_TOOLSETS": "context,issues"'
+    );
+    if (content !== original) {
+      log.push('  Normalized shared-gateway policy server IDs and toolsets');
+    }
+  }
+
   // Bound the generated installer in smoke workflows and the build-test workflow.
   // install_ripgrep.sh uses apt-get update -qq without its own timeout, so a bad
   // hosted-runner mirror otherwise leaves the whole agent job running for hours.
@@ -95,7 +114,10 @@ export function applyGeneralWorkflowPatches(
   // The enclave backend starts inside AWF, after mcpg. Keep it in the agent's
   // gateway config but exempt it from the eager startup connectivity check so
   // mcpg can rediscover it once AWF attaches and launches the backend.
-  if (workflowPath.endsWith('smoke-enclave-build-test.lock.yml')) {
+  const isEnclaveSmoke =
+    workflowPath.endsWith('smoke-enclave-build-test.lock.yml') ||
+    workflowPath.endsWith('smoke-enclave-issues-read.lock.yml');
+  if (isEnclaveSmoke) {
     const optionalEnclaveServer = '"awf-enclave": {\n                "required": false,';
     if (content.includes(optionalEnclaveServer)) {
       log.push(`  Enclave MCP backend already marked optional during gateway startup`);
@@ -110,7 +132,9 @@ export function applyGeneralWorkflowPatches(
       );
       log.push(`  Marked enclave MCP backend optional during gateway startup`);
     }
+  }
 
+  if (isEnclaveSmoke) {
     const gatewayKeyEnv =
       '          MCP_GATEWAY_API_KEY: ${{ steps.start-mcp-gateway.outputs.gateway-api-key }}';
     const agentEnvAnchor = '        env:\n          AWF_REFLECT_ENABLED: 1';

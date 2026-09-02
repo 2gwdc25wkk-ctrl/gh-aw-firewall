@@ -108,3 +108,29 @@ describe('applyGeneralWorkflowPatches published AWF maintenance workflows', () =
     expect(content).not.toContain('--image-tag 0.28.2 --skip-pull');
   });
 });
+
+describe('applyGeneralWorkflowPatches shared enclave gateway policy', () => {
+  it('normalizes the generated shared gateway handoff', () => {
+    const compiled =
+      '              "safeoutputs": {"type": "stdio"},\n' +
+      '                  "GITHUB_TOOLSETS": "context"\n' +
+      '              "awf-enclave": {\n' +
+      '                "type": "http",\n' +
+      '              "agentPolicies": {"primary":{"servers":["github","safe-outputs"]}},\n' +
+      '        env:\n' +
+      '          AWF_REFLECT_ENABLED: 1\n' +
+      '        run: awf --exclude-env MCP_GATEWAY_AGENT_ID\n';
+
+    const { content, log } = applyGeneralWorkflowPatches(
+      compiled,
+      '/tmp/workflows/smoke-enclave-issues-read.lock.yml'
+    );
+
+    expect(content).toContain('"safeoutputs": {"type": "stdio"}');
+    expect(content).toContain('"servers":["github","safeoutputs"]');
+    expect(content).toContain('"GITHUB_TOOLSETS": "context,issues"');
+    expect(content).toContain('"awf-enclave": {\n                "required": false,');
+    expect(content).not.toContain('"servers":["github","safe-outputs"]');
+    expect(log).toContain('  Normalized shared-gateway policy server IDs and toolsets');
+  });
+});
