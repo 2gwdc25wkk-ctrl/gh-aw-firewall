@@ -121,6 +121,18 @@ describe('log-discovery', () => {
       expect(sources).toEqual([]);
     });
 
+    it('should include preserved /tmp logs with startup diagnostics and no access.log', async () => {
+      const logDir = path.join(os.tmpdir(), 'squid-logs-1234567890');
+      const startupDiagnosticPath = path.join(logDir, 'awf-startup-error.json');
+
+      mockedGlob.mockResolvedValue([logDir]);
+      mockedFs.existsSync.mockImplementation((p) => p === startupDiagnosticPath);
+
+      const sources = await discoverLogSources();
+
+      expect(sources.some((s) => s.type === 'preserved' && s.path === logDir)).toBe(true);
+    });
+
     it('should skip directories with invalid timestamps', async () => {
       const logDir = path.join(os.tmpdir(), 'squid-logs-invalid');
 
@@ -159,6 +171,19 @@ describe('log-discovery', () => {
       const sources = await discoverLogSources();
 
       // Should use logsDir directly (not squid-logs subdir)
+      expect(sources.some((s) => s.path === logsDir)).toBe(true);
+    });
+
+    it('should include AWF_LOGS_DIR when only startup diagnostics exist', async () => {
+      const logsDir = '/custom/proxy-logs';
+      const startupDiagnosticPath = path.join(logsDir, 'awf-startup-error.json');
+
+      process.env.AWF_LOGS_DIR = logsDir;
+      mockedFs.existsSync.mockImplementation((p) => p === startupDiagnosticPath);
+      mockedFs.statSync.mockReturnValue({ mtimeMs: Date.now() } as fs.Stats);
+
+      const sources = await discoverLogSources();
+
       expect(sources.some((s) => s.path === logsDir)).toBe(true);
     });
 
@@ -266,8 +291,25 @@ describe('log-discovery', () => {
       mockedFs.statSync.mockReturnValue({ isDirectory: () => true, isFile: () => false } as fs.Stats);
 
       await expect(validateSource(logDir)).rejects.toThrow(
-        `Directory does not contain access.log: ${logDir}`
+        `Directory does not contain access.log or AWF startup diagnostics: ${logDir}`
       );
+    });
+
+    it('should validate directory path containing startup diagnostics', async () => {
+      const logDir = '/tmp/squid-logs-startup-failure';
+      const startupDiagnosticPath = path.join(logDir, 'awf-startup-error.json');
+
+      mockedFs.existsSync.mockImplementation((p) => {
+        return p === logDir || p === startupDiagnosticPath;
+      });
+      mockedFs.statSync.mockReturnValue({ isDirectory: () => true, isFile: () => false } as fs.Stats);
+
+      const result = await validateSource(logDir);
+
+      expect(result).toEqual({
+        type: 'preserved',
+        path: logDir,
+      });
     });
 
     it('should validate file path by returning parent directory', async () => {
