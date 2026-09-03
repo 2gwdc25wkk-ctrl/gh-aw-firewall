@@ -662,6 +662,55 @@ copy_preload_libs() {
   fi
 }
 
+copy_browser_libs() {
+  # Stage the Chromium/Playwright runtime shared libraries baked into the image
+  # (containers/agent/Dockerfile: BROWSER_PKGS) so they are visible inside the
+  # chroot. Installing the packages into the image's /usr is not sufficient on
+  # its own: AWF_CHROOT_ENABLED=true chroots to /host, and buildSystemMounts()
+  # bind-mounts the runner's own /usr, /lib, etc. over the image's, shadowing
+  # anything installed in this layer.
+  #
+  # The Dockerfile records the manifest of .so files owned by those packages
+  # (including their transitive dependencies, e.g. fontconfig/freetype/harfbuzz)
+  # at /usr/local/share/awf/browser-libs.manifest. We copy each one, preserving
+  # its original directory structure, under /run/awf-lib/browser-libs -- which
+  # lives on the container's own writable rootfs (not bind-mounted) -- and point
+  # LD_LIBRARY_PATH at the resulting directories.
+  #
+  # Sets BROWSER_LD_LIBRARY_PATH (empty string if unavailable or nothing to stage).
+  BROWSER_LD_LIBRARY_PATH=""
+  MANIFEST="/usr/local/share/awf/browser-libs.manifest"
+  if [ -s "$MANIFEST" ]; then
+    STAGE_ROOT="/host/run/awf-lib/browser-libs"
+    if mkdir -p "$STAGE_ROOT" 2>/dev/null; then
+      LIB_DIRS=""
+      while IFS= read -r lib; do
+        [ -z "$lib" ] && continue
+        [ -f "$lib" ] || continue
+        dest="${STAGE_ROOT}${lib}"
+        dest_dir="$(dirname "$dest")"
+        if mkdir -p "$dest_dir" 2>/dev/null && cp -a "$lib" "$dest" 2>/dev/null; then
+          rel_dir="$(dirname "$lib")"
+          case " $LIB_DIRS " in
+            *" $rel_dir "*) ;;
+            *) LIB_DIRS="$LIB_DIRS $rel_dir" ;;
+          esac
+        else
+          echo "[entrypoint][WARN] Could not stage browser runtime library $lib" >&2
+        fi
+      done < "$MANIFEST"
+      if [ -n "$LIB_DIRS" ]; then
+        for rel_dir in $LIB_DIRS; do
+          BROWSER_LD_LIBRARY_PATH="${BROWSER_LD_LIBRARY_PATH:+$BROWSER_LD_LIBRARY_PATH:}/run/awf-lib/browser-libs${rel_dir}"
+        done
+        echo "[entrypoint] Chromium/Playwright runtime libraries staged for chroot at ${STAGE_ROOT}"
+      fi
+    else
+      echo "[entrypoint][WARN] Could not create ${STAGE_ROOT}; Chromium/Playwright browsers may fail to launch" >&2
+    fi
+  fi
+}
+
 copy_agent_helper_scripts() {
   # Copy get-claude-key.sh and gh CLI proxy wrapper to chroot-accessible paths.
   # Both scripts are baked into the Docker image but shadowed by host bind mounts
@@ -1511,6 +1560,7 @@ run_chroot_command() {
   mount_host_cgroupfs
   check_chroot_prereqs
   copy_preload_libs
+  copy_browser_libs
   copy_agent_helper_scripts
   copy_dind_runner_binary
   ensure_usr_local_bin_shims
@@ -1576,8 +1626,8 @@ run_chroot_command() {
     CLEANUP_CMD="${CLEANUP_CMD}; sed -i '/^[0-9.]\\+[[:space:]]\\+host\\.docker\\.internal\$/d' /etc/hosts 2>/dev/null || true"
     echo "[entrypoint] host.docker.internal will be removed from /etc/hosts on exit"
   fi
-  # Clean up /run/awf-lib if anything was copied (one-shot-token, CA cert, key helper)
-  if [ -n "${ONE_SHOT_TOKEN_LIB}" ] || [ -n "${AWF_CA_CHROOT}" ] || [ -n "${SYSTEM_CA_CHROOT}" ] || [ -n "${CHROOT_KEY_HELPER}" ] || [ -n "${STAGED_RUNNER_BINARY_CHROOT}" ]; then
+  # Clean up /run/awf-lib if anything was copied (one-shot-token, CA cert, key helper, browser libs)
+  if [ -n "${ONE_SHOT_TOKEN_LIB}" ] || [ -n "${AWF_CA_CHROOT}" ] || [ -n "${SYSTEM_CA_CHROOT}" ] || [ -n "${CHROOT_KEY_HELPER}" ] || [ -n "${STAGED_RUNNER_BINARY_CHROOT}" ] || [ -n "${BROWSER_LD_LIBRARY_PATH}" ]; then
     CLEANUP_CMD="${CLEANUP_CMD}; rm -rf /run/awf-lib 2>/dev/null || true"
   fi
   # NOTE: the /usr/local/bin overlay is torn down by cleanup_usr_local_bin_overlay(),
@@ -1633,10 +1683,18 @@ run_chroot_command() {
     LD_PRELOAD_CMD="export LD_PRELOAD=${ONE_SHOT_TOKEN_LIB};"
   fi
 
+  # Build LD_LIBRARY_PATH command so Chromium/Playwright can resolve the
+  # staged browser runtime libraries (see copy_browser_libs above).
+  LD_LIBRARY_PATH_CMD=""
+  if [ -n "${BROWSER_LD_LIBRARY_PATH}" ]; then
+    LD_LIBRARY_PATH_CMD="export LD_LIBRARY_PATH=${BROWSER_LD_LIBRARY_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH};"
+  fi
+
   run_command_with_stdout run_agent_with_token_protection chroot /host /bin/bash -c "
     cd '${CHROOT_WORKDIR}' 2>/dev/null || cd / 2>/dev/null || true
     trap '${CLEANUP_CMD}' EXIT
     ${LD_PRELOAD_CMD}
+    ${LD_LIBRARY_PATH_CMD}
     exec capsh --drop=${CAPS_TO_DROP} ${CAPSH_IDENTITY_ARGS} -- -c 'exec ${SCRIPT_FILE}'
   "
 }
