@@ -5,6 +5,18 @@ import { buildCredentialHidingOverlays, pruneUnmountableCredentialOverlays } fro
 import { credentialFilesToHide } from '../../config/mount-policy';
 import { createLocalSourceResolver } from './mount-topology';
 
+// `accessSync` is wrapped so tests can deterministically simulate the EROFS a
+// truly read-only mount raises, without depending on a `chmod`-based
+// directory (which a root test process, and rootful `runc`, can still pass a
+// `W_OK` check against).
+jest.mock('fs', () => {
+  const actual = jest.requireActual<typeof import('fs')>('fs');
+  return {
+    ...actual,
+    accessSync: jest.fn((...args: Parameters<typeof actual.accessSync>) => actual.accessSync(...args)),
+  };
+});
+
 describe('buildCredentialHidingOverlays', () => {
   it('hides every policy credential file at both home and /host paths', () => {
     const overlays = buildCredentialHidingOverlays('/home/runner');
@@ -81,6 +93,89 @@ describe('pruneUnmountableCredentialOverlays', () => {
 
     expect(result).not.toContain(overlay(target));
     expect(result).toContain(`${hostDir}:/host${HOME}:ro`);
+  });
+
+  // Regression for github/gh-aw-firewall#8076: on ARC/DinD, the covering bind
+  // for `$HOME` is declared read-write (it's the AWF-managed home volume, not
+  // a `filesystem.allowWrite`-narrowed one), but the directory it resolves to
+  // can itself be read-only on the runner's real filesystem when staged under
+  // `--docker-host-path-prefix`. Docker does not remount that case read-only,
+  // so it touches the real path directly and hits the same EROFS runc would
+  // hit for a declared read-only bind.
+  //
+  // `chmod`-based read-only directories are not a reliable stand-in for that:
+  // a root test process (and rootful `runc`) can still pass a `W_OK` check
+  // against a mode-only read-only directory, so these regressions instead
+  // mock `fs.accessSync` to deterministically raise the `EROFS` that a truly
+  // read-only mount produces, independent of the uid running the test.
+  const accessSyncMock = fs.accessSync as jest.MockedFunction<typeof fs.accessSync>;
+  const actualAccessSync = jest.requireActual<typeof import('fs')>('fs').accessSync;
+
+  const mockRealReadOnlyDir = (readOnlyDir: string) => {
+    accessSyncMock.mockImplementation((target, mode) => {
+      if (target === readOnlyDir) {
+        const err = new Error('EROFS: read-only file system') as NodeJS.ErrnoException;
+        err.code = 'EROFS';
+        throw err;
+      }
+      return actualAccessSync(target, mode);
+    });
+  };
+
+  it('drops overlays whose mountpoint is missing behind a read-write bind pointing at a real read-only directory', () => {
+    fs.mkdirSync(path.join(hostDir, 'home'), { recursive: true });
+    mockRealReadOnlyDir(path.join(hostDir, 'home'));
+    const target = `/host${HOME}/.npmrc`;
+
+    try {
+      const result = pruneUnmountableCredentialOverlays([
+        `${path.join(hostDir, 'home')}:/host${HOME}:rw`,
+        overlay(target),
+      ]);
+
+      expect(result).not.toContain(overlay(target));
+      expect(result).toContain(`${path.join(hostDir, 'home')}:/host${HOME}:rw`);
+    } finally {
+      accessSyncMock.mockImplementation((...args) => actualAccessSync(...args));
+    }
+  });
+
+  it('keeps overlays whose mountpoint already exists behind a read-write bind pointing at a real read-only directory', () => {
+    fs.mkdirSync(path.join(hostDir, 'home'), { recursive: true });
+    fs.writeFileSync(path.join(hostDir, 'home/.npmrc'), 'DUMMY_SECRET_VALUE');
+    mockRealReadOnlyDir(path.join(hostDir, 'home'));
+    const target = `/host${HOME}/.npmrc`;
+
+    try {
+      const result = pruneUnmountableCredentialOverlays([
+        `${path.join(hostDir, 'home')}:/host${HOME}:rw`,
+        overlay(target),
+      ]);
+
+      // The mountpoint already exists, so runc only has to bind over it --
+      // no directory write is required, so this stays mountable even though
+      // the real directory is read-only.
+      expect(result).toContain(overlay(target));
+    } finally {
+      accessSyncMock.mockImplementation((...args) => actualAccessSync(...args));
+    }
+  });
+
+  it('drops overlays whose mountpoint needs a missing intermediate directory under a real read-only ancestor', () => {
+    fs.mkdirSync(path.join(hostDir, 'home'), { recursive: true });
+    mockRealReadOnlyDir(path.join(hostDir, 'home'));
+    const target = `/host${HOME}/.config/gh/hosts.yml`;
+
+    try {
+      const result = pruneUnmountableCredentialOverlays([
+        `${path.join(hostDir, 'home')}:/host${HOME}:rw`,
+        overlay(target),
+      ]);
+
+      expect(result).not.toContain(overlay(target));
+    } finally {
+      accessSyncMock.mockImplementation((...args) => actualAccessSync(...args));
+    }
   });
 
   it('resolves the mountpoint against the innermost covering bind', () => {
