@@ -85,8 +85,21 @@ export function applyGeneralWorkflowPatches(
       '"GITHUB_TOOLSETS": "context"',
       '"GITHUB_TOOLSETS": "context,issues"'
     );
+    content = content.replace(
+      /"github": \{\n(\s*)"type": "stdio"/,
+      '"github": {\n$1"required": false,\n$1"type": "stdio"'
+    );
+    content = content.replace(
+      'export GH_AW_MCP_DEFERRED_SERVERS="awf-enclave,github"',
+      'export GH_AW_MCP_DEFERRED_SERVERS="awf-enclave"'
+    );
+    // tools.github:false leaves the enclave-only GitHub server's guard variables empty.
+    content = content.replace(
+      /"min-integrity": "\$GITHUB_MCP_GUARD_MIN_INTEGRITY",\n(\s*)"repos": "\$GITHUB_MCP_GUARD_REPOS"/,
+      '"min-integrity": "approved",\n$1"repos": ["github/gh-aw"]'
+    );
     if (content !== original) {
-      log.push('  Normalized shared-gateway policy server IDs and toolsets');
+      log.push('  Normalized shared-gateway policy, server IDs, and toolsets');
     }
   }
 
@@ -137,18 +150,37 @@ export function applyGeneralWorkflowPatches(
   if (isEnclaveSmoke) {
     const gatewayKeyEnv =
       '          MCP_GATEWAY_API_KEY: ${{ steps.start-mcp-gateway.outputs.gateway-api-key }}';
-    const agentEnvAnchor = '        env:\n          AWF_REFLECT_ENABLED: 1';
-    if (content.includes(`${gatewayKeyEnv}\n          AWF_REFLECT_ENABLED: 1`)) {
+    const agentStepStart = content.indexOf('      - name: Execute GitHub Copilot CLI');
+    const agentEnvHeader = '        env:\n';
+    const agentEnvStart =
+      agentStepStart === -1 ? -1 : content.indexOf(agentEnvHeader, agentStepStart);
+    if (agentEnvStart === -1) {
+      throw new Error('Could not find the enclave smoke agent environment');
+    }
+    const nextStepStart = content.indexOf('\n      - name:', agentEnvStart + agentEnvHeader.length);
+    const agentEnvEnd = nextStepStart === -1 ? content.length : nextStepStart;
+    const agentEnvBlock = content.slice(agentEnvStart, agentEnvEnd);
+    const gatewayKeyCount = agentEnvBlock.split(gatewayKeyEnv).length - 1;
+    if (gatewayKeyCount === 1) {
       log.push(`  Gateway API key already available to AWF readiness checks`);
     } else {
-      if (!content.includes(agentEnvAnchor)) {
-        throw new Error('Could not find the enclave smoke agent environment');
-      }
-      content = content.replace(
-        agentEnvAnchor,
-        `        env:\n${gatewayKeyEnv}\n          AWF_REFLECT_ENABLED: 1`
+      let normalizedAgentEnv = agentEnvBlock
+        .split('\n')
+        .filter(line => line !== gatewayKeyEnv)
+        .join('\n');
+      normalizedAgentEnv = normalizedAgentEnv.replace(
+        agentEnvHeader,
+        `${agentEnvHeader}${gatewayKeyEnv}\n`
       );
-      log.push(`  Exposed gateway API key to AWF readiness checks`);
+      content =
+        content.slice(0, agentEnvStart) +
+        normalizedAgentEnv +
+        content.slice(agentEnvEnd);
+      if (gatewayKeyCount > 1) {
+        log.push(`  Removed duplicate gateway API key entries from enclave smoke agent environment`);
+      } else {
+        log.push(`  Exposed gateway API key to AWF readiness checks`);
+      }
     }
 
     const gatewayKeyExclusion = '--exclude-env MCP_GATEWAY_API_KEY';
@@ -162,6 +194,24 @@ export function applyGeneralWorkflowPatches(
           `${gatewayKeyExclusion} ${gatewayAgentIdExclusion}`
         );
         log.push(`  Excluded gateway API key from the primary agent`);
+      }
+    }
+
+    if (workflowPath.endsWith('smoke-enclave-issues-read.lock.yml')) {
+      const stagingTokenEnv =
+        '          GH_TOKEN: ${{ secrets.GH_AW_GITHUB_MCP_SERVER_TOKEN || secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}';
+      if (!content.slice(agentEnvStart, agentEnvEnd).includes(stagingTokenEnv)) {
+        content = content.replace(gatewayKeyEnv, `${gatewayKeyEnv}\n${stagingTokenEnv}`);
+        log.push(`  Added host-only enclave repository staging credential`);
+      }
+
+      const stagingTokenExclusion = '--exclude-env GH_TOKEN';
+      if (!content.includes(stagingTokenExclusion)) {
+        content = content.replace(
+          gatewayKeyExclusion,
+          `${stagingTokenExclusion} ${gatewayKeyExclusion}`
+        );
+        log.push(`  Excluded enclave staging credential from the primary agent`);
       }
     }
   }
