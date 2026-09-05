@@ -95,8 +95,26 @@ describe('direct enclave GitHub MCP handoff', () => {
       agentId: AGENT_ID,
       containerName: 'awmg-mcpg',
       identity: 'gh-aw-123456-1-job',
+      allowedTools: ['issue_read', 'list_issues'],
     });
     expect(contract.endpoint.href).toBe('http://localhost:8080/mcp/github');
+  });
+
+  it('derives allowedTools from the tools.github allowlist', () => {
+    const config: WrapperConfig = {
+      workDir: '/tmp/awf-test',
+      enclaves: normalizeEnclavesConfig([{
+        agent: {
+          model: 'gpt-test',
+          tools: {
+            github: { allowed: ['list_issues'], allowedRepos: ['octo/private'] },
+          },
+        },
+        repos: [{ repo: 'octo/private', sensitivity: 'internal' }],
+      }]),
+    } as WrapperConfig;
+    const contract = resolveEnclaveGithubGatewayContract(config, handoff());
+    expect(contract.allowedTools).toEqual(['list_issues']);
   });
 
   it.each([
@@ -280,7 +298,127 @@ describe('direct enclave GitHub MCP handoff', () => {
       await expect(assertEnclaveGithubGatewayReady(enabledConfig(), {
         ...handoff(),
         AWF_ENCLAVE_MCP_GATEWAY_ENDPOINT: endpoint,
-      }, 2_000)).rejects.toThrow(/exactly the issues-read-v1 tools/);
+      }, 2_000)).rejects.toThrow(/exactly the configured allowed tools/);
+    });
+  });
+
+  it('derives readiness expectations from a restricted tools.github allowlist', async () => {
+    const restrictedConfig: WrapperConfig = {
+      workDir: '/tmp/awf-test',
+      enclaves: normalizeEnclavesConfig([{
+        agent: {
+          model: 'gpt-test',
+          tools: { github: { allowed: ['list_issues'], allowedRepos: ['octo/private'] } },
+        },
+        repos: [{ repo: 'octo/private', sensitivity: 'internal' }],
+      }]),
+    } as WrapperConfig;
+    mockExeca
+      .mockResolvedValueOnce({ exitCode: 0, stdout: network(), stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: attachedGateway(), stderr: '' });
+    await withGatewayServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      request.on('end', () => {
+        const message = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (message.method === 'initialize') {
+          response.setHeader('Mcp-Session-Id', 'session-3');
+          response.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }));
+        } else if (message.method === 'notifications/initialized') {
+          response.statusCode = 202;
+          response.end();
+        } else {
+          // The gateway exposes the full closed pair, but only "list_issues" is configured.
+          response.end(JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            result: { tools: [{ name: 'list_issues' }, { name: 'issue_read' }] },
+          }));
+        }
+      });
+    }, async endpoint => {
+      await expect(assertEnclaveGithubGatewayReady(restrictedConfig, {
+        ...handoff(),
+        AWF_ENCLAVE_MCP_GATEWAY_ENDPOINT: endpoint,
+      }, 2_000)).rejects.toThrow(/exactly the configured allowed tools/);
+    });
+  });
+
+  it('consumes tools/list pagination and rejects an extra tool advertised only on a later page', async () => {
+    mockExeca
+      .mockResolvedValueOnce({ exitCode: 0, stdout: network(), stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: attachedGateway(), stderr: '' });
+    let listCalls = 0;
+    await withGatewayServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      request.on('end', () => {
+        const message = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (message.method === 'initialize') {
+          response.setHeader('Mcp-Session-Id', 'session-4');
+          response.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }));
+        } else if (message.method === 'notifications/initialized') {
+          response.statusCode = 202;
+          response.end();
+        } else {
+          listCalls += 1;
+          if (message.params?.cursor === undefined) {
+            // Page one contains exactly the configured tools plus a cursor.
+            response.end(JSON.stringify({
+              jsonrpc: '2.0',
+              id: 2,
+              result: {
+                tools: [{ name: 'list_issues' }, { name: 'issue_read' }],
+                nextCursor: 'page-2',
+              },
+            }));
+          } else {
+            // Page two smuggles in an extra tool not in the closed contract.
+            response.end(JSON.stringify({
+              jsonrpc: '2.0',
+              id: 2,
+              result: { tools: [{ name: 'search_code' }] },
+            }));
+          }
+        }
+      });
+    }, async endpoint => {
+      await expect(assertEnclaveGithubGatewayReady(enabledConfig(), {
+        ...handoff(),
+        AWF_ENCLAVE_MCP_GATEWAY_ENDPOINT: endpoint,
+      }, 2_000)).rejects.toThrow(/exactly the configured allowed tools/);
+    });
+    expect(listCalls).toBe(2);
+  });
+
+  it('rejects a malformed tool entry on the first tools/list page', async () => {
+    mockExeca
+      .mockResolvedValueOnce({ exitCode: 0, stdout: network(), stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: attachedGateway(), stderr: '' });
+    await withGatewayServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      request.on('end', () => {
+        const message = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (message.method === 'initialize') {
+          response.setHeader('Mcp-Session-Id', 'session-5');
+          response.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }));
+        } else if (message.method === 'notifications/initialized') {
+          response.statusCode = 202;
+          response.end();
+        } else {
+          response.end(JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            result: { tools: [{ name: 'list_issues' }, { notName: 'issue_read' }] },
+          }));
+        }
+      });
+    }, async endpoint => {
+      await expect(assertEnclaveGithubGatewayReady(enabledConfig(), {
+        ...handoff(),
+        AWF_ENCLAVE_MCP_GATEWAY_ENDPOINT: endpoint,
+      }, 2_000)).rejects.toThrow(/malformed tools\/list entry/);
     });
   });
 });

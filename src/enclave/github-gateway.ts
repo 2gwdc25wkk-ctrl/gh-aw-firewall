@@ -4,6 +4,7 @@ import execa from 'execa';
 import { ENCLAVE_AGENT_API_PROXY_CONTAINER_NAME } from '../constants';
 import { getLocalDockerEnv } from '../docker-host';
 import type { WrapperConfig } from '../types';
+import { resolveEnclaveAgentGithubAllowedTools } from '../types/enclave-options';
 import {
   ENCLAVE_MCP_GATEWAY_CONTAINER_ENV,
   ENCLAVE_MCP_GATEWAY_ENDPOINT_ENV,
@@ -26,7 +27,6 @@ export const ENCLAVE_GITHUB_MCP_INTERNAL_URL =
   `http://${ENCLAVE_AGENT_GITHUB_MCP_IP}:${ENCLAVE_GITHUB_MCP_PORT}/mcp/${ENCLAVE_GITHUB_MCP_SERVER_NAME}`;
 
 const MCP_PROTOCOL_VERSION = '2025-06-18';
-const EXPECTED_TOOLS = ['issue_read', 'list_issues'];
 const DEFAULT_READINESS_TIMEOUT_MS = 120_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 const RETRY_DELAY_MS = 500;
@@ -43,6 +43,8 @@ interface EnclaveGithubGatewayContract {
   containerName: string;
   endpoint: URL;
   identity: string;
+  /** Closed set of tool names readiness must find, and only find, on the gateway. */
+  allowedTools: string[];
 }
 
 interface JsonRpcResponse {
@@ -55,7 +57,7 @@ interface JsonRpcResponse {
 function isEnclaveGithubEnabled(config: WrapperConfig): boolean {
   return config.enclaves?.enabled === true
     && config.enclaves.executors.agent.enabled
-    && config.enclaves.executors.agent.github?.cli === 'issues-read-v1';
+    && resolveEnclaveAgentGithubAllowedTools(config.enclaves.executors.agent) !== undefined;
 }
 
 function requiredIdentity(name: string, value: string | undefined): string {
@@ -112,6 +114,10 @@ export function resolveEnclaveGithubGatewayContract(
   if (!isEnclaveGithubEnabled(config)) {
     throw new Error('Enclave GitHub gateway contract requested while issues-read-v1 is disabled');
   }
+  const allowedTools = resolveEnclaveAgentGithubAllowedTools(config.enclaves?.executors.agent);
+  if (!allowedTools || allowedTools.length === 0) {
+    throw new Error('Enclave GitHub gateway contract requires a non-empty configured tool allowlist');
+  }
   return {
     agentId: requiredIdentity(
       ENCLAVE_GITHUB_MCP_AGENT_ID_ENV,
@@ -126,6 +132,7 @@ export function resolveEnclaveGithubGatewayContract(
       ENCLAVE_MCP_GATEWAY_IDENTITY_ENV,
       env[ENCLAVE_MCP_GATEWAY_IDENTITY_ENV],
     ),
+    allowedTools: [...allowedTools].sort(),
   };
 }
 
@@ -390,30 +397,70 @@ async function proveGithubGatewayReadiness(
     jsonrpc: '2.0',
     method: 'notifications/initialized',
   }, initialized.sessionId, requestBudget());
-  const listed = await postJsonRpc(contract.endpoint, contract.agentId, {
-    jsonrpc: '2.0',
-    id: 2,
-    method: 'tools/list',
-    params: {},
-  }, initialized.sessionId, requestBudget());
-  const tools = (
-    listed.body.result
-    && typeof listed.body.result === 'object'
-    && 'tools' in listed.body.result
-    && Array.isArray(listed.body.result.tools)
-  )
-    ? listed.body.result.tools
-      .map((tool) => (
-        tool && typeof tool === 'object' && 'name' in tool && typeof tool.name === 'string'
-          ? tool.name
-          : ''
-      ))
-      .filter(Boolean)
-      .sort()
-    : [];
-  if (listed.body.error !== undefined || JSON.stringify(tools) !== JSON.stringify(EXPECTED_TOOLS)) {
-    throw new Error('Shared MCP gateway did not expose exactly the issues-read-v1 tools');
+  const tools = await listAllGithubGatewayTools(contract, initialized.sessionId, requestBudget);
+  if (JSON.stringify(tools) !== JSON.stringify(contract.allowedTools)) {
+    throw new Error('Shared MCP gateway did not expose exactly the configured allowed tools');
   }
+}
+
+/** Bounds `tools/list` pagination so a misbehaving gateway cannot stall readiness. */
+const MAX_TOOLS_LIST_PAGES = 20;
+
+/**
+ * Consumes every `tools/list` page (MCP 2025-06-18 permits `nextCursor`) and
+ * rejects the whole response if any page errors, is malformed, or contains a
+ * malformed tool entry, so a partially valid first page can never mask extra
+ * or invalid tools advertised elsewhere in the pagination.
+ */
+async function listAllGithubGatewayTools(
+  contract: EnclaveGithubGatewayContract,
+  sessionId: string,
+  requestBudget: () => number,
+): Promise<string[]> {
+  const tools: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; ; page += 1) {
+    if (page >= MAX_TOOLS_LIST_PAGES) {
+      throw new Error('Shared MCP gateway returned too many tools/list pages');
+    }
+    const listed = await postJsonRpc(contract.endpoint, contract.agentId, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/list',
+      params: cursor === undefined ? {} : { cursor },
+    }, sessionId, requestBudget());
+    if (listed.body.error !== undefined) {
+      throw new Error('Shared MCP gateway rejected the tools/list request');
+    }
+    const result = listed.body.result;
+    if (
+      !result
+      || typeof result !== 'object'
+      || !('tools' in result)
+      || !Array.isArray(result.tools)
+    ) {
+      throw new Error('Shared MCP gateway returned a malformed tools/list response');
+    }
+    for (const tool of result.tools) {
+      if (
+        !tool
+        || typeof tool !== 'object'
+        || !('name' in tool)
+        || typeof tool.name !== 'string'
+        || tool.name === ''
+      ) {
+        throw new Error('Shared MCP gateway returned a malformed tools/list entry');
+      }
+      tools.push(tool.name);
+    }
+    const nextCursor = 'nextCursor' in result ? result.nextCursor : undefined;
+    if (nextCursor === undefined) break;
+    if (typeof nextCursor !== 'string' || nextCursor === '') {
+      throw new Error('Shared MCP gateway returned a malformed tools/list nextCursor');
+    }
+    cursor = nextCursor;
+  }
+  return tools.sort();
 }
 
 export async function assertEnclaveGithubGatewayReady(
