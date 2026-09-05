@@ -201,7 +201,22 @@ function generateAllowedIpSection(domains: string[]): string {
 }
 
 function generateDnsSection(dnsServers?: string[]): string {
-  return `dns_nameservers ${(dnsServers && dnsServers.length > 0) ? dnsServers.join(' ') : DEFAULT_DNS_SERVERS.join(' ')}`;
+  const servers = (dnsServers && dnsServers.length > 0) ? dnsServers.join(' ') : DEFAULT_DNS_SERVERS.join(' ');
+  return `dns_nameservers ${servers}
+# A single transient upstream DNS failure (e.g. a SERVFAIL from an overloaded
+# resolver during concurrent container startup) must not turn into a sustained
+# false-positive block of an allowlisted domain. Squid's default
+# negative_dns_ttl (1 minute) caches that one failure and rejects every
+# request for the same domain for up to 60 seconds. Shrinking it means the
+# very next lookup attempt re-queries the resolver instead of replaying the
+# cached failure.
+negative_dns_ttl 1 seconds
+# Retry another configured nameserver quickly while keeping the total timeout
+# above the retry interval. If dns_timeout is equal to Squid's default
+# dns_retransmit_interval (5 seconds), Squid can hit the total timeout before
+# sending the retry to the fallback nameserver.
+dns_retransmit_interval 1 seconds
+dns_timeout 10 seconds`;
 }
 
 function generateConfigSections(options: {
