@@ -119,6 +119,93 @@ export interface EnclaveAgentExecutorConfig {
    * so a repository declared only for the script executor cannot be referenced here.
    */
   repos: EnclaveRepository[];
+  /**
+   * Agent-only dynamic GitHub-MCP-backed repository policy per ADR 0001.
+   * Mutually exclusive with `repos`: an entry declares a static seed catalog
+   * or a dynamic policy, never both.
+   */
+  dynamic?: EnclaveDynamicPolicy;
+}
+
+/**
+ * Canonical dynamic repository selector, per ADR 0001: exact lowercase ASCII
+ * `owner/repository`, no trimming, case folding, Unicode normalization, URL
+ * decoding, or alternate syntax before policy matching.
+ */
+export const CANONICAL_DYNAMIC_REPOSITORY_PATTERN =
+  /^[a-z0-9](?:[a-z0-9-]{0,38})\/(?!\.\.?$)(?!.*\.\.)[a-z0-9._-]{1,100}$/;
+
+/** Canonical dynamic owner scope: the owner half of the selector above. */
+export const CANONICAL_DYNAMIC_OWNER_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,38})$/;
+
+/** Closed GitHub tool policy version accepted for dynamic admission. */
+export type EnclaveDynamicGithubPolicyVersion = 'github-repository-read-v1';
+
+/**
+ * Compiler-emitted, closed dynamic GitHub tool policy. Exactly `list_issues`
+ * and `issue_read` are supported; AWF rejects any other version or tool set.
+ */
+export interface EnclaveDynamicGithubPolicy {
+  version: EnclaveDynamicGithubPolicyVersion;
+  tools: EnclaveAgentGithubTool[];
+}
+
+/**
+ * Per-invocation trusted bounds for a dynamically admitted repository.
+ * Mirrors the static agent executor's resource/response controls; the
+ * invocation selector can never widen any of these.
+ *
+ * Every field is required: the compiler always emits the complete set (see
+ * `buildAWFDynamicEnclavePolicy` in gh-aw#58880), because a dynamic agent
+ * entry must declare finite `timeout`, `memory-limit`, `cpu-limit`,
+ * `pids-limit`, `tmpfs-limit`, `max-output-bytes`, `max-task-bytes`,
+ * `max-model-requests`, and `max-model-tokens` before it compiles.
+ */
+export interface EnclaveDynamicLimits {
+  /** Per-invocation wall-clock budget in seconds. Named for the compiler's `timeoutSeconds`. */
+  timeoutSeconds: number;
+  memoryLimit: string;
+  cpuLimit: string;
+  pidsLimit: number;
+  tmpfsLimit: string;
+  maxOutputBytes: number;
+  maxTaskBytes: number;
+  maxModelRequests: number;
+  maxModelTokens: number;
+}
+
+/** Total, run-wide quotas debited across every dynamic admission. */
+export interface EnclaveDynamicQuotas {
+  maxInvocations: number;
+  maxOutputBytes: number;
+  maxExecutionSeconds: number;
+}
+
+/**
+ * Canonical audit label emitted by the compiler. Labels are opaque tokens
+ * (never repository names or credentials) that let AWF and mcpg reconcile
+ * every dynamic resource created for this envelope during shutdown.
+ */
+export const CANONICAL_DYNAMIC_AUDIT_LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+
+/**
+ * Closed compiler-to-AWF dynamic policy envelope for `enclaves[].dynamic`.
+ * Structurally identical to the concrete object emitted by gh-aw#58880's
+ * `buildAWFDynamicEnclavePolicy`: the invocation selector may only choose
+ * within this envelope and can never alter any of its fields.
+ */
+export interface EnclaveDynamicPolicy {
+  allowedOwners: string[];
+  allowedRepositories: string[];
+  sensitivity: EnclaveSensitivity;
+  executor: 'agent';
+  githubPolicy: EnclaveDynamicGithubPolicy;
+  maxRepositories: number;
+  limits: EnclaveDynamicLimits;
+  quotas: EnclaveDynamicQuotas;
+  auditLabels: string[];
+  /** Absolute ISO-8601 expiry, never later than the workflow job lifetime. */
+  expiresAt: string;
 }
 
 export interface EnclavesConfig {
@@ -158,6 +245,12 @@ export type RawEnclaveAgentExecutorConfig = Pick<
 interface RawEnclaveEntryBase extends RawEnclaveCommonConfig {
   repos?: EnclaveRepository[];
   timeout?: number;
+  /**
+   * Agent-only dynamic policy. Present as a sibling of `repos`/`agent` on the
+   * raw entry, matching the exact shape gh-aw#58880 emits; mutually
+   * exclusive with `repos` and rejected on `script` entries.
+   */
+  dynamic?: EnclaveDynamicPolicy;
 }
 
 export interface RawEnclaveScriptEntry extends RawEnclaveEntryBase {

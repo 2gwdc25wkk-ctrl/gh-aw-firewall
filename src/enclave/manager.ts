@@ -33,6 +33,9 @@ import {
   ENCLAVE_GITHUB_MCP_AGENT_ID_ENV,
   resolveEnclaveGithubGatewayContract,
 } from './github-gateway';
+import {
+  takeEnclaveDynamicDelegationCapability,
+} from './dynamic-registry';
 
 export const ENCLAVE_RUN_LABEL = 'awf.enclave.run';
 export function isEnclaveScriptEnabled(config: WrapperConfig): boolean {
@@ -143,6 +146,13 @@ export async function prepareEnclaves(
   if (!token) {
     errors.push('enclaves require a staging credential in GH_TOKEN or GITHUB_TOKEN on the AWF host');
   }
+  // The compiler mints an AWF-only mcpg delegation-control capability whenever
+  // an entry declares a dynamic repository policy. AWF takes custody of it here,
+  // before anything else can inherit this environment, so the value can never
+  // reach the primary agent, an enclave, or a child process — even though
+  // `validateEnclavesConfig` refuses to execute dynamic admissions in this
+  // release (see DYNAMIC_ENCLAVE_EXECUTION_UNSUPPORTED_REASON).
+  takeEnclaveDynamicDelegationCapability(env);
   const githubAgentId = env[ENCLAVE_GITHUB_MCP_AGENT_ID_ENV] ?? '';
   if (isEnclaveGithubEnabled(config)) {
     if (!/^[A-Za-z0-9_-]{32,128}$/.test(githubAgentId)) {

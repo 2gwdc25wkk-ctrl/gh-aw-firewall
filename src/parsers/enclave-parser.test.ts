@@ -5,6 +5,14 @@ import {
   ENCLAVES_DEFAULTS,
 } from '../types/enclave-options';
 import { normalizeEnclavesConfig } from './enclave-parser';
+import {
+  GH_AW_DYNAMIC_ENCLAVE_POLICY_FIXTURE,
+  dynamicEnclavePolicyFixture,
+  typedDynamicEnclavePolicyFixture,
+} from '../enclave/dynamic-policy.test-utils';
+
+/** The exact envelope the gh-aw compiler emits (see the fixture's provenance). */
+const dynamicPolicy = typedDynamicEnclavePolicyFixture;
 
 const repository = { repo: 'octo-org/private-service', sensitivity: 'confidential' as const };
 
@@ -135,6 +143,27 @@ describe('normalizeEnclavesConfig', () => {
       { agent: { model: 'gpt-5' }, repos: [repository] },
       { agent: { model: 'gpt-5' }, repos: [repository] },
     ])).toThrow(/at most one "agent" entry/);
+  });
+
+  it('rejects a "dynamic" policy declared on a "script" entry', () => {
+    expect(() => normalizeEnclavesConfig([
+      { script: {}, dynamic: dynamicPolicy() } as never,
+    ])).toThrow(/agent-only/);
+  });
+
+  it('rejects "dynamic" and "repos" declared together on the same entry', () => {
+    expect(() => normalizeEnclavesConfig([
+      { agent: { model: 'gpt-5' }, repos: [repository], dynamic: dynamicPolicy() },
+    ])).toThrow(/mutually exclusive/);
+  });
+
+  it('normalizes an agent entry with a dynamic policy and no static repos', () => {
+    const config = normalizeEnclavesConfig([
+      { agent: { model: 'gpt-5' }, dynamic: dynamicPolicy() },
+    ]);
+    expect(config?.privateRepos).toEqual([]);
+    expect(config?.executors.agent.repos).toEqual([]);
+    expect(config?.executors.agent.dynamic).toEqual(dynamicPolicy());
   });
 });
 
@@ -272,6 +301,120 @@ describe('enclaves JSON Schema', () => {
     }).length).toBeGreaterThan(0);
     expect(validateAwfFileConfig({
       enclaves: [{ agent: { model: 'gpt-5' }, repos: [repository], timeout: 4741 }],
+    }).length).toBeGreaterThan(0);
+  });
+
+  it('accepts the exact gh-aw compiler dynamic envelope verbatim', () => {
+    expect(validateAwfFileConfig({
+      enclaves: [{
+        agent: { model: 'gpt-5' },
+        dynamic: GH_AW_DYNAMIC_ENCLAVE_POLICY_FIXTURE,
+      }],
+    })).toEqual([]);
+  });
+
+  it('rejects the superseded pre-gh-aw#58880 field names', () => {
+    const legacyLimits = validateAwfFileConfig({
+      enclaves: [{
+        agent: { model: 'gpt-5' },
+        dynamic: dynamicEnclavePolicyFixture({
+          limits: {
+            timeout: 120,
+            memoryLimit: '1g',
+            cpuLimit: '1',
+            pidsLimit: 128,
+            tmpfsLimit: '256m',
+            maxOutputBytes: 8192,
+            maxTaskBytes: 4096,
+          },
+        }),
+      }],
+    });
+    expect(legacyLimits.length).toBeGreaterThan(0);
+    expect(validateAwfFileConfig({
+      enclaves: [{
+        agent: { model: 'gpt-5' },
+        dynamic: dynamicEnclavePolicyFixture({
+          quotas: { totalInvocations: 10, totalBytes: 1_000_000, totalSeconds: 3600 },
+        }),
+      }],
+    }).length).toBeGreaterThan(0);
+    expect(validateAwfFileConfig({
+      enclaves: [{
+        agent: { model: 'gpt-5' },
+        dynamic: dynamicEnclavePolicyFixture({ auditLabels: { run: 'test-run' } }),
+      }],
+    }).length).toBeGreaterThan(0);
+  });
+
+  it('accepts a dynamic-only agent entry and rejects malformed dynamic envelopes', () => {
+    expect(validateAwfFileConfig({
+      enclaves: [{ agent: { model: 'gpt-5' }, dynamic: dynamicPolicy() }],
+    })).toEqual([]);
+    // dynamic on a script entry is rejected
+    expect(validateAwfFileConfig({
+      enclaves: [{ script: {}, dynamic: dynamicPolicy() }],
+    }).length).toBeGreaterThan(0);
+    // dynamic and repos together on the same entry are rejected
+    expect(validateAwfFileConfig({
+      enclaves: [{ agent: { model: 'gpt-5' }, repos: [repository], dynamic: dynamicPolicy() }],
+    }).length).toBeGreaterThan(0);
+    // an entry with neither repos nor dynamic is rejected
+    expect(validateAwfFileConfig({
+      enclaves: [{ agent: { model: 'gpt-5' } }],
+    }).length).toBeGreaterThan(0);
+    // unknown policy version fails closed
+    expect(validateAwfFileConfig({
+      enclaves: [{
+        agent: { model: 'gpt-5' },
+        dynamic: {
+          ...dynamicPolicy(),
+          githubPolicy: { version: 'github-repository-read-v2', tools: ['list_issues', 'issue_read'] },
+        },
+      }],
+    }).length).toBeGreaterThan(0);
+    // a wider tool set than the closed v1 pair fails closed
+    expect(validateAwfFileConfig({
+      enclaves: [{
+        agent: { model: 'gpt-5' },
+        dynamic: {
+          ...dynamicPolicy(),
+          githubPolicy: { version: 'github-repository-read-v1', tools: ['list_issues'] },
+        },
+      }],
+    }).length).toBeGreaterThan(0);
+    // an unknown field on the envelope fails closed
+    expect(validateAwfFileConfig({
+      enclaves: [{
+        agent: { model: 'gpt-5' },
+        dynamic: { ...dynamicPolicy(), unknownField: true },
+      }],
+    }).length).toBeGreaterThan(0);
+    // a non-canonical (uppercase) selector fails closed
+    expect(validateAwfFileConfig({
+      enclaves: [{
+        agent: { model: 'gpt-5' },
+        dynamic: { ...dynamicPolicy(), allowedOwners: [], allowedRepositories: ['Octo-Org/Repo'] },
+      }],
+    }).length).toBeGreaterThan(0);
+    // an empty or duplicated audit-label array fails closed
+    expect(validateAwfFileConfig({
+      enclaves: [{ agent: { model: 'gpt-5' }, dynamic: dynamicEnclavePolicyFixture({ auditLabels: [] }) }],
+    }).length).toBeGreaterThan(0);
+    expect(validateAwfFileConfig({
+      enclaves: [{
+        agent: { model: 'gpt-5' },
+        dynamic: dynamicEnclavePolicyFixture({ auditLabels: ['dup', 'dup'] }),
+      }],
+    }).length).toBeGreaterThan(0);
+    // quotas beyond the compiler's own bounds fail closed
+    expect(validateAwfFileConfig({
+      enclaves: [{
+        agent: { model: 'gpt-5' },
+        dynamic: dynamicEnclavePolicyFixture({
+          quotas: { maxInvocations: 10_001, maxOutputBytes: 1, maxExecutionSeconds: 1 },
+        }),
+      }],
     }).length).toBeGreaterThan(0);
   });
 });

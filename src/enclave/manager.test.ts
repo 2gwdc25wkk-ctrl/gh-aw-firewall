@@ -13,6 +13,8 @@ import {
 } from './manager';
 import { releaseSeedPermissions, type GitRunner } from './staging';
 import { resolveEnclavePaths } from './paths';
+import { DYNAMIC_ENCLAVE_EXECUTION_UNSUPPORTED_REASON } from './preflight';
+import { typedDynamicEnclavePolicyFixture } from './dynamic-policy.test-utils';
 import * as runtimePreflight from './runtime-preflight';
 
 const gitRunner: GitRunner = async (args) => {
@@ -307,6 +309,50 @@ describe('prepareEnclaves fail-closed preflight', () => {
     const seedRunId = JSON.parse(fs.readFileSync(paths.seedMapPath, 'utf8')).runId;
     expect(seedRunId).toMatch(/^[0-9a-f]{32}$/);
     expect(seedRunId).not.toBe(agentId);
+  });
+
+  function dynamicOnlyConfig(dir: string): WrapperConfig {
+    return agentConfig(dir, [{
+      agent: { model: 'gpt-test' },
+      dynamic: typedDynamicEnclavePolicyFixture(),
+    }]);
+  }
+
+  it('refuses to prepare a dynamic entry, naming the missing delegation handoff', async () => {
+    await expect(prepareEnclaves(dynamicOnlyConfig(workDir), {
+      env: enclaveEnv({
+        AWF_ENCLAVE_GITHUB_DELEGATION_CONTROL_CAPABILITY: 'b'.repeat(64),
+      }),
+      assertPrimaryAvailable: jest.fn(),
+      assertAgentRuntimeAvailable: jest.fn(),
+    })).rejects.toThrow(DYNAMIC_ENCLAVE_EXECUTION_UNSUPPORTED_REASON);
+    // Refused before any staging: nothing is written and no runtime is probed.
+    expect(fs.existsSync(resolveEnclavePaths(workDir).seedMapPath)).toBe(false);
+  });
+
+  it('takes custody of the delegation-control capability before anything can inherit it', async () => {
+    const env = enclaveEnv({
+      AWF_ENCLAVE_GITHUB_DELEGATION_CONTROL_CAPABILITY: 'c'.repeat(64),
+    });
+    await expect(prepareEnclaves(dynamicOnlyConfig(workDir), {
+      env,
+      assertPrimaryAvailable: jest.fn(),
+      assertAgentRuntimeAvailable: jest.fn(),
+    })).rejects.toThrow(/Enclave configuration is invalid/);
+    expect(env.AWF_ENCLAVE_GITHUB_DELEGATION_CONTROL_CAPABILITY).toBeUndefined();
+  });
+
+  it('strips the delegation-control capability even on a static-only run', async () => {
+    const env = enclaveEnv({
+      AWF_ENCLAVE_GITHUB_DELEGATION_CONTROL_CAPABILITY: 'd'.repeat(64),
+    });
+    await prepareEnclaves(config(workDir), {
+      env,
+      gitRunner,
+      assertPrimaryAvailable: jest.fn().mockResolvedValue(undefined),
+      assertScriptRuntimeAvailable: jest.fn().mockResolvedValue(undefined),
+    });
+    expect(env.AWF_ENCLAVE_GITHUB_DELEGATION_CONTROL_CAPABILITY).toBeUndefined();
   });
 
   it('removes labelled orphan containers and both private roots on teardown', async () => {
