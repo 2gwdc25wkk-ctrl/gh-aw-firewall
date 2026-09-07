@@ -186,6 +186,13 @@ describe('self-hosted runner doctor workflow config', () => {
       expect(content).toContain('merged PR github/gh-aw-firewall#8173 adds regression coverage');
       expect(content).toContain('no AWF production-code change was needed.');
       expect(content).toContain('github/gh-aw#58458, github/gh-aw#58625, github/gh-aw-firewall#8141, github/gh-aw-firewall#8173');
+      expect(content).toContain('| B32 | A repeated/persistent-runner workflow intermittently blocks allowlisted');
+      expect(content).toContain('negative_dns_ttl 1 seconds');
+      expect(content).toContain('dns_retransmit_interval 1 seconds');
+      expect(content).toContain('dns_timeout 10 seconds');
+      expect(content).toContain('github/gh-aw-firewall#8168, github/gh-aw-firewall#8171');
+      expect(content).toContain('| B33 | `[DEBUG] Could not check Squid logs: EACCES');
+      expect(content).toContain('github/gh-aw-firewall#8249, github/gh-aw-firewall#8251');
       expect(content).toContain('| C9 | `400 bad request: Authorization header is badly formatted` specifically on the **derived GHEC data-residency Copilot target**');
       expect(content).toContain('receives `token` instead of required `Bearer` prefix');
       expect(content).toContain('| C10 | Fine-grained GitHub PATs (`github_pat_...`) sent to Copilot Business, Enterprise, and canonical GHEC');
@@ -208,6 +215,12 @@ describe('self-hosted runner doctor workflow config', () => {
     expect(source).toContain('- `context-rebuild circuit breaker tripped` together with a failed `cd` into the expected workspace path → B29');
     expect(source).toContain('- `awf logs summary` reports "no log sources found" after a pre-egress startup failure with no Squid `access.log` → B30');
     expect(source).toContain('- A setup-action-selected toolchain version is shadowed by the system-default version inside the AWF agent under `sandbox.agent.runtime: docker-sudo-iptables` → B31');
+    expect(source).toContain('- Recurring intermittent `403`/DNS `SERVFAIL` blocking an allowlisted domain');
+    expect(source).toContain('→ B32 (Squid\'s default 60-second `negative_dns_ttl`');
+    expect(source).toContain('`dns_retransmit_interval 1 seconds`');
+    expect(source).toContain('`dns_timeout 10 seconds`');
+    expect(source).toContain('- `[DEBUG] Could not check Squid logs: EACCES ... access.log` mid-run');
+    expect(source).toContain('→ B33 (the previous shutdown-time repair only changed mode bits');
     expect(source).toContain('- Copilot calls on Business/Enterprise/GHEC use the wrong Authorization scheme specifically for a fine-grained PAT (`github_pat_...`) → C10');
     expect(source).toContain('- `400 bad request: Authorization header is badly formatted` on derived `copilot-api.*.ghe.com` target specifically (not `api.business.githubcopilot.com`) → C9 (derived GHEC Copilot API target incorrectly using the GitHub `token` prefix instead of `Bearer`; fixed in github/gh-aw-firewall#8113)');
     expect(source).toContain('B12 / github/gh-aw-firewall#6326, github/gh-aw-firewall#6328 — On ARC/DinD, a topology-attached DIFC proxy addressed by Kubernetes Service name can remain unresolvable from DinD containers even after the ordering fix.');
@@ -260,6 +273,12 @@ describe('self-hosted runner doctor workflow config', () => {
       expect(playbook).toContain('B29 / github/gh-aw-firewall#8015, github/gh-aw-firewall#8021 — `codex`-engine workflows can abort');
       expect(playbook).toContain('B30 / github/gh-aw-firewall#8014, github/gh-aw-firewall#8023 — A pre-egress AWF startup failure');
       expect(playbook).toContain('C10 / github/gh-aw-firewall#8035, github/gh-aw-firewall#8038 — Fine-grained GitHub PATs');
+      expect(playbook).toContain('- Recurring intermittent `403`/DNS `SERVFAIL` blocking an allowlisted domain');
+      expect(playbook).toContain('→ B32 (Squid\'s default 60-second `negative_dns_ttl`');
+      expect(playbook).toContain('`dns_retransmit_interval 1 seconds`');
+      expect(playbook).toContain('`dns_timeout 10 seconds`');
+      expect(playbook).toContain('- `[DEBUG] Could not check Squid logs: EACCES ... access.log` mid-run');
+      expect(playbook).toContain('→ B33 (the previous shutdown-time repair only changed mode bits');
     }
   });
 });
