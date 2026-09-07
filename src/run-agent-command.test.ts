@@ -1,6 +1,7 @@
 import { runAgentCommand, fastKillAgentContainer } from './container-lifecycle';
 import { containerLifecycleTestHelpers } from './container-lifecycle.test-utils';
 import { logger } from './logger';
+import { SQUID_CONTAINER_NAME } from './constants';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -373,5 +374,59 @@ describe('runAgentCommand', () => {
       warnSpy.mockRestore();
       errorSpy.mockRestore();
     }
+  });
+  it('repairs squid log permissions in-container before reading access.log', async () => {
+    const squidLogsDir = path.join(getDir(), 'squid-logs');
+    fs.mkdirSync(squidLogsDir, { recursive: true });
+    const accessLogPath = path.join(squidLogsDir, 'access.log');
+    fs.writeFileSync(
+      accessLogPath,
+      '1760994429.358 172.30.0.20:36274 blocked.com:443 -:- 1.1 CONNECT 403 TCP_DENIED:HIER_NONE blocked.com:443 "curl/7.81.0"\n'
+    );
+    // Make the file genuinely unreadable, mirroring Squid writing it as UID 13.
+    // Only the mocked `docker exec` repair below restores read access, so if
+    // checkSquidLogs() reads the file before the repair runs, the read fails
+    // with a real EACCES and the denial is silently dropped.
+    fs.chmodSync(accessLogPath, 0o000);
+
+    mockExecaFn.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any); // docker logs -f
+    mockExecaFn.mockResolvedValueOnce({ stdout: '0', stderr: '', exitCode: 0 } as any); // docker wait
+    mockExecaFn.mockImplementationOnce(async () => {
+      fs.chmodSync(accessLogPath, 0o644);
+      return { stdout: '', stderr: '', exitCode: 0 } as any;
+    }); // docker exec chown/chmod
+
+    try {
+      const result = await runAgentCommand(getDir(), ['github.com']);
+
+      expect(mockExecaFn).toHaveBeenCalledWith(
+        'docker',
+        expect.arrayContaining([
+          'exec',
+          '--user',
+          'root',
+          SQUID_CONTAINER_NAME,
+          'sh',
+          '-c',
+          'chown -R "$TUID:$TGID" /var/log/squid 2>/dev/null; chmod -R a+rX /var/log/squid',
+        ]),
+        expect.objectContaining({ reject: false }),
+      );
+      // Proves the repair ran before access.log was read: the denial below was
+      // only observable because the file was actually made readable first.
+      expect(result.blockedDomains).toContain('blocked.com');
+    } finally {
+      fs.chmodSync(accessLogPath, 0o644);
+    }
+  });
+
+  it('keeps the agent exit code when the squid log permission repair fails', async () => {
+    mockExecaFn.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any); // docker logs -f
+    mockExecaFn.mockResolvedValueOnce({ stdout: '7', stderr: '', exitCode: 0 } as any); // docker wait
+    mockExecaFn.mockRejectedValueOnce(new Error('container not running')); // docker exec
+
+    const result = await runAgentCommand(getDir(), ['github.com']);
+
+    expect(result.exitCode).toBe(7);
   });
 });
