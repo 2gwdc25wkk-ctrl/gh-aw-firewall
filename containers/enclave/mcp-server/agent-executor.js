@@ -58,13 +58,14 @@ function createAgentRequestValidator(maxPromptBytes) {
  * invoked inside the charged timing bucket and before teardown.
  */
 const agentWorkspaceAdapter = {
-  createInvocationWorkspace({ config, invocationId, privateRepo, schema, prompt }) {
+  createInvocationWorkspace({ config, invocationId, privateRepo, schema, prompt, executorBearer }) {
     return agentWorkspace.createInvocationWorkspace({
       config,
       invocationId,
       schema,
       task: prompt,
       githubAgentId: config.githubEnabled ? config.githubAgentId : undefined,
+      executorBearer,
     });
   },
   readQueryOutput(outPath, maxOutputBytes) {
@@ -97,12 +98,16 @@ function createAgentRunner(config, deps = {}) {
   return {
     assertAvailable: () => runner.assertAvailable(),
     reconcileRun: (runId) => runner.reconcileRun(runId),
-    runScriptContainer: ({ runId, invocationId, seedId, timeoutMs }) => runner.runEnclaveContainer({
+    runScriptContainer: ({ runId, invocationId, seedId, timeoutMs, dynamic }) => runner.runEnclaveContainer({
       config,
       runId,
       invocationId,
       seedId,
       timeoutMs,
+      // Per-invocation delegation binding from AWF's canonical admission. The
+      // runner merges only the admitted repository and read mode, after
+      // revalidating both; a caller's request can express neither.
+      dynamic,
     }),
   };
 }

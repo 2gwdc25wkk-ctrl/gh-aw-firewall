@@ -34,6 +34,40 @@ const ENCLAVE_RUN_LABEL = 'awf.enclave.run';
 const ENCLAVE_INVOCATION_LABEL = 'awf.enclave.invocation';
 const TRUSTED_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
+/** Canonical dynamic selector, per ADR 0001. Never widened at runtime. */
+const CANONICAL_DYNAMIC_REPOSITORY_PATTERN =
+  /^[a-z0-9](?:[a-z0-9-]{0,38})\/(?!\.\.?$)(?!.*\.\.)[a-z0-9._-]{1,100}$/;
+
+const DYNAMIC_READ_MODES = new Set(['live', 'pinned']);
+
+/**
+ * Merges one invocation's delegation binding into the trusted broker config.
+ *
+ * Exactly two scalars may vary per invocation — the admitted repository and
+ * its read mode — and both come from AWF's canonical admission, never from the
+ * caller's request. Anything else is rejected so a per-invocation object can
+ * never widen the fixed container specification.
+ */
+function withDynamicBinding(config, dynamic) {
+  if (dynamic === undefined) return config;
+  if (!config.dynamicEnabled) {
+    throw new Error('A delegation binding was supplied for a non-dynamic enclave entry');
+  }
+  if (
+    typeof dynamic !== 'object'
+    || dynamic === null
+    || !CANONICAL_DYNAMIC_REPOSITORY_PATTERN.test(dynamic.repository || '')
+    || !DYNAMIC_READ_MODES.has(dynamic.readMode)
+  ) {
+    throw new Error('The delegation binding is not a canonical admitted repository and read mode');
+  }
+  return {
+    ...config,
+    dynamicRepository: dynamic.repository,
+    dynamicReadMode: dynamic.readMode,
+  };
+}
+
 /** Converts a monotonic-clock duration to the integer milliseconds Node requires. */
 function normalizeTimeoutMs(timeoutMs) {
   return Math.max(1, Math.ceil(timeoutMs));
@@ -59,10 +93,33 @@ function freezeArray(values) {
  * Derives every daemon-facing enclave setting from trusted config and
  * broker-generated identifiers.
  */
-function deriveEnclaveContainerSpec({ config, runId, invocationId, seedId, runtimeName }) {
+/**
+ * Derives every daemon-facing enclave setting from trusted config and
+ * broker-generated identifiers.
+ *
+ * `launch` distinguishes a real invocation from the reconciliation/cleanup
+ * paths, which only need the label filter vectors. A dynamic entry has no
+ * repository binding while reconciling, so the per-invocation delegation
+ * checks apply to launches only.
+ */
+function deriveEnclaveContainerSpec({ config, runId, invocationId, seedId, runtimeName, launch = true }) {
   assertTrustedId('runId', runId);
   assertTrustedId('invocationId', invocationId);
-  assertTrustedSeedId(seedId);
+  // A dynamic entry stages no immutable seed at all: the enclave reads live
+  // GitHub through one repository-scoped delegated identity, so there is no
+  // seed id, no seed directory, and no `/awf/seed` mount.
+  if (!config.dynamicEnabled) assertTrustedSeedId(seedId);
+  if (launch && config.dynamicEnabled) {
+    // The launch vector must never interpolate an unbound selector or read
+    // mode: an executor that received `undefined` would either fail closed at
+    // startup or, worse, misstate the delegation contract in its prompt.
+    if (!CANONICAL_DYNAMIC_REPOSITORY_PATTERN.test(config.dynamicRepository || '')) {
+      throw new Error('dynamicRepository is not an admitted canonical repository');
+    }
+    if (!DYNAMIC_READ_MODES.has(config.dynamicReadMode)) {
+      throw new Error('dynamicReadMode is not an admitted read mode');
+    }
+  }
   if (runtimeName !== undefined && runtimeName !== 'runsc') {
     throw new Error(`Unsupported OCI runtime in enclave runner: ${runtimeName}`);
   }
@@ -73,7 +130,6 @@ function deriveEnclaveContainerSpec({ config, runId, invocationId, seedId, runti
   const containerPrefix = config.containerPrefix || 'awf-enclave-agent';
   const containerName = `${containerPrefix}-${runId.slice(0, 12)}-${invocationId}`;
   const hostInvocationDir = `${config.hostWorkDir}/${invocationId}`;
-  const hostSeedDir = `${config.hostSeedsDir}/${seedId}`;
   const runLabel = `${runLabelKey}=${runId}`;
   const invocationLabel = `${invocationLabelKey}=${invocationId}`;
   const launchArgs = [
@@ -97,7 +153,7 @@ function deriveEnclaveContainerSpec({ config, runId, invocationId, seedId, runti
     '--shm-size', config.tmpfsLimit,
     '--tmpfs', `/tmp:rw,noexec,nosuid,nodev,size=${config.tmpfsLimit}`,
     '--hostname', config.enclaveHostname || 'enclave-agent',
-    '--workdir', config.enclaveSeedPath,
+    '--workdir', config.dynamicEnabled ? config.enclaveMountDir : config.enclaveSeedPath,
     '--env', `AWF_ENCLAVE_AGENT_ENGINE=${config.engine}`,
     '--env', `HOME=${config.enclaveMountDir}/home`,
     '--env', `COPILOT_HOME=${config.enclaveMountDir}/copilot`,
@@ -114,13 +170,15 @@ function deriveEnclaveContainerSpec({ config, runId, invocationId, seedId, runti
     '--env', `AWF_ENCLAVE_AGENT_MODEL=${config.model}`,
     '--env', `AWF_ENCLAVE_AGENT_MAX_OUTPUT_BYTES=${config.maxOutputBytes}`,
     '--env', `AWF_ENCLAVE_AGENT_DEADLINE_SECONDS=${config.timeoutSeconds}`,
-    '-v', `${hostSeedDir}:${config.enclaveSeedPath}:ro`,
     '-v', `${hostInvocationDir}/task.txt:${config.enclaveTaskPath}:ro`,
     '-v', `${hostInvocationDir}/schema.json:${config.enclaveSchemaPath}:ro`,
     '-v', `${hostInvocationDir}/out:/awf/out:rw`,
     '-v', `${hostInvocationDir}/session.jsonl:/awf/session.jsonl:rw`,
     '-v', `${hostInvocationDir}/agent:${config.enclaveMountDir}:rw`,
   ];
+  if (!config.dynamicEnabled) {
+    launchArgs.push('-v', `${config.hostSeedsDir}/${seedId}:${config.enclaveSeedPath}:ro`);
+  }
   if (config.githubEnabled) {
     launchArgs.push(
       '--env', 'AWF_ENCLAVE_AGENT_GITHUB_ENABLED=true',
@@ -128,6 +186,16 @@ function deriveEnclaveContainerSpec({ config, runId, invocationId, seedId, runti
       '--env', `AWF_ENCLAVE_AGENT_GITHUB_MCP_URL=${config.githubMcpUrl}`,
       '-v',
       `${hostInvocationDir}/github-agent-id:${config.enclaveGithubAgentIdPath}:ro`,
+    );
+  }
+  if (config.dynamicEnabled) {
+    launchArgs.push(
+      '--env', 'AWF_ENCLAVE_AGENT_DYNAMIC_ENABLED=true',
+      '--env', `AWF_ENCLAVE_AGENT_GITHUB_MCP_URL=${config.dynamicGithubMcpUrl}`,
+      '--env', `AWF_ENCLAVE_AGENT_DYNAMIC_REPO=${config.dynamicRepository}`,
+      '--env', `AWF_ENCLAVE_AGENT_DYNAMIC_READ_MODE=${config.dynamicReadMode}`,
+      '-v',
+      `${hostInvocationDir}/github-bearer:${config.enclaveGithubBearerPath}:ro`,
     );
   }
 
@@ -167,4 +235,5 @@ module.exports = {
   buildRemoveArgs,
   deriveEnclaveContainerSpec,
   normalizeTimeoutMs,
+  withDynamicBinding,
 };

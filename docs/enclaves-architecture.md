@@ -4,12 +4,12 @@
 
 Layer 5 establishes one `enclaves` subsystem, one AWF-owned MCP server, and mcpg-only access through the compiler handoff contract.
 
-Dynamic repository admission described below is a proposed, version-gated
-extension; it is not supported by the current AWF configuration or runtime.
-Current entries must declare a non-empty static `repos` list and use immutable
-seeds. Operators MUST NOT configure or rely on dynamic-policy fields until an
-AWF release implements them and the required compiler and mcpg version gates
-are available.
+Dynamic repository admission described below is implemented and version-gated.
+It runs only when the gh-aw compiler starts mcpg's
+`github-repository-delegation-v1` controller (mcpg v0.4.17 or newer) and hands
+AWF its loopback-only control endpoint and AWF-only control capability; every
+other combination fails closed before execution. Static entries continue to
+declare a non-empty `repos` list and use immutable seeds.
 
 ## Architecture
 
@@ -18,6 +18,18 @@ AWF stages immutable repository seeds on the host, starts one AWF-owned `enclave
 - **Script executor** — `enclave_run_script` runs a bounded Python script in a no-network, read-only, single-use sandbox.
 - **Agent executor** — `enclave_run_agent` runs the pinned Copilot engine in a bounded single-use enclave. Its mandatory peer is the dedicated API proxy; `agent.tools.github` (or the deprecated legacy `agent.github.cli: issues-read-v1` marker) also permits a direct connection to compiler-owned shared mcpg.
 - **Shared controls** — the `repos` lists of the `enclaves` entries form the only trusted repository catalog; script and agent calls debit the same per-run repository ledger and share one admission lane.
+
+> **Terminology.** *Executor* and *enclave* are distinct, and this document uses
+> both. An **executor** is broker-side machinery and a configuration kind:
+> `enclaves.executors.{script,agent}`, `executorKind`, and the code under
+> `containers/enclave/{script,agent}-executor/`, which ships into the
+> `enclave-mcp-server` image and holds the Docker socket. An **enclave** is the
+> ephemeral container an executor launches per invocation — its own image
+> (`enclave-script` / `enclave-agent`), its own name
+> (`awf-enclave-agent-<run>-<invocation>`), and its own entrypoint. One executor
+> launches many enclaves; the executor is trusted, the enclave is not. Where
+> prose says "single-use executor" it means the enclave that executor launched.
+> `executor_bearer` is mcpg's wire field name and is never renamed.
 
 The primary agent never receives a broker socket, wrapper binary, direct MCP server URL, capability, repository seed, ledger state, or alternate transport.
 
@@ -30,12 +42,13 @@ Repository admission has two modes, both served by this same MCP backend:
   GitHub-enabled agent enclaves keep their current job-lifetime mcpg identity,
   which covers the union of configured repositories; they do not claim the
   dynamic mode's one-repository GitHub-MCP identity guarantee.
-- **Dynamic GitHub-MCP-backed mode (planned)** — the compiler will provide a closed policy
+- **Dynamic GitHub-MCP-backed mode** — the compiler provides a closed policy
   envelope instead of enumerating repository seeds in workflow frontmatter. Each
   invocation provides only a canonical `owner/repo` selector, bounded
   agent prompt, and finite response schema. AWF admits at most one repository
-  for that invocation through the compiler-owned GitHub MCP path and records the
-  admitted default-branch SHA.
+  for that invocation, mints exactly one short-lived
+  `github-repository-read-v1` identity for it through mcpg's private control
+  channel, and hands the single-use executor only that identity's bearer.
 
 Static and dynamic modes are compatible in one workflow run but mutually
 exclusive within a single enclave entry: an entry declares either static `repos`
@@ -260,7 +273,7 @@ discovery, and any tool whose arguments cannot be mechanically confined to the
 admitted repository fail closed until a new versioned policy defines and tests
 that confinement.
 
-When implemented, the dynamic invocation flow is:
+The dynamic invocation flow is:
 
 1. The primary agent calls `enclave_run_agent` with one canonical repository
    selector, bounded prompt, and finite schema.
@@ -271,14 +284,16 @@ When implemented, the dynamic invocation flow is:
    channel to atomically create or confirm an invocation-scoped delegated
    identity bound to that run, enclave entry, admitted repository,
    `github-repository-read-v1` tool set, schema, and expiry.
-4. AWF records the admitted repository hash and default-branch SHA, stores the
-   delegated identity only in invocation-private state, and mounts it read-only
-   into the single-use executor.
+4. AWF records the admitted repository hash, stores the delegated identity's
+   handle only in AWF-private host state, and mounts *only* the executor bearer
+   read-only into the single-use executor. The admitted default-branch SHA is
+   optional: AWF has no already-authorized, repository-confined path to resolve
+   one before the identity exists, so it omits the field and audits every read
+   as live rather than widening a token or tool to obtain a snapshot.
 5. The executor may access only the admitted repository through the delegated
-   GitHub MCP identity and only with `github-repository-read-v1` tools. If a
-   GitHub MCP tool supports immutable refs, AWF uses the admitted default-branch
-   SHA; otherwise the audit record marks the data as a live read at that
-   admitted SHA.
+   GitHub MCP identity and only with `github-repository-read-v1` tools. A read
+   is marked `pinned` only when the control binding actually carries a resolved
+   SHA; otherwise the audit record marks the data as a live read.
 6. On completion, timeout, failure, or shutdown, AWF requests identity
    revocation, records the revocation state, removes invocation-private state,
    and admits no other repository until cleanup for the serialized lane is
@@ -330,6 +345,101 @@ selectors return the same canonical admission-denied error. That error omits the
 requested owner/repository, policy reason, upstream HTTP status, credential
 state, and timing detail so dynamic mode does not become an existence oracle.
 Trusted operators can inspect only redacted audit diagnostics.
+
+### Dynamic runtime topology
+
+The primary agent reaches mcpg over `awf-net`, the same internal topology
+network it runs on. AWF refuses to start unless `topologyAttach` names the
+gateway container, attaches it with `docker network connect`, and pre-registers
+its address in the agent's `/etc/hosts` so the route survives environments
+where Docker's embedded DNS is unreachable. The single-use executor meets the
+same gateway on the separate `awf-enclave-agent` network at `172.31.0.40`.
+
+Network homing matters here, because one component is deliberately confined to a
+single network and another necessarily straddles several:
+
+```mermaid
+graph LR
+  subgraph host["Runner host — no Docker network"]
+    AWF["AWF host process<br/>owns control client + registry"]
+    PRIV[("/var/tmp/awf-enclave-private-*<br/>0700 · channel + 0600 custody")]
+  end
+  subgraph net["awf-net · internal 172.30.0.0/24"]
+    AGENT["agent (primary)<br/>172.30.0.20"]
+  end
+  subgraph ctrl["awf-enclave-mcp-control · internal"]
+    BROKER["enclave-mcp-server (broker)<br/>ONE network only"]
+  end
+  subgraph enc["awf-enclave-agent · internal 172.31.0.0/24"]
+    EXEC["enclave (single-use container)<br/>launched by the agent executor"]
+    EPROXY["enclave-agent-api-proxy<br/>172.31.0.30"]
+  end
+  MCPG["awmg-mcpg<br/>image ghcr.io/github/gh-aw-mcpg<br/>homed on awf-net + awf-enclave-mcp-control<br/>+ awf-enclave-agent 172.31.0.40 + host loopback"]
+
+  AGENT -->|"/mcp/awf-enclave"| MCPG
+  MCPG -->|"capability"| BROKER
+  EXEC -->|"/mcp/github · delegated bearer"| MCPG
+  EXEC -->|"model only"| EPROXY
+  BROKER -.->|"docker run"| EXEC
+  AWF ==>|"control plane · 127.0.0.1 · Bearer capability"| MCPG
+  BROKER <-.->|"admission + settlement"| PRIV
+  AWF -.-> PRIV
+```
+
+The broker is homed on exactly one network, and AWF asserts that network's
+membership is precisely `{broker, mcpg}`; a third member aborts the run. mcpg,
+by contrast, is one container serving both the executor-facing data plane and
+the AWF-only control plane, so it is co-attached with every peer it serves.
+
+gh-aw publishes mcpg's delegation control listener with
+`docker run -p 127.0.0.1:<port>:<port>`, so **the published port** is reachable
+only from the runner's own loopback interface. That is why the control client
+lives in the AWF host process: no container can reach a `127.0.0.1`-published
+port through the host.
+
+It is worth being precise that this is a property of the publication, not a
+general routing guarantee. Under network isolation gh-aw binds the
+*in-container* listener to `0.0.0.0`, because Docker NATs a published port to
+the container's bridge IP and a container-local `127.0.0.1` bind would be
+unreachable. A peer sharing a Docker network with mcpg addresses the container
+IP directly and never traverses the published port, so co-attachment — not
+publication scope — determines container-to-container reachability. The control
+plane is therefore protected by **authentication**: every request must carry the
+AWF-only capability, which is never placed in any container's environment or
+mount, and mcpg rejects anything else with `403 delegation_access_denied`.
+
+The broker asks the host for admission over an AWF-private request/response
+directory inside the `0700` enclave private root that is bind-mounted only into
+the broker:
+
+```text
+primary agent ──mcpg /mcp/awf-enclave──▶ enclave MCP broker (container)
+                                              │
+                          admission request   │ 0700 bind mount, no network
+                          settlement report   ▼
+                                        AWF host process
+                                              │ Authorization: <control capability>
+                                              ▼
+                    http://127.0.0.1:<port>/internal/awf-enclave-mcp-control/*
+                                              │
+                                              ▼
+                                   mcpg delegation controller
+                                              │ executor bearer
+                                              ▼
+executor (awf-enclave-agent network) ──▶ mcpg /mcp/github ──▶ admitted repository
+```
+
+The channel carries the caller's selector, the exact finite output-schema hash,
+one repository, one executor bearer, and one settlement. It never carries the
+control endpoint, the control capability, the identity handle, the compiler
+envelope, mcpg's state path, or its policy generation.
+
+A dynamic-only entry stages nothing: no `GH_TOKEN`/`GITHUB_TOKEN`, no clone, no
+seed catalog (not even an empty one), and no `/awf/seed` mount. The executor's
+GitHub MCP configuration is invocation-private and bearer-only, confined to
+`list_issues` and `issue_read` for the one admitted repository, and its system
+instructions prohibit cloning, arbitrary URLs, the GitHub CLI, writes, unscoped
+search, organization/global discovery, and sibling-repository access.
 
 ### Dynamic threat model
 
