@@ -9,47 +9,11 @@ import {
   createCloudHypervisorRuntimeBackend,
   type CloudHypervisorRuntimeBackendDependencies,
 } from './cloud-hypervisor-runtime-backend';
-import type { MicrovmInfrastructureSnapshot } from './microvm/infrastructure';
-import { CLOUD_HYPERVISOR_ARTIFACT_RELEASE_TAG } from './cloud-hypervisor/artifact-manifest';
-
-function config(overrides: Partial<WrapperConfig> = {}): WrapperConfig {
-  return {
-    containerRuntime: 'cloud-hypervisor',
-    cloudHypervisor: {
-      previewEnabled: true,
-      mountPolicy: 'workspace-only',
-      cloudHypervisorBinary: '/opt/cloud-hypervisor',
-      kernelPath: '/opt/kernel',
-      rootfsPath: '/opt/rootfs',
-      supervisorPath: '/opt/supervisor',
-      artifactManifestPath: '/opt/manifest.json',
-      artifactManifestBundlePath: '/opt/manifest.sigstore.jsonl',
-      artifactReleaseTag: CLOUD_HYPERVISOR_ARTIFACT_RELEASE_TAG,
-      vcpuCount: 2,
-      memoryMib: 512,
-      apiTimeoutMs: 5000,
-    },
-    agentCommand: 'printf hello',
-    allowedDomains: ['github.com'],
-    workDir: '/tmp/awf',
-    keepContainers: false,
-    networkIsolation: true,
-    legacySecurity: false,
-    enableApiProxy: true,
-    enableDind: false,
-    enableHostAccess: false,
-    tty: false,
-    logLevel: 'info',
-    buildLocal: false,
-    skipPull: true,
-    imageRegistry: 'registry',
-    imageTag: 'tag',
-    envAll: false,
-    sslBump: false,
-    enableDlp: false,
-    ...overrides,
-  } as WrapperConfig;
-}
+import {
+  cloudHypervisorHostTools,
+  createCloudHypervisorInfrastructureSnapshot as infrastructure,
+  createCloudHypervisorTestConfig as config,
+} from './cloud-hypervisor/test-fixtures.test-utils';
 
 type TestCloudHypervisorRuntimeBackend = ReturnType<typeof createCloudHypervisorRuntimeBackend> & {
   preserve(): Promise<void>;
@@ -63,19 +27,6 @@ function createBackend(
     backendConfig,
     deps,
   ) as TestCloudHypervisorRuntimeBackend;
-}
-
-function infrastructure(): MicrovmInfrastructureSnapshot {
-  return {
-    networkId: 'a'.repeat(64),
-    bridgeName: 'br-aaaaaaaaaaaa',
-    subnet: '172.30.0.0/24',
-    gateway: '172.30.0.1',
-    squidIp: '172.30.0.10',
-    apiProxyIp: '172.30.0.30',
-    topologyPeerIps: {},
-    revalidate: jest.fn().mockResolvedValue(undefined),
-  };
 }
 
 const preflightResult = {
@@ -95,26 +46,7 @@ const preflightResult = {
   },
   cgroupVersion: 2 as const,
   kvmGid: 978,
-  tools: {
-    getfacl: '/usr/bin/getfacl',
-    getent: '/usr/bin/getent',
-    groupdel: '/usr/sbin/groupdel',
-    id: '/usr/bin/id',
-    ip: '/usr/bin/ip',
-    nft: '/usr/sbin/nft',
-    sysctl: '/usr/sbin/sysctl',
-    flock: '/usr/bin/flock',
-    mke2fs: '/usr/sbin/mke2fs',
-    debugfs: '/usr/sbin/debugfs',
-    e2fsck: '/usr/sbin/e2fsck',
-    rsync: '/usr/bin/rsync',
-    mount: '/usr/bin/mount',
-    umount: '/usr/bin/umount',
-    setpriv: '/usr/bin/setpriv',
-    setfacl: '/usr/bin/setfacl',
-    useradd: '/usr/sbin/useradd',
-    userdel: '/usr/sbin/userdel',
-  },
+  tools: cloudHypervisorHostTools,
 };
 
 function harness(overrides: Partial<CloudHypervisorRuntimeBackendDependencies> = {}) {
