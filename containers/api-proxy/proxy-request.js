@@ -267,19 +267,49 @@ function proxyRequest(req, res, targetHost, injectHeaders, provider, basePath = 
 
     // Step 2: apply transform pipeline
     const inboundBytes = rawBody.length;
-    const body = await transformRequestBody(rawBody, provider, req, requestId, bodyTransform);
+    let body;
+    let codexCompatibility = null;
+    try {
+      ({ body, codexCompatibility } = await transformRequestBody(rawBody, provider, req, requestId, bodyTransform));
+    } catch (err) {
+      const statusCode = Number.isInteger(err && err.statusCode) ? err.statusCode : 400;
+      const duration = Date.now() - startTime;
+      metrics.gaugeDec('active_requests', { provider });
+      metrics.increment('requests_total', { provider, method: req.method, status_class: `${Math.floor(statusCode / 100)}xx` });
+      logRequest('warn', 'request_transform_failed', {
+        request_id: requestId,
+        provider,
+        method: req.method,
+        path: sanitizeForLog(req.url),
+        status: statusCode,
+        duration_ms: duration,
+        error_code: err && err.code ? err.code : 'request_transform_failed',
+      });
+      otel.endSpan(span, statusCode);
+      res.writeHead(statusCode, { 'Content-Type': 'application/json', 'X-Request-ID': requestId });
+      res.end(JSON.stringify({
+        error: {
+          message: err && err.message ? err.message : 'Request body transform failed',
+          type: 'invalid_request_error',
+          code: err && err.code ? err.code : 'request_transform_failed',
+        },
+      }));
+      return;
+    }
 
     // Step 3: dispatch upstream
     const requestBytes = body.length;
     metrics.increment('request_bytes_total', { provider }, requestBytes);
 
-    const headers = buildRequestHeaders(body, inboundBytes, req, { injectHeaders, provider, targetHost, requestId });
+    const headers = buildRequestHeaders(body, inboundBytes, req, {
+      injectHeaders, provider, targetHost, requestId, codexCompatibility,
+    });
 
     if (enforceGuards({ body, provider, req, res, requestId, startTime, span, inboundBytes })) return;
 
     sendUpstreamRequest(headers, {
       body, targetHost, upstreamPath, req, res, provider, requestId, startTime, span, requestBytes, requestSigner,
-      targetScheme,
+      targetScheme, codexCompatibility,
     });
   });
 }
