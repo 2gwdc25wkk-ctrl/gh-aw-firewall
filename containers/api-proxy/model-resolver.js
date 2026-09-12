@@ -19,7 +19,7 @@
  * case-insensitive, and sorted by semver semantics (highest version first).
  */
 
-const { globMatch, extractVersionNumbers, compareByVersion } = require('./model-utils');
+const { globMatch, extractVersionNumbers, compareByVersion, stripRedundantProviderPrefix } = require('./model-utils');
 const {
   DEFAULT_MODEL_FALLBACK,
   normalizeFallbackConfig,
@@ -355,15 +355,36 @@ function resolveModel(
   preferDirectRequest = true
 ) {
   const log = [];
-  const { baseModel, parameterSuffix } = splitModelParameters(requestedModel);
+  const originalRequestedModel = requestedModel;
+  const { baseModel: rawBaseModel, parameterSuffix } = splitModelParameters(requestedModel);
+  // Strip a redundant "<provider>/" prefix (e.g. "copilot/auto", as used by
+  // harnesses such as Pi and Codex) so it resolves identically to the bare
+  // model name on this provider. NOTE: body-handler.js's
+  // `transformRequestBody` independently calls `stripRedundantModelPrefixInBody`
+  // (model-body-rewriter.js) unconditionally before this alias-resolution path
+  // runs, so that the same normalization is applied even when
+  // AWF_MODEL_ALIASES is not configured. Both call sites share this logic via
+  // `stripRedundantProviderPrefix` in model-utils.js — keep them in sync.
+  const baseModel = currentProvider === 'copilot'
+    ? stripRedundantProviderPrefix(rawBaseModel, currentProvider)
+    : rawBaseModel;
+  if (baseModel !== rawBaseModel) {
+    log.push(`[model-resolver] stripped redundant provider prefix: "${rawBaseModel}" → "${baseModel}"`);
+  }
   const key = baseModel.toLowerCase();
   const fallbackConfig = normalizeFallbackConfig(modelFallbackConfig);
+  // From here on, operate on a new normalized value (the possibly
+  // prefix-stripped requested model) so downstream log messages, loop
+  // detection, and direct/alias matching all see the normalized value rather
+  // than the raw "<provider>/model" string. The raw input remains available
+  // above as `originalRequestedModel` for anything that needs the true input.
+  const normalizedRequestedModel = appendModelParameters(baseModel, parameterSuffix);
 
   if (currentProvider === 'copilot' && key === 'auto') {
     log.push('[model-resolver] special pass-through: "auto"');
     return {
-      resolvedModel: requestedModel,
-      candidates: [requestedModel],
+      resolvedModel: normalizedRequestedModel,
+      candidates: [normalizedRequestedModel],
       log,
       fallback: fallbackConfig.enabled
         ? { activated: false, selection_method: 'middle_power_median', reason: 'direct_match' }
@@ -373,7 +394,7 @@ function resolveModel(
 
   // Loop detection
   if (chain.includes(key)) {
-    log.push(`[model-resolver] loop detected: "${requestedModel}" already in chain [${chain.join(' → ')}]`);
+    log.push(`[model-resolver] loop detected: "${originalRequestedModel}" already in chain [${chain.join(' → ')}]`);
     return null;
   }
   const newChain = [...chain, key];
@@ -389,7 +410,7 @@ function resolveModel(
         log.push(`[model-resolver] model policy blocked direct match: "${direct}"`);
         return null;
       }
-      log.push(`[model-resolver] direct match: "${requestedModel}" → "${direct}"`);
+      log.push(`[model-resolver] direct match: "${originalRequestedModel}" → "${direct}"`);
       return {
         resolvedModel: appendModelParameters(direct, parameterSuffix),
         candidates: [appendModelParameters(direct, parameterSuffix)],
@@ -412,18 +433,18 @@ function resolveModel(
     if (familyAlias) {
       aliasEntry = Object.entries(aliases).find(([k]) => k.toLowerCase() === familyAlias);
       if (aliasEntry) {
-        log.push(`[model-resolver] fallback alias: "${requestedModel}" → "${aliasEntry[0]}"`);
+        log.push(`[model-resolver] fallback alias: "${originalRequestedModel}" → "${aliasEntry[0]}"`);
       }
     }
   }
 
   if (!aliasEntry) {
-    return _resolveDirectMatch(key, requestedModel, currentProvider, availableModels, fallbackConfig, log, modelPolicyConfig);
+    return _resolveDirectMatch(key, normalizedRequestedModel, currentProvider, availableModels, fallbackConfig, log, modelPolicyConfig);
   }
 
   const [aliasKey, aliasRaw] = aliasEntry;
   const aliasDefinition = resolveAliasDefinition(aliasRaw);
-  return _resolveAliasPatterns(aliasKey, aliasDefinition, requestedModel, aliases, availableModels, currentProvider, newChain, fallbackConfig, log, modelPolicyConfig);
+  return _resolveAliasPatterns(aliasKey, aliasDefinition, normalizedRequestedModel, aliases, availableModels, currentProvider, newChain, fallbackConfig, log, modelPolicyConfig);
 }
 
 /**

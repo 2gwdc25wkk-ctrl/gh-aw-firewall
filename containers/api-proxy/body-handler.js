@@ -26,6 +26,7 @@ const metrics = require('./metrics');
 const { getAndClearPendingSteeringMessage } = require('./guards/effective-token-guard');
 const { getAndClearPendingTimeoutSteeringMessage } = require('./guards/timeout-steering');
 const { translateCodexCustomToolsForCopilot } = require('./codex-compat');
+const { stripRedundantModelPrefixInBody } = require('./model-body-rewriter');
 
 /** Maximum request body size: 10 MB to prevent DoS via large payloads. */
 const MAX_BODY_SIZE = 10 * 1024 * 1024;
@@ -157,8 +158,24 @@ function createBodyHandler({ handleRequestError, otel }) {
    */
   async function transformRequestBody(body, provider, req, requestId, bodyTransform) {
     let codexCompatibility = null;
+    const isWritableMethod = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH';
 
-    if (bodyTransform && (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH')) {
+    // Normalize a redundant "<provider>/" prefix (e.g. "copilot/auto", used by
+    // harnesses such as Pi and Codex) unconditionally — independent of whether
+    // AWF_MODEL_ALIASES is configured — so the literal prefixed model string
+    // never reaches the upstream API, which would otherwise reject it as
+    // unrecognized. NOTE: when AWF_MODEL_ALIASES *is* configured, the
+    // `bodyTransform` step below (backed by model-resolver.js's `resolveModel`)
+    // independently strips the same redundant prefix as part of its own
+    // resolution logic (see `stripRedundantProviderPrefix` usage in
+    // model-resolver.js). Both call sites share the `stripRedundantProviderPrefix`
+    // helper in model-utils.js; keep them in sync if that normalization changes.
+    if (provider === 'copilot' && isWritableMethod) {
+      const prefixStripped = stripRedundantModelPrefixInBody(body, provider);
+      if (prefixStripped) body = prefixStripped;
+    }
+
+    if (bodyTransform && isWritableMethod) {
       const transformed = await bodyTransform(body, req);
       if (transformed) body = transformed;
     }
@@ -168,7 +185,7 @@ function createBodyHandler({ handleRequestError, otel }) {
     // resulting compatibility metadata must be threaded explicitly through
     // the request/retry context by the caller (see proxy-request.js and
     // upstream-http.js) rather than recovered from the body later.
-    if (provider === 'copilot' && (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH')) {
+    if (provider === 'copilot' && isWritableMethod) {
       const translated = translateCodexCustomToolsForCopilot(body);
       if (translated) {
         body = translated.body;
@@ -176,7 +193,7 @@ function createBodyHandler({ handleRequestError, otel }) {
       }
     }
 
-    if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+    if (isWritableMethod) {
       const sanitized = sanitizeNullToolCallTypes(body);
       if (sanitized) {
         body = sanitized.body;
