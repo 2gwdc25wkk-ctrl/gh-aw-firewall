@@ -10,6 +10,9 @@ import {
   type CloudHypervisorRuntimeBackendDependencies,
 } from './cloud-hypervisor-runtime-backend';
 import {
+  createCloudHypervisorRuntimeBackend as createCloudHypervisorRuntimeBackendFromModule,
+} from './cloud-hypervisor/runtime-backend';
+import {
   cloudHypervisorHostTools,
   createCloudHypervisorInfrastructureSnapshot as infrastructure,
   createCloudHypervisorTestConfig as config,
@@ -185,6 +188,8 @@ describe('Cloud Hypervisor runtime backend', () => {
           preflightResult,
         )).toBeDefined();
         expect(createCloudHypervisorRuntimeBackend(config(), startInfrastructure))
+          .toEqual(expect.objectContaining({ runtime: 'cloud-hypervisor' }));
+        expect(createCloudHypervisorRuntimeBackendFromModule(config(), startInfrastructure))
           .toEqual(expect.objectContaining({ runtime: 'cloud-hypervisor' }));
       } finally {
         if (previousWorkspace === undefined) delete process.env.GITHUB_WORKSPACE;
@@ -950,6 +955,27 @@ describe('Cloud Hypervisor runtime backend', () => {
       expect(deps.logger.info).toHaveBeenCalledWith(
         '[cloud-hypervisor] Preserved trusted artifacts: /snapshot',
       );
+    });
+
+    it('stops the in-flight microVM when cleanup races an unfinished boot', async () => {
+      const { manager, deps } = harness();
+      let releaseBoot!: () => void;
+      manager.startInstance.mockImplementationOnce(
+        () => new Promise<void>((resolve) => { releaseBoot = () => resolve(); }),
+      );
+      const backend = createBackend(config(), deps);
+      const startup = backend.start('/tmp/awf', ['github.com']);
+      while (manager.startInstance.mock.calls.length === 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+
+      await backend.stop();
+      expect(manager.stop).toHaveBeenCalledWith({ preserve: false });
+      expect(deps.removeArtifactSnapshot).toHaveBeenCalledWith('/snapshot');
+
+      releaseBoot();
+      await expect(startup).rejects.toThrow(/aborted by shutdown/);
+      expect(manager.stop).toHaveBeenCalledTimes(1);
     });
 
     it('cancels an active guest command before stopping', async () => {
