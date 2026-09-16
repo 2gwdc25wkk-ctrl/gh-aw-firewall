@@ -5,6 +5,7 @@ import execa from 'execa';
 import * as os from 'os';
 import * as path from 'path';
 import type { CloudHypervisorOptions } from '../types/runtime-options';
+import { CloudHypervisorUnsupportedHostError } from './errors';
 import {
   calculateSha256,
   cloudHypervisorPreflightTestHelpers,
@@ -70,6 +71,7 @@ function dependencies(
       isFile: () => true,
       isSymbolicLink: () => false,
       mode: 0o100755,
+      size: 1,
       uid: 0,
     }),
     runVersion: jest.fn(async (binaryPath: string) => (
@@ -152,6 +154,32 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
     } finally {
       await fs.rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('reports actionable version probe failures for signals and spawn errors', async () => {
+    const defaults = cloudHypervisorPreflightTestHelpers.defaultDependencies;
+    mockedExeca
+      .mockResolvedValueOnce({
+        exitCode: null,
+        signal: 'SIGKILL',
+        stdout: '',
+        stderr: 'killed by host',
+      } as never)
+      .mockResolvedValueOnce({
+        exitCode: undefined,
+        signal: undefined,
+        code: 'EACCES',
+        shortMessage: 'Command failed with EACCES: spawn EACCES',
+        stdout: '',
+        stderr: '',
+      } as never);
+
+    await expect(defaults.runVersion('/snapshot/cloud-hypervisor')).rejects.toThrow(
+      /terminated by signal SIGKILL \(exitCode=null, signalCode=SIGKILL\): killed by host/,
+    );
+    await expect(defaults.runVersion('/snapshot/cloud-hypervisor')).rejects.toThrow(
+      /Unable to execute "\/snapshot\/cloud-hypervisor --version".*exists, is executable, and is complete: code=EACCES; Command failed with EACCES: spawn EACCES/,
+    );
   });
 
   it('runs host policy and Docker probes through the default helper', async () => {
@@ -398,14 +426,24 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
     });
   });
 
-  it('rejects inaccessible KVM without checking artifacts', async () => {
-    const access = jest.fn().mockRejectedValue(new Error('EACCES'));
-    const lstat = jest.fn();
+  it('validates artifacts before rejecting inaccessible KVM', async () => {
+    const access = jest.fn(async (filePath: string) => {
+      if (filePath === '/dev/kvm') throw new Error('EACCES');
+    });
+    const lstat = jest.fn().mockResolvedValue({
+      isFile: () => true,
+      isSymbolicLink: () => false,
+      mode: 0o100755,
+      size: 1,
+      uid: 0,
+    });
+    const sha256 = jest.fn().mockResolvedValue(digest);
     await expect(runCloudHypervisorPreflight(
       config(),
-      dependencies({ access, lstat }),
+      dependencies({ access, lstat, sha256 }),
     )).rejects.toThrow(/readable and writable \/dev\/kvm.*EACCES/);
-    expect(lstat).not.toHaveBeenCalled();
+    expect(lstat).toHaveBeenCalled();
+    expect(sha256).toHaveBeenCalledWith('/snapshot/cloud-hypervisor');
   });
 
   it('rejects mismatched versions, unsafe permissions, and digest mismatches', async () => {
@@ -421,6 +459,7 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
           isFile: () => true,
           isSymbolicLink: () => false,
           mode: 0o100777,
+          size: 1,
           uid: 1000,
         }),
       }),
@@ -497,6 +536,7 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
             isFile: () => true,
             isSymbolicLink: () => false,
             mode: 0o100755,
+            size: 1,
             uid: 0,
           };
         }),
@@ -527,6 +567,29 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
     expect(runVersion).not.toHaveBeenCalled();
   });
 
+  it('rejects empty staged artifacts before invoking the binary', async () => {
+    const runVersion = jest.fn().mockResolvedValue('cloud-hypervisor v53.0');
+    const sha256 = jest.fn().mockResolvedValue(digest);
+    await expect(runCloudHypervisorPreflight(
+      config(),
+      dependencies({
+        runVersion,
+        sha256,
+        lstat: jest.fn(async (filePath: string) => ({
+          isFile: () => true,
+          isSymbolicLink: () => false,
+          mode: 0o100755,
+          size: filePath === '/snapshot/cloud-hypervisor' ? 0 : 1,
+          uid: 0,
+        })),
+      }),
+    )).rejects.toThrow(
+      /Cloud Hypervisor binary trusted artifact is empty or incomplete before execution/,
+    );
+    expect(runVersion).not.toHaveBeenCalled();
+    expect(sha256).not.toHaveBeenCalledWith('/snapshot/cloud-hypervisor');
+  });
+
   it('rejects missing artifacts, unsupported hosts, and unavailable tools', async () => {
     await expect(runCloudHypervisorPreflight(
       config({ supervisorPath: undefined }),
@@ -551,6 +614,45 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
     )).rejects.toThrow(/requires host tool "ip": missing/);
   });
 
+  it('validates artifact trust before classifying an unsupported host for fallback', async () => {
+    const removeArtifactSnapshot = jest.fn().mockResolvedValue(undefined);
+    const sha256 = jest.fn(async (filePath: string) => (
+      filePath === '/snapshot/cloud-hypervisor' ? 'b'.repeat(64) : digest
+    ));
+    await expect(runCloudHypervisorPreflight(
+      config(),
+      dependencies({ platform: 'darwin', sha256, removeArtifactSnapshot }),
+    )).rejects.toThrow(/Cloud Hypervisor binary SHA-256 mismatch/);
+    expect(sha256).toHaveBeenCalledWith('/snapshot/cloud-hypervisor');
+    expect(removeArtifactSnapshot).toHaveBeenCalledWith(
+      '/run/awf-cloud-hypervisor/trusted-artifacts/run-test',
+    );
+  });
+
+  it('classifies only host policy failures as unsupported-host errors', async () => {
+    await expect(runCloudHypervisorPreflight(
+      config(),
+      dependencies({ assertHostPolicy: jest.fn().mockRejectedValue(new Error('missing seccomp')) }),
+    )).rejects.toThrow(/host policy is unsupported: missing seccomp/);
+
+    const unsupported = new CloudHypervisorUnsupportedHostError('cgroup policy unsupported');
+    await expect(runCloudHypervisorPreflight(
+      config(),
+      dependencies({ assertHostPolicy: jest.fn().mockRejectedValue(unsupported) }),
+    )).rejects.toBe(unsupported);
+  });
+
+  it('keeps missing Docker infrastructure fatal after artifact validation', async () => {
+    const assertToolAvailable = jest.fn(async (tool: string) => {
+      if (tool === 'docker') throw new Error('not installed');
+      return `/usr/bin/${tool}`;
+    });
+    await expect(runCloudHypervisorPreflight(
+      config(),
+      dependencies({ assertToolAvailable }),
+    )).rejects.toThrow(/requires host tool "docker": not installed/);
+  });
+
   it('rejects untrusted artifact files and inaccessible paths', async () => {
     await expect(runCloudHypervisorPreflight(
       config({ cloudHypervisorBinary: 'relative/cloud-hypervisor' }),
@@ -565,12 +667,14 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
                 isFile: () => false,
                 isSymbolicLink: () => true,
                 mode: 0o120777,
+                size: 1,
                 uid: 0,
               }
             : {
                 isFile: () => false,
                 isSymbolicLink: () => false,
                 mode: 0o040755,
+                size: 1,
                 uid: 0,
               }
         )),
@@ -583,6 +687,7 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
           isFile: () => true,
           isSymbolicLink: () => false,
           mode: 0o100755,
+          size: 1,
           uid: 4000,
         }),
       }),
@@ -603,6 +708,7 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
       isFile: () => true,
       isSymbolicLink: () => false,
       mode: 0o100755,
+      size: 1,
       uid: 2001,
     });
     await expect(runCloudHypervisorPreflight(
@@ -618,6 +724,7 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
           isFile: () => false,
           isSymbolicLink: () => false,
           mode: 0o040777,
+          size: 1,
           uid: 0,
         };
       }
@@ -625,6 +732,7 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
         isFile: () => true,
         isSymbolicLink: () => false,
         mode: 0o100755,
+        size: 1,
         uid: 0,
       };
     });
@@ -639,6 +747,7 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
           isFile: () => false,
           isSymbolicLink: () => true,
           mode: 0o040755,
+          size: 1,
           uid: 0,
         };
       }
@@ -646,6 +755,7 @@ describe('Cloud Hypervisor preflight (foundation only)', () => {
         isFile: () => true,
         isSymbolicLink: () => false,
         mode: 0o100755,
+        size: 1,
         uid: 0,
       };
     });

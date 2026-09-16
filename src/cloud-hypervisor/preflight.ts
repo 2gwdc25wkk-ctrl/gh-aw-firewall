@@ -14,6 +14,7 @@ import {
   assertArtifactBasenames,
   parseCloudHypervisorArtifactManifest,
 } from './artifact-manifest';
+import { CloudHypervisorUnsupportedHostError } from './errors';
 
 /**
  * Fail-closed host and artifact validation for the Cloud Hypervisor v53.0
@@ -39,6 +40,7 @@ export interface CloudHypervisorPreflightDependencies {
     isFile(): boolean;
     isSymbolicLink(): boolean;
     mode: number;
+    size: number;
     uid: number;
   }>;
   runVersion(binaryPath: string): Promise<string>;
@@ -119,14 +121,46 @@ const defaultDependencies: CloudHypervisorPreflightDependencies = {
   access: fs.access,
   lstat: fs.lstat,
   runVersion: async (binaryPath) => {
-    const result = await execa(binaryPath, ['--version'], {
-      reject: false,
-      timeout: 5_000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (result.exitCode !== 0) {
+    let result;
+    try {
+      result = await execa(binaryPath, ['--version'], {
+        reject: false,
+        timeout: 5_000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
       throw new Error(
-        `"${binaryPath} --version" exited with code ${result.exitCode}: ${result.stderr.trim()}`,
+        `Unable to execute "${binaryPath} --version"; verify the trusted Cloud Hypervisor artifact ` +
+        `exists, is executable, and is complete: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (result.exitCode == null && !result.signal) {
+      const executionError = result as typeof result & {
+        code?: unknown;
+        shortMessage?: unknown;
+      };
+      const code = typeof executionError.code === 'string'
+        ? `code=${executionError.code}`
+        : '';
+      const shortMessage = typeof executionError.shortMessage === 'string'
+        ? executionError.shortMessage
+        : '';
+      const details = [code, shortMessage, result.stderr.trim()].filter(Boolean).join('; ');
+      throw new Error(
+        `Unable to execute "${binaryPath} --version"; verify the trusted Cloud Hypervisor artifact ` +
+        `exists, is executable, and is complete${details ? `: ${details}` : ''}`,
+      );
+    }
+    if (result.exitCode !== 0) {
+      const stderr = result.stderr.trim();
+      const signalCode = result.signal ?? null;
+      const exitCode = result.exitCode ?? null;
+      const termination = signalCode
+        ? `terminated by signal ${signalCode}`
+        : `exited with code ${exitCode}`;
+      throw new Error(
+        `"${binaryPath} --version" ${termination} ` +
+        `(exitCode=${exitCode}, signalCode=${signalCode})${stderr ? `: ${stderr}` : ''}`,
       );
     }
     return `${result.stdout}\n${result.stderr}`.trim();
@@ -179,7 +213,7 @@ const defaultDependencies: CloudHypervisorPreflightDependencies = {
   },
   assertHostPolicy: async () => {
     if (process.getuid?.() !== 0) {
-      throw new Error(
+      throw new CloudHypervisorUnsupportedHostError(
         'Cloud Hypervisor network setup requires root; invoke awf through sudo from a non-root account',
       );
     }
@@ -188,9 +222,10 @@ const defaultDependencies: CloudHypervisorPreflightDependencies = {
       await fs.access('/proc/sys/net/ipv6/conf/all/disable_ipv6', constants.R_OK);
       await fs.access('/proc/sys/kernel/seccomp/actions_avail', constants.R_OK);
     } catch (error) {
-      throw new Error(
+      throw new CloudHypervisorUnsupportedHostError(
         'host kernel policy does not expose required network namespace and seccomp controls: ' +
         `${error instanceof Error ? error.message : String(error)}`,
+        error,
       );
     }
     try {
@@ -206,10 +241,11 @@ const defaultDependencies: CloudHypervisorPreflightDependencies = {
       // manage, so it is rejected explicitly rather than silently
       // constructing a broken cgroup. GitHub-hosted Ubuntu runners (the
       // only supported host) always run cgroup v2.
-      throw new Error(
+      throw new CloudHypervisorUnsupportedHostError(
         'Cloud Hypervisor requires the cgroup v2 unified hierarchy ' +
         '(/sys/fs/cgroup/cgroup.controllers); cgroup v1-only hosts are not supported: ' +
         `${error instanceof Error ? error.message : String(error)}`,
+        error,
       );
     }
   },
@@ -511,6 +547,12 @@ async function assertDigest(
     throw new Error(`${label} SHA-256 must contain exactly 64 hexadecimal characters`);
   }
 
+  const stat = await dependencies.lstat(filePath);
+  if (stat.size <= 0) {
+    throw new Error(
+      `${label} trusted artifact is empty or incomplete before execution: ${filePath}`,
+    );
+  }
   const actual = await dependencies.sha256(filePath);
   if (actual.toLowerCase() !== expected.toLowerCase()) {
     throw new Error(
@@ -547,14 +589,6 @@ export async function runCloudHypervisorPreflight(
     ...overrides,
     uid: overrides.uid ?? resolveTrustedOperatorUid(),
   };
-  if (dependencies.platform !== 'linux') {
-    throw new Error(`Cloud Hypervisor requires Linux with KVM; found ${dependencies.platform}`);
-  }
-  if (dependencies.arch !== 'x64') {
-    throw new Error(
-      `Cloud Hypervisor is supported only on x86_64 GitHub-hosted runners; found Node architecture ${dependencies.arch}`,
-    );
-  }
   if (!config.kernelPath || !config.rootfsPath || !config.supervisorPath) {
     throw new Error(
       'Cloud Hypervisor requires guest kernel, rootfs, and supervisor artifact paths',
@@ -581,26 +615,6 @@ export async function runCloudHypervisorPreflight(
     );
   }
 
-  try {
-    await dependencies.access('/dev/kvm', constants.R_OK | constants.W_OK);
-  } catch (error) {
-    throw new Error(
-      'Cloud Hypervisor requires readable and writable /dev/kvm: ' +
-      `${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  const kvmGid = await dependencies.resolveKvmGid();
-  const cgroupVersion = await dependencies.assertHostPolicy();
-  let dockerBinaryPath: string;
-  try {
-    dockerBinaryPath = await dependencies.assertToolAvailable('docker');
-  } catch (error) {
-    throw new Error(
-      'Cloud Hypervisor requires host tool "docker": ' +
-      `${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  await dependencies.assertDockerInfrastructure(dockerBinaryPath);
   await assertTrustedRegularFile(
     'Cloud Hypervisor binary',
     config.cloudHypervisorBinary,
@@ -753,6 +767,50 @@ export async function runCloudHypervisorPreflight(
       artifactDigests.supervisor,
       dependencies,
     );
+
+    // Artifact trust must be established before any host-capability error can
+    // trigger the supported fallback to Docker.
+    if (dependencies.platform !== 'linux') {
+      throw new CloudHypervisorUnsupportedHostError(
+        `Cloud Hypervisor requires Linux with KVM; found ${dependencies.platform}`,
+      );
+    }
+    if (dependencies.arch !== 'x64') {
+      throw new CloudHypervisorUnsupportedHostError(
+        `Cloud Hypervisor is supported only on x86_64 GitHub-hosted runners; found Node architecture ${dependencies.arch}`,
+      );
+    }
+    try {
+      await dependencies.access('/dev/kvm', constants.R_OK | constants.W_OK);
+    } catch (error) {
+      throw new CloudHypervisorUnsupportedHostError(
+        'Cloud Hypervisor requires readable and writable /dev/kvm: ' +
+        `${error instanceof Error ? error.message : String(error)}`,
+        error,
+      );
+    }
+    const kvmGid = await dependencies.resolveKvmGid();
+    let cgroupVersion: 2;
+    try {
+      cgroupVersion = await dependencies.assertHostPolicy();
+    } catch (error) {
+      throw error instanceof CloudHypervisorUnsupportedHostError
+        ? error
+        : new CloudHypervisorUnsupportedHostError(
+          `Cloud Hypervisor host policy is unsupported: ${error instanceof Error ? error.message : String(error)}`,
+          error,
+        );
+    }
+    let dockerBinaryPath: string;
+    try {
+      dockerBinaryPath = await dependencies.assertToolAvailable('docker');
+    } catch (error) {
+      throw new Error(
+        'Cloud Hypervisor requires host tool "docker": ' +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    await dependencies.assertDockerInfrastructure(dockerBinaryPath);
 
     return {
       version,

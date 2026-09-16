@@ -47,6 +47,10 @@ import {
   disconnectEnclaveGithubGateway,
 } from '../enclave/github-gateway';
 import type { WrapperConfig } from '../types';
+import {
+  formatCloudHypervisorDockerFallbackWarning,
+  isCloudHypervisorUnsupportedHostError,
+} from '../cloud-hypervisor/errors';
 
 const SENSITIVE_CONFIG_KEYS = new Set([
   'openaiApiKey',
@@ -358,7 +362,6 @@ export function createMainAction(getOptionValueSource: OptionSourceResolver) {
   // to prevent sensitive data from flowing to logger (CodeQL sensitive data logging)
   const redactedConfig = redactConfigForLogging(config);
   logger.debug('Configuration:', JSON.stringify(redactedConfig, null, 2));
-  persistConfigAuditArtifact(config, redactedConfig);
 
   logger.info(`Allowed domains: ${config.allowedDomains.join(', ')}`);
   if (config.blockedDomains && config.blockedDomains.length > 0) {
@@ -389,7 +392,7 @@ export function createMainAction(getOptionValueSource: OptionSourceResolver) {
     return;
   }
 
-  const performCleanup = buildCleanupFn(
+  let performCleanup = buildCleanupFn(
     config,
     () => containersStarted,
     () => hostIptablesSetup,
@@ -400,16 +403,41 @@ export function createMainAction(getOptionValueSource: OptionSourceResolver) {
   registerSignalHandlers({
     getContainersStarted: () => containersStarted,
     keepContainers: config.keepContainers,
-    fastKillAgentContainer: externalRuntimeBackend
-      ? () => externalRuntimeBackend.stop()
-      : fastKillAgentContainer,
-    performCleanup,
+    fastKillAgentContainer: () => (
+      externalRuntimeBackend
+        ? externalRuntimeBackend.stop()
+        : fastKillAgentContainer()
+    ),
+    performCleanup: (signal) => performCleanup(signal),
   });
 
   try {
     if (externalRuntimeBackend) {
-      await externalRuntimeBackend.preflight();
+      try {
+        await externalRuntimeBackend.preflight();
+      } catch (error) {
+        if (
+          externalRuntimeBackend.runtime === 'cloud-hypervisor' &&
+          isCloudHypervisorUnsupportedHostError(error)
+        ) {
+          logger.warn(formatCloudHypervisorDockerFallbackWarning(error));
+          config.containerRuntime = undefined;
+          config.cloudHypervisor = undefined;
+          externalRuntimeBackend = undefined;
+          performCleanup = buildCleanupFn(
+            config,
+            () => containersStarted,
+            () => hostIptablesSetup,
+          );
+        } else {
+          throw error;
+        }
+      }
     }
+
+    // Persist only after preflight so the audit artifact records the effective
+    // runtime when an unsupported Cloud Hypervisor host falls back to Docker.
+    persistConfigAuditArtifact(config, redactConfigForLogging(config));
 
     const externalWorkflowDependencies = externalRuntimeBackend
       ? adaptExternalRuntimeBackend(externalRuntimeBackend)
@@ -426,10 +454,11 @@ export function createMainAction(getOptionValueSource: OptionSourceResolver) {
       agentCommandStarted = true;
       return workflowRunAgentCommand(workDir, allowedDomains, proxyLogsDir, agentTimeoutMinutes);
     };
-    const workflowCollectDiagnosticLogs = externalRuntimeBackend
+    const diagnosticRuntimeBackend = externalRuntimeBackend;
+    const workflowCollectDiagnosticLogs = diagnosticRuntimeBackend
       ? async (workDir: string): Promise<void> => {
          const results = await Promise.allSettled([
-           externalRuntimeBackend.collectDiagnostics(),
+           diagnosticRuntimeBackend.collectDiagnostics(),
            collectDiagnosticLogs(workDir),
          ]);
          const failures = results.filter(

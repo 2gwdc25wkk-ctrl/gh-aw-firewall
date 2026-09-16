@@ -44,6 +44,8 @@ import * as enclaveGateway from '../enclave/gateway';
 import * as enclaveGithubGateway from '../enclave/github-gateway';
 import * as externalRuntimeResolver from '../external-runtime-backend-resolver';
 import { MAIN_ACTION_STUB_CONFIG, setupMainActionTestHarness } from './main-action.test-utils';
+import type { WrapperConfig } from '../types';
+import { CloudHypervisorUnsupportedHostError } from '../cloud-hypervisor/errors';
 
 const {
   mkdirSync: mockMkdirSync,
@@ -136,6 +138,12 @@ describe('createMainAction', () => {
         expect.anything(),
         expect.anything(),
       );
+      const persistedConfig = mockWriteFileSync.mock.calls
+        .map((call) => String(call[1]))
+        .find((contents) => contents.includes('"allowedDomains"'));
+      expect(persistedConfig).toBeDefined();
+      expect(persistedConfig).not.toContain('"containerRuntime": "cloud-hypervisor"');
+      expect(persistedConfig).not.toContain('"cloudHypervisor"');
     });
   });
 
@@ -516,6 +524,52 @@ describe('createMainAction', () => {
     });
 
     describe('when external runtime preflight fails', () => {
+      it('falls back to the Docker backend when Cloud Hypervisor host support is missing', async () => {
+        const fallbackConfig = {
+          ...MAIN_ACTION_STUB_CONFIG,
+          containerRuntime: 'cloud-hypervisor',
+          cloudHypervisor: { previewEnabled: true },
+        } as WrapperConfig;
+        const backend = {
+          runtime: 'cloud-hypervisor',
+          preflight: jest.fn().mockRejectedValue(
+            new CloudHypervisorUnsupportedHostError(
+              'Cloud Hypervisor requires readable and writable /dev/kvm: ENOENT',
+            ),
+          ),
+          start: jest.fn(),
+          exec: jest.fn(),
+          collectDiagnostics: jest.fn(),
+          stop: jest.fn(),
+        };
+        mockedValidateOptions.validateOptions.mockReturnValueOnce(fallbackConfig);
+        mockedExternalRuntimeResolver.resolveExternalRuntimeBackend.mockReturnValueOnce(backend);
+        mockedCliWorkflow.runMainWorkflow.mockImplementationOnce(
+          async (_config, _dependencies, lifecycle) => {
+            lifecycle.onContainersStarted?.();
+            await lifecycle.performCleanup();
+            return 0;
+          },
+        );
+
+        const action = createMainAction(getOptionValueSource);
+        await action(['echo hi'], {});
+
+        expect(mockedLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('falling back to the standard Docker backend'),
+        );
+        expect(mockedCliWorkflow.runMainWorkflow).toHaveBeenCalledWith(
+          expect.objectContaining({
+            containerRuntime: undefined,
+            cloudHypervisor: undefined,
+          }),
+          expect.objectContaining({
+            startContainers: mockedDockerManager.startContainers,
+          }),
+          expect.anything(),
+        );
+      });
+
       it('aborts before entering the main workflow', async () => {
         mockedExternalRuntimeResolver.resolveExternalRuntimeBackend.mockImplementationOnce(() => ({
           runtime: 'sbx',

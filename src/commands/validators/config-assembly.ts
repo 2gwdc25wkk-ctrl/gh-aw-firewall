@@ -15,6 +15,16 @@ import {
   assertCloudHypervisorSelection,
 } from '../../cloud-hypervisor/runtime-validation';
 import { assertFilesystemWritePolicyCompatibility } from '../../filesystem-policy';
+import {
+  formatCloudHypervisorDockerFallbackWarning,
+  isCloudHypervisorUnsupportedHostError,
+} from '../../cloud-hypervisor/errors';
+
+function fallBackCloudHypervisorToDocker(config: WrapperConfig, error: unknown): void {
+  logger.warn(formatCloudHypervisorDockerFallbackWarning(error));
+  config.containerRuntime = undefined;
+  config.cloudHypervisor = undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -102,8 +112,12 @@ export function assembleAndValidateConfig(
     try {
       assertCloudHypervisorRuntimeCompatibility(config);
     } catch (error) {
-      logger.error(`❌ ${error instanceof Error ? error.message : String(error)}`);
-      process.exit(1);
+      if (isCloudHypervisorUnsupportedHostError(error)) {
+        fallBackCloudHypervisorToDocker(config, error);
+      } else {
+        logger.error(`❌ ${error instanceof Error ? error.message : String(error)}`);
+        process.exit(1);
+      }
     }
   }
   applyAgentTimeout(options.agentTimeout as string | undefined, config, logger);

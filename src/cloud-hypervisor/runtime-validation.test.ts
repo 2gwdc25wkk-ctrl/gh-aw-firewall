@@ -71,6 +71,25 @@ describe('Cloud Hypervisor runtime validation', () => {
       .toThrow(/supported only inside GitHub Actions runs/);
   });
 
+  it('validates artifact configuration before runner eligibility', () => {
+    eligibilitySpy.mockImplementation(() => {
+      throw new Error('Cloud Hypervisor is supported only inside GitHub Actions runs');
+    });
+    expect(() => assertCloudHypervisorRuntimeCompatibility(config({
+      cloudHypervisor: {
+        ...config().cloudHypervisor!,
+        artifactManifestPath: undefined,
+      },
+    }))).toThrow(/requires an artifact manifest/);
+    expect(() => assertCloudHypervisorRuntimeCompatibility(config({
+      cloudHypervisor: {
+        ...config().cloudHypervisor!,
+        sha256: { cloudHypervisor: digest },
+      },
+    }))).toThrow(/Caller-supplied Cloud Hypervisor SHA-256 values/);
+    expect(eligibilitySpy).not.toHaveBeenCalled();
+  });
+
   it.each([
     [{ cloudHypervisor: { ...config().cloudHypervisor!, previewEnabled: false } }, /explicit --cloud-hypervisor-preview/],
     [{ networkIsolation: false }, /strict --network-isolation/],
