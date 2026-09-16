@@ -35,6 +35,17 @@ interface SquidServiceParams {
 }
 
 /**
+ * AWF-owned top-level Squid log files repaired during container preflight.
+ * Keep this explicit instead of globbing or recursive chowning so startup does
+ * not traverse user-provided proxy log directories.
+ */
+export const SQUID_LOG_FILES = [
+  '/var/log/squid/access.log',
+  '/var/log/squid/audit.jsonl',
+  '/var/log/squid/cache.log',
+] as const;
+
+/**
  * Builds the Squid proxy service configuration for Docker Compose.
  */
 export function buildSquidService(params: SquidServiceParams): any {
@@ -123,15 +134,24 @@ export function buildSquidService(params: SquidServiceParams): any {
   // already owned by the proxy user on a FS that denies root chown), we fall
   // back to chmod 0777 — the same strategy as config-writer.ts — so the
   // container does not exit when the directory is already writable.
-  // The chown is non-recursive (no -R): only the bind-mount dir's own
-  // ownership is repaired, not its (potentially large) contents.
+  // The chown is non-recursive (no -R): it repairs the bind-mount dir's own
+  // ownership plus AWF's known top-level Squid log files, not its (potentially
+  // large) contents. Existing log files can be left behind when topology mode
+  // starts Squid once to create the internal network and Compose then recreates
+  // Squid after patching topology peer host entries.
   //
   // Use $$ to escape $ for Docker Compose variable interpolation.
   // Docker Compose interprets $VAR as variable substitution in YAML values;
   // $$ produces a literal $ that the shell inside the container will expand.
   const SQUID_PROXY_USER = 'proxy';
+  const squidLogFiles = SQUID_LOG_FILES.join(' ');
+  const logFilePreflight =
+    `; for f in ${squidLogFiles}; do ` +
+    `if [ -L "$$f" ] || [ -e "$$f" ]; then chown -h ${SQUID_PROXY_USER}:${SQUID_PROXY_USER} "$$f" 2>/dev/null || true; fi; ` +
+    `done`;
   const chownPreflight =
     `chown ${SQUID_PROXY_USER}:${SQUID_PROXY_USER} /var/log/squid 2>/dev/null || chmod 0777 /var/log/squid` +
+    logFilePreflight +
     `; if [ -d /var/spool/squid_ssl_db ]; then chown ${SQUID_PROXY_USER}:${SQUID_PROXY_USER} /var/spool/squid_ssl_db 2>/dev/null || chmod 0777 /var/spool/squid_ssl_db; fi`;
   const dropToProxy = `exec su -s /bin/bash ${SQUID_PROXY_USER} -c`;
 
