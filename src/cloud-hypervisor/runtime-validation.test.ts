@@ -1,10 +1,14 @@
 import type { WrapperConfig } from '../types';
+import { normalizeEnclavesConfig } from '../parsers/enclave-parser';
 import * as hostEligibility from './host-eligibility';
 import {
   assertCloudHypervisorPreSecurityCompatibility,
   assertCloudHypervisorRuntimeCompatibility,
   assertCloudHypervisorSelection,
+  isPrimaryCloudHypervisorRuntime,
+  requiresCloudHypervisorInfrastructure,
   requireCloudHypervisorConfig,
+  usesCloudHypervisorEnclaveRuntime,
 } from './runtime-validation';
 
 const digest = 'a'.repeat(64);
@@ -57,10 +61,78 @@ describe('Cloud Hypervisor runtime validation', () => {
 
     expect(() => assertCloudHypervisorSelection(config({
       containerRuntime: 'gvisor',
-    }))).toThrow(/require --container-runtime cloud-hypervisor/);
+    }))).toThrow(/require either --container-runtime cloud-hypervisor/);
     expect(() => requireCloudHypervisorConfig(config({
       containerRuntime: 'gvisor',
     }))).toThrow(/resolved without Cloud Hypervisor runtime configuration/);
+  });
+
+  it('supports a Cloud Hypervisor script executor alongside a Docker agent executor', () => {
+    const chScriptWithDockerAgent = config({
+      containerRuntime: 'docker',
+      enableApiProxy: false,
+      tty: true,
+      volumeMounts: ['/tmp:/tmp'],
+      enclaves: normalizeEnclavesConfig([{
+        script: {},
+        runtime: 'cloud-hypervisor',
+        repos: [{ repo: 'octo/private', sensitivity: 'internal' }],
+      }, {
+        agent: { model: 'gpt-5.3-codex' },
+        runtime: 'docker',
+      }]),
+    });
+
+    expect(isPrimaryCloudHypervisorRuntime(chScriptWithDockerAgent)).toBe(false);
+    expect(usesCloudHypervisorEnclaveRuntime(chScriptWithDockerAgent)).toBe(true);
+    expect(requiresCloudHypervisorInfrastructure(chScriptWithDockerAgent)).toBe(true);
+    expect(() => assertCloudHypervisorSelection(chScriptWithDockerAgent)).not.toThrow();
+    expect(() => assertCloudHypervisorPreSecurityCompatibility(chScriptWithDockerAgent)).not.toThrow();
+    expect(() => assertCloudHypervisorRuntimeCompatibility(chScriptWithDockerAgent)).not.toThrow();
+    expect(requireCloudHypervisorConfig(chScriptWithDockerAgent))
+      .toBe(chScriptWithDockerAgent.cloudHypervisor);
+  });
+
+  it('requires API-proxy isolation for a Cloud Hypervisor agent executor alongside Docker scripts', () => {
+    const chAgentWithDockerScript = config({
+      containerRuntime: 'docker',
+      enableApiProxy: false,
+      enclaves: normalizeEnclavesConfig([{
+        script: {},
+        runtime: 'docker',
+        repos: [{ repo: 'octo/private', sensitivity: 'internal' }],
+      }, {
+        agent: { model: 'gpt-5.3-codex' },
+        runtime: 'cloud-hypervisor',
+      }]),
+    });
+
+    expect(isPrimaryCloudHypervisorRuntime(chAgentWithDockerScript)).toBe(false);
+    expect(usesCloudHypervisorEnclaveRuntime(chAgentWithDockerScript)).toBe(true);
+    expect(requiresCloudHypervisorInfrastructure(chAgentWithDockerScript)).toBe(true);
+    expect(() => assertCloudHypervisorSelection(chAgentWithDockerScript)).not.toThrow();
+    expect(() => assertCloudHypervisorPreSecurityCompatibility(chAgentWithDockerScript)).not.toThrow();
+    expect(() => assertCloudHypervisorRuntimeCompatibility(chAgentWithDockerScript))
+      .toThrow(/API proxy credential isolation/);
+    expect(() => assertCloudHypervisorRuntimeCompatibility({
+      ...chAgentWithDockerScript,
+      enableApiProxy: true,
+    })).not.toThrow();
+  });
+
+  it('requires top-level configuration for an enclave-only selection', () => {
+    const enclaveOnly = config({
+      containerRuntime: 'docker',
+      cloudHypervisor: undefined,
+      enclaves: normalizeEnclavesConfig([{
+        script: {},
+        runtime: 'cloud-hypervisor',
+        repos: [{ repo: 'octo/private', sensitivity: 'internal' }],
+      }]),
+    });
+
+    expect(() => assertCloudHypervisorSelection(enclaveOnly))
+      .toThrow(/requires top-level cloudHypervisor runtime configuration/);
   });
 
   it('rejects an ineligible host even with otherwise-complete configuration', () => {
@@ -163,8 +235,8 @@ describe('Cloud Hypervisor runtime validation', () => {
     [{ allowHostPorts: ['8080'] }, /host access/],
     [{ allowHostServicePorts: ['5432'] }, /host access/],
     [{ volumeMounts: ['/tmp:/tmp'] }, /additional host volume mounts/],
-    [{ difcProxyHost: 'proxy:443' }, /DIFC proxies or enclaves/],
-    [{ enclaves: { enabled: true } }, /DIFC proxies or enclaves/],
+    [{ difcProxyHost: 'proxy:443' }, /DIFC proxies/],
+    [{ enclaves: { enabled: true } }, /runtime-neutral enclave lifecycle integration/],
     [{ dnsOverHttps: 'https://dns.example/dns-query' }, /DNS-over-HTTPS/],
     [{ tty: true }, /does not support --tty/],
     [{ awfDockerHost: 'tcp://localhost:2375' }, /local Unix-socket Docker daemon/],
@@ -183,14 +255,14 @@ describe('Cloud Hypervisor runtime validation', () => {
   it('rejects Cloud Hypervisor options paired with another --container-runtime', () => {
     const invalid = config({ containerRuntime: 'gvisor' });
     expect(() => assertCloudHypervisorSelection(invalid)).toThrow(
-      /Cloud Hypervisor options require --container-runtime cloud-hypervisor/,
+      /require either --container-runtime cloud-hypervisor or an enclaves\[\]\.runtime/,
     );
   });
 
   it('rejects cloudHypervisor options with no --container-runtime selected at all', () => {
     const invalid = config({ containerRuntime: undefined });
     expect(() => assertCloudHypervisorSelection(invalid)).toThrow(
-      /Cloud Hypervisor options require --container-runtime cloud-hypervisor/,
+      /require either --container-runtime cloud-hypervisor or an enclaves\[\]\.runtime/,
     );
   });
 });
