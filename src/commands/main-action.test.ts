@@ -168,6 +168,88 @@ describe('createMainAction', () => {
         'echo $HOME'
       );
     });
+
+    describe('work directory selection', () => {
+      it('atomically creates a unique default work directory', async () => {
+        mockedValidateOptions.validateOptions
+          .mockReturnValueOnce({
+            ...MAIN_ACTION_STUB_CONFIG,
+            workDir: undefined,
+          } as unknown as WrapperConfig)
+          .mockReturnValueOnce({
+            ...MAIN_ACTION_STUB_CONFIG,
+            workDir: undefined,
+          } as unknown as WrapperConfig);
+        mainActionFsMocks.mkdtempSync
+          .mockReturnValueOnce('/synthetic/awf-first')
+          .mockReturnValueOnce('/synthetic/awf-second');
+        const action = createMainAction(getOptionValueSource);
+
+        await action(['echo first'], {});
+        await action(['echo second'], {});
+
+        expect(mainActionFsMocks.mkdtempSync).toHaveBeenNthCalledWith(
+          1,
+          expect.stringMatching(/awf-$/),
+        );
+        expect(mainActionFsMocks.mkdtempSync).toHaveBeenNthCalledWith(
+          2,
+          expect.stringMatching(/awf-$/),
+        );
+        expect(mockedCliWorkflow.runMainWorkflow).toHaveBeenNthCalledWith(
+          1,
+          expect.objectContaining({ workDir: '/synthetic/awf-first' }),
+          expect.anything(),
+          expect.anything(),
+        );
+        expect(mockedCliWorkflow.runMainWorkflow).toHaveBeenNthCalledWith(
+          2,
+          expect.objectContaining({ workDir: '/synthetic/awf-second' }),
+          expect.anything(),
+          expect.anything(),
+        );
+      });
+
+      it('preserves an explicit work directory', async () => {
+        mockedValidateOptions.validateOptions.mockReturnValue({
+          ...MAIN_ACTION_STUB_CONFIG,
+          workDir: '/synthetic/explicit-workdir',
+        } as unknown as WrapperConfig);
+        const action = createMainAction(getOptionValueSource);
+        await action(['echo explicit'], { workDir: '/synthetic/explicit-workdir' });
+
+        expect(mainActionFsMocks.mkdtempSync).not.toHaveBeenCalled();
+        expect(mockedValidateOptions.validateOptions).toHaveBeenCalledWith(
+          expect.objectContaining({ workDir: '/synthetic/explicit-workdir' }),
+          'echo explicit',
+        );
+      });
+
+      it.each(['probe', 'bootstrap'] as const)(
+        'cleans an auto-created work directory when %s setup fails',
+        async failurePoint => {
+          mockedValidateOptions.validateOptions.mockReturnValue({
+            ...MAIN_ACTION_STUB_CONFIG,
+            workDir: undefined,
+          } as unknown as WrapperConfig);
+          mainActionFsMocks.mkdtempSync.mockReturnValue('/synthetic/awf-setup-failure');
+          if (failurePoint === 'probe') {
+            mockedDindProbe.probeSplitFilesystem.mockRejectedValue(new Error('probe failed'));
+          } else {
+            mockedDindBootstrap.runDindBootstrap.mockRejectedValue(new Error('bootstrap failed'));
+          }
+
+          const action = createMainAction(getOptionValueSource);
+          await expect(action(['echo setup'], {})).rejects.toThrow('process.exit: 1');
+
+          const cleanupCalls = mockedDockerManager.cleanup.mock.calls;
+          expect(cleanupCalls[cleanupCalls.length - 1]?.slice(0, 2)).toEqual([
+            '/synthetic/awf-setup-failure',
+            false,
+          ]);
+        },
+      );
+    });
   });
 
   describe('when multiple args are provided', () => {
@@ -426,7 +508,7 @@ describe('createMainAction', () => {
 
       await expect(action(['echo hi'], {})).rejects.toThrow('process.exit: 1');
 
-      expect(mockMkdirSync).toHaveBeenCalledWith('/tmp/awf-test/squid-logs', {
+      expect(mockMkdirSync).toHaveBeenCalledWith('/synthetic/awf-test/squid-logs', {
         recursive: true,
         mode: 0o755,
       });
@@ -901,7 +983,7 @@ describe('createMainAction', () => {
       await action(['echo hi'], {});
 
       expect(mockOpenSync).toHaveBeenCalledWith(
-        '/tmp/awf-test/audit/awf-resolved-config.json',
+        '/synthetic/awf-test/audit/awf-resolved-config.json',
         'wx',
         0o600,
       );
@@ -1060,11 +1142,17 @@ describe('createMainAction', () => {
       expect(mockedLogger.warn).toHaveBeenCalledWith(
         'One or more protected enclave audit artifacts could not be preserved.'
       );
-      expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect(mockOpenSync).toHaveBeenCalledWith(
         expect.stringContaining('enclave-audit-incomplete.txt'),
-        expect.stringContaining('protected audit preservation'),
-        { mode: 0o644 },
+        expect.any(Number),
+        0o600,
       );
+      expect(mockWriteFileSync).toHaveBeenCalledWith(
+        42,
+        expect.stringContaining('protected audit preservation'),
+        { encoding: 'utf8' },
+      );
+      expect(mockFchmodSync).toHaveBeenLastCalledWith(42, 0o644);
     });
   });
 });
