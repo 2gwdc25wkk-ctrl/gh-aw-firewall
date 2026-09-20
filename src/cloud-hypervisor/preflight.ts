@@ -15,6 +15,7 @@ import {
   parseCloudHypervisorArtifactManifest,
 } from './artifact-manifest';
 import { CloudHypervisorUnsupportedHostError } from './errors';
+import { logger } from '../logger';
 
 /**
  * Fail-closed host and artifact validation for the Cloud Hypervisor v53.0
@@ -139,16 +140,18 @@ const defaultDependencies: CloudHypervisorPreflightDependencies = {
         code?: unknown;
         shortMessage?: unknown;
       };
-      const code = typeof executionError.code === 'string'
-        ? `code=${executionError.code}`
-        : '';
+      const codeValue = typeof executionError.code === 'string' ? executionError.code : undefined;
+      const code = codeValue ? `code=${codeValue}` : '';
       const shortMessage = typeof executionError.shortMessage === 'string'
         ? executionError.shortMessage
         : '';
       const details = [code, shortMessage, result.stderr.trim()].filter(Boolean).join('; ');
-      throw new Error(
-        `Unable to execute "${binaryPath} --version"; verify the trusted Cloud Hypervisor artifact ` +
-        `exists, is executable, and is complete${details ? `: ${details}` : ''}`,
+      throw Object.assign(
+        new Error(
+          `Unable to execute "${binaryPath} --version"; verify the trusted Cloud Hypervisor artifact ` +
+          `exists, is executable, and is complete${details ? `: ${details}` : ''}`,
+        ),
+        codeValue ? { code: codeValue } : {},
       );
     }
     if (result.exitCode !== 0) {
@@ -291,6 +294,81 @@ export interface CloudHypervisorPreflightResult {
 }
 
 export const CLOUD_HYPERVISOR_MAX_BOOT_ATTEMPTS = 3;
+
+/**
+ * Number of attempts for the post-digest-verification `--version` probe.
+ * The staged artifact's content is already digest-verified before this runs,
+ * so a probe failure here reflects a transient host/exec hiccup (e.g. a
+ * momentary I/O error copying/executing the just-staged binary) rather than
+ * a corrupt or wrong artifact. Retrying a couple of times avoids failing an
+ * entire run over a fleeting condition. See gh-aw-firewall#8767.
+ */
+const CLOUD_HYPERVISOR_VERSION_PROBE_ATTEMPTS = 3;
+const CLOUD_HYPERVISOR_VERSION_PROBE_RETRY_DELAY_MS = 250;
+
+/**
+ * Error codes indicating a deterministic, non-transient version-probe
+ * failure: the binary is missing, not a regular file, or not executable.
+ * These will not resolve on retry, so they are allowed to fail closed
+ * immediately instead of paying the retry delay. The default `runVersion`
+ * attaches a structured `code` property when the underlying spawn failure
+ * carries one (see its `Object.assign(new Error(...), { code })` above);
+ * the `code=XXX` message fragment is used as a fallback for callers that
+ * inject a custom `runVersion` throwing a plain `Error`.
+ */
+const CLOUD_HYPERVISOR_VERSION_PROBE_PERMANENT_ERROR_CODES = new Set([
+  'ENOENT', 'EACCES', 'EISDIR', 'ENOTDIR', 'ENOEXEC',
+]);
+const CLOUD_HYPERVISOR_VERSION_PROBE_PERMANENT_ERROR_CODE_PATTERN = /\bcode=(ENOENT|EACCES|EISDIR|ENOTDIR|ENOEXEC)\b/;
+
+function isPermanentVersionProbeError(error: unknown): boolean {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
+  if (typeof code === 'string' && CLOUD_HYPERVISOR_VERSION_PROBE_PERMANENT_ERROR_CODES.has(code)) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return CLOUD_HYPERVISOR_VERSION_PROBE_PERMANENT_ERROR_CODE_PATTERN.test(message);
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Runs `dependencies.runVersion` with a small bounded retry for transient
+ * execution failures. The binary's digest has already been verified to
+ * match the trusted manifest by the time this is called, so any rejection
+ * here is an execution-environment problem, not an artifact integrity
+ * problem, and is generally safe to retry. Deterministic failures (missing
+ * file, permission denied, etc.) are not retried since they would not
+ * resolve on their own.
+ */
+async function runVersionWithRetry(
+  dependencies: Pick<CloudHypervisorPreflightDependencies, 'runVersion'>,
+  binaryPath: string,
+  attempts: number = CLOUD_HYPERVISOR_VERSION_PROBE_ATTEMPTS,
+  retryDelayMs: number = CLOUD_HYPERVISOR_VERSION_PROBE_RETRY_DELAY_MS,
+): Promise<string> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await dependencies.runVersion(binaryPath);
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts && !isPermanentVersionProbeError(error)) {
+        logger.warn(
+          `Cloud Hypervisor version probe failed for "${binaryPath}" ` +
+          `(attempt ${attempt}/${attempts}); retrying: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+        await sleep(retryDelayMs);
+        continue;
+      }
+      break;
+    }
+  }
+  throw lastError;
+}
 
 async function createArtifactSnapshot(
   sources: CloudHypervisorArtifactSnapshotSources,
@@ -733,7 +811,7 @@ export async function runCloudHypervisorPreflight(
     );
 
     const version = parseCloudHypervisorVersion(
-      await dependencies.runVersion(snapshot.cloudHypervisorBinary),
+      await runVersionWithRetry(dependencies, snapshot.cloudHypervisorBinary),
     );
     if (version !== CLOUD_HYPERVISOR_RELEASE_VERSION) {
       throw new Error(
@@ -741,7 +819,7 @@ export async function runCloudHypervisorPreflight(
       );
     }
     const virtiofsdVersion = parseVirtiofsdVersion(
-      await dependencies.runVersion(snapshot.virtiofsdBinary),
+      await runVersionWithRetry(dependencies, snapshot.virtiofsdBinary),
     );
     if (virtiofsdVersion !== VIRTIOFSD_RELEASE_VERSION) {
       throw new Error(
