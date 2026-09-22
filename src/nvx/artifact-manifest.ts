@@ -7,6 +7,8 @@ export const NVX_ARTIFACT_RELEASE_TAG = `v${AWF_VERSION}`;
 export const NVX_ARTIFACT_REPOSITORY = 'github/gh-aw-firewall';
 export const NVX_ARTIFACT_SIGNER_WORKFLOW =
   'github/gh-aw-firewall/.github/workflows/release.yml';
+export const NVX_VALIDATION_SIGNER_WORKFLOW =
+  'github/gh-aw-firewall/.github/workflows/nvx-phase-3b-live-kvm.yml';
 
 const ARTIFACT_FILES = {
   openvmm: 'openvmm',
@@ -14,9 +16,11 @@ const ARTIFACT_FILES = {
   initramfs: 'initramfs.cpio.gz',
 } as const;
 // Conservative per-role ceilings bound pre-copy disk exposure while leaving
-// headroom for expected OpenVMM, kernel, and initramfs artifact growth.
+// headroom for expected OpenVMM, kernel, and initramfs artifact growth. The
+// pinned OpenVMM binary is 481,508,816 bytes, so its ceiling is the next
+// binary-size boundary rather than an unbounded allowance.
 const ARTIFACT_SIZE_LIMITS_BYTES = {
-  openvmm: 256 * 1024 * 1024,
+  openvmm: 512 * 1024 * 1024,
   kernel: 512 * 1024 * 1024,
   initramfs: 1024 * 1024 * 1024,
 } as const;
@@ -27,7 +31,7 @@ export interface NvxArtifactManifest {
   readonly schemaVersion: 2;
   readonly release: {
     readonly repository: typeof NVX_ARTIFACT_REPOSITORY;
-    readonly workflow: typeof NVX_ARTIFACT_SIGNER_WORKFLOW;
+    readonly workflow: string;
     readonly tag: string;
     readonly sourceCommit: string;
   };
@@ -47,13 +51,16 @@ export interface NvxArtifactManifest {
 export function parseNvxArtifactManifest(
   contents: string,
   expectedReleaseTag: string,
+  expectedSignerWorkflow = NVX_ARTIFACT_SIGNER_WORKFLOW,
 ): NvxArtifactManifest {
+  assertTrustedSignerWorkflow(expectedSignerWorkflow);
   if (expectedReleaseTag !== NVX_ARTIFACT_RELEASE_TAG) {
     throw new Error(
       `NVX artifacts must match this AWF release: expected ` +
       `${NVX_ARTIFACT_RELEASE_TAG}, got ${expectedReleaseTag}`,
     );
   }
+
   let value: unknown;
   try {
     value = JSON.parse(contents);
@@ -87,8 +94,8 @@ export function parseNvxArtifactManifest(
   if (release.repository !== NVX_ARTIFACT_REPOSITORY) {
     throw new Error(`manifest.release.repository must be ${NVX_ARTIFACT_REPOSITORY}`);
   }
-  if (release.workflow !== NVX_ARTIFACT_SIGNER_WORKFLOW) {
-    throw new Error(`manifest.release.workflow must be ${NVX_ARTIFACT_SIGNER_WORKFLOW}`);
+  if (release.workflow !== expectedSignerWorkflow) {
+    throw new Error(`manifest.release.workflow must be ${expectedSignerWorkflow}`);
   }
   if (release.tag !== expectedReleaseTag) {
     throw new Error(
@@ -154,7 +161,7 @@ export function parseNvxArtifactManifest(
     schemaVersion: 2,
     release: {
       repository: NVX_ARTIFACT_REPOSITORY,
-      workflow: NVX_ARTIFACT_SIGNER_WORKFLOW,
+      workflow: expectedSignerWorkflow,
       tag: expectedReleaseTag,
       sourceCommit,
     },
@@ -166,6 +173,15 @@ export function parseNvxArtifactManifest(
     architecture: 'x86_64',
     artifacts: normalized,
   };
+}
+
+function assertTrustedSignerWorkflow(workflow: string): void {
+  if (
+    workflow !== NVX_ARTIFACT_SIGNER_WORKFLOW &&
+    workflow !== NVX_VALIDATION_SIGNER_WORKFLOW
+  ) {
+    throw new Error(`Untrusted NVX artifact signer workflow: ${workflow}`);
+  }
 }
 
 export function assertNvxArtifactBasenames(

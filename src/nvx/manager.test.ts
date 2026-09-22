@@ -47,7 +47,7 @@ function harness(overrides: Partial<NvxManagerDependencies> = {}) {
     'iptables', 'mkfs.erofs', 'mke2fs', 'nft', 'setfacl',
     'setpriv', 'sysctl', 'useradd', 'userdel',
   ].map((name) => [name, `/usr/bin/${name}`])) as NvxPreflightResult['tools'];
-  const snapshotDirectory = `/run/awf-nvx/trusted-artifacts/run-${RUN_ID}`;
+  const snapshotDirectory = `/var/lib/awf-nvx/trusted-artifacts/run-${RUN_ID}`;
   const preflightResult = {
     manifest: {} as never,
     snapshot: {
@@ -167,6 +167,8 @@ function harness(overrides: Partial<NvxManagerDependencies> = {}) {
       order.push('verify');
       return {} as never;
     }),
+    copyFile: jest.fn(async () => undefined),
+    chmod: jest.fn(async () => undefined),
     chown: jest.fn(async () => undefined),
     rm: jest.fn(async () => { order.push('snapshot-cleanup'); }),
     ...overrides,
@@ -208,6 +210,15 @@ describe('NvxManager', () => {
     expect(value.order.indexOf('record-launcher')).toBeLessThan(value.order.indexOf('cgroup-assign'));
     expect(value.cgroup.assignProcessTree).toHaveBeenNthCalledWith(1, [4100, 4200]);
     expect(value.order.indexOf('record-openvmm')).toBeLessThan(value.order.indexOf('verify'));
+    expect(value.dependencies.copyFile).toHaveBeenCalledWith(
+      '/etc/resolv.conf',
+      `/run/awf-nvx/runs/${RUN_ID}/resolv.conf`,
+      expect.any(Number),
+    );
+    expect(value.dependencies.chmod).toHaveBeenCalledWith(
+      `/run/awf-nvx/runs/${RUN_ID}/resolv.conf`,
+      0o444,
+    );
     expect(value.order.slice(-7)).toEqual([
       'terminate',
       'cgroup-cleanup',

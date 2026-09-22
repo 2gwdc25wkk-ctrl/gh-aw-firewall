@@ -44,6 +44,16 @@ export type NvxHostToolPaths = Readonly<Record<NvxHostToolName, string>>;
 export type NvxArtifactPaths = Readonly<Record<NvxTrustedArtifactName, string>>;
 type NvxTrustedFileStat = Awaited<ReturnType<NvxPreflightDependencies['lstat']>>;
 
+export interface NvxTrustedToolResolutionDependencies {
+  realpath(filePath: string): Promise<string>;
+  lstat(filePath: string): Promise<{
+    isFile(): boolean;
+    isSymbolicLink(): boolean;
+    uid: number;
+    mode: number;
+  }>;
+}
+
 export interface NvxArtifactSnapshot extends NvxArtifactPaths {
   readonly directory: string;
   readonly manifestPath: string;
@@ -53,6 +63,7 @@ export interface NvxArtifactSnapshot extends NvxArtifactPaths {
 export interface NvxPreflightOptions {
   readonly runId: string;
   readonly expectedReleaseTag: string;
+  readonly expectedSignerWorkflow?: string;
   readonly manifestPath: string;
   readonly artifactManifestBundlePath: string;
   readonly artifacts: NvxArtifactPaths;
@@ -88,6 +99,7 @@ export interface NvxPreflightDependencies {
     ghPath: string,
     manifestPath: string,
     bundlePath: string,
+    signerWorkflow: string,
   ): Promise<void>;
   createSnapshot(
     options: NvxPreflightOptions,
@@ -104,15 +116,15 @@ const defaultDependencies: NvxPreflightDependencies = {
   readFile: async (filePath) => fs.readFile(filePath, 'utf8'),
   lstat: fs.lstat,
   sha256: calculateSha256,
-  resolveTool: resolveTrustedTool,
-  verifyAttestation: async (ghPath, manifestPath, bundlePath) => {
+  resolveTool: resolveTrustedNvxHostTool,
+  verifyAttestation: async (ghPath, manifestPath, bundlePath, signerWorkflow) => {
     const result = await execa(ghPath, [
       'attestation',
       'verify',
       manifestPath,
       '--repo', NVX_ARTIFACT_REPOSITORY,
       '--bundle', bundlePath,
-      '--signer-workflow', NVX_ARTIFACT_SIGNER_WORKFLOW,
+      '--signer-workflow', signerWorkflow,
       '--deny-self-hosted-runners',
     ], {
       reject: false,
@@ -140,6 +152,8 @@ export async function runNvxPreflight(
   hooks?: NvxPreflightHooks,
 ): Promise<NvxPreflightResult> {
   const layout = createNvxRunLayout(options.runId);
+  const expectedSignerWorkflow =
+    options.expectedSignerWorkflow ?? NVX_ARTIFACT_SIGNER_WORKFLOW;
   assertNvxRunLayout(layout);
   if (dependencies.platform !== 'linux' || dependencies.arch !== 'x64') {
     throw new Error('NVX preview requires a Linux x86_64 host');
@@ -180,6 +194,7 @@ export async function runNvxPreflight(
   const sourceManifest = parseNvxArtifactManifest(
     await dependencies.readFile(options.manifestPath),
     options.expectedReleaseTag,
+    expectedSignerWorkflow,
   );
   assertNvxArtifactBasenames(sourceManifest, options.artifacts);
   const sourceStats = {} as Record<NvxTrustedArtifactName, NvxTrustedFileStat>;
@@ -227,10 +242,12 @@ export async function runNvxPreflight(
       tools.gh,
       snapshot.manifestPath,
       snapshot.bundlePath,
+      expectedSignerWorkflow,
     );
     const manifest = parseNvxArtifactManifest(
       await dependencies.readFile(snapshot.manifestPath),
       options.expectedReleaseTag,
+      expectedSignerWorkflow,
     );
     assertNvxArtifactBasenames(manifest, snapshot);
     for (const name of Object.keys(options.artifacts) as NvxTrustedArtifactName[]) {
@@ -350,18 +367,27 @@ async function createArtifactSnapshot(
   }
 }
 
-async function resolveTrustedTool(name: NvxHostToolName): Promise<string> {
+export async function resolveTrustedNvxHostTool(
+  name: NvxHostToolName,
+  dependencies: NvxTrustedToolResolutionDependencies = fs,
+): Promise<string> {
   for (const directory of TRUSTED_TOOL_DIRECTORIES) {
     const candidate = path.join(directory, name);
     try {
-      const stat = await fs.lstat(candidate);
+      const resolved = await dependencies.realpath(candidate);
+      if (!TRUSTED_TOOL_DIRECTORIES.includes(
+        path.dirname(resolved) as typeof TRUSTED_TOOL_DIRECTORIES[number],
+      )) {
+        continue;
+      }
+      const stat = await dependencies.lstat(resolved);
       if (
         stat.isFile() &&
         !stat.isSymbolicLink() &&
         stat.uid === 0 &&
         (stat.mode & 0o022) === 0 &&
         (stat.mode & 0o111) !== 0
-      ) return candidate;
+      ) return resolved;
     } catch {
       // Continue through the bounded PATH.
     }

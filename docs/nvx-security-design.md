@@ -108,7 +108,9 @@ Production or preview integration must use one of these fail-closed models:
 The manifest must bind NVX, OpenVMM, kernel, initramfs, base layer, agent layer,
 and any host helper. Validly attested artifacts from an unexpected release,
 commit, architecture, role, or filename are rejected to prevent rollback and
-role substitution.
+role substitution. Per-role size ceilings also bound pre-copy disk exposure.
+The pinned 481,508,816-byte OpenVMM binary is limited to 512 MiB, while the
+kernel and initramfs retain their separately bounded role limits.
 
 Development-only artifacts may use a conspicuous dual opt-in plus complete
 digests. They must never be accepted by default or silently replace failed
@@ -155,8 +157,12 @@ Implemented boundary:
   discovers the exact OpenVMM executable from cgroup and procfs state, captures
   its mount namespace, and completes live confinement verification. Because
   the pinned OpenVMM initially routes stdin to the guest console, AWF clears
-  the inherited environment, sets `TERM=dumb`, writes Ctrl-Q, waits for the
-  exact flushed `openvmm> ` prompt, and only then writes `resume` to the REPL;
+  the inherited environment, sets `TERM=dumb`, places OpenVMM's REPL state
+  under the per-run writable directory with `XDG_STATE_HOME`, writes Ctrl-Q,
+  waits for the exact flushed `openvmm> ` prompt, and only then writes `resume`
+  to the REPL. The bounded Bubblewrap JSON status channel remains drained
+  through EOF so final sandbox status cannot terminate Bubblewrap with
+  `SIGPIPE`;
   and
 - an explicit x86_64 cBPF seccomp denylist passed to Bubblewrap on inherited
   FD 5 before `setpriv` and OpenVMM execute. The filter rejects host-management,
@@ -170,10 +176,10 @@ Implemented boundary:
 The live KVM validation workflow,
 `.github/workflows/nvx-phase-3b-live-kvm.yml`, is deliberately opt-in for pull
 requests via the `nvx-live-kvm` label (and always available through
-`workflow_dispatch`). Phase 3d updates it to probe the direct constrained argv,
+`workflow_dispatch`). Phase 3d added probes for the direct constrained argv,
 the Bubblewrap readiness FD contract, KVM-only device access, and no-TAP
-namespace policy. It remains fail-closed and does not claim a guest boot;
-end-to-end manager launch remains explicit promotion evidence.
+namespace policy. Phase 3e adds workflow-attested artifacts and end-to-end
+manager guest-boot and timeout-cleanup evidence.
 
 Configurations that cannot provide Linux x86_64 KVM, cgroup v2
 `cpu`/`memory`/`pids` controllers, trusted host tools, or exact cleanup evidence
@@ -203,6 +209,36 @@ complete guest boot and exit, Copilot inference through the credential-holding
 API proxy, adversarial network and filesystem probes, timeout/cancellation
 cleanup, stale recovery, and concurrent-run isolation. Until that evidence is
 accepted, `NvxManager` remains internal infrastructure only.
+
+## Phase 3e live manager evidence
+
+Phase 3e adds the first end-to-end live evidence lane for the production
+`NvxManager` path without registering an external runtime:
+
+- the release workflow downloads the pinned upstream NVX package, verifies its
+  archive and internal checksums, stages only OpenVMM, the kernel, and the
+  initramfs, generates the schema-v2 AWF manifest, and attests that manifest
+  from the protected AWF release workflow;
+- the opt-in live-KVM workflow creates an equivalent workflow-attested bundle
+  for pull-request validation. Preflight accepts this only when the caller
+  explicitly pins that exact validation workflow; the production default
+  remains the release workflow and there is no unsigned fallback;
+- the live runner builds a deterministic EROFS layer from a digest-pinned
+  Alpine root, invokes the real `NvxManager`, and requires a successful guest
+  boot, `/bin/true` execution, structured outcome, live confinement evidence,
+  and residue-free cleanup; and
+- a second manager invocation runs `/bin/sleep` with a bounded wall-clock
+  timeout and requires exit `124` plus the same residue-free cleanup checks.
+
+This evidence removes the attested-bundle and basic manager-boot blockers. It
+does not by itself authorize runtime registration. Promotion still requires
+reviewed Copilot API-proxy inference, adversarial network and filesystem
+denials, cancellation, stale-recovery, and concurrent-run isolation evidence.
+
+Executable immutable snapshots use the dedicated
+`/var/lib/awf-nvx/trusted-artifacts` root because the Ubuntu host's volatile
+`/run` mount is `noexec`. Writable per-run state and cleanup records remain
+under `/run/awf-nvx`.
 
 ## Host OpenVMM confinement
 
@@ -257,7 +293,11 @@ allows only:
 
 The policy must deny direct external TCP, UDP, ICMP, DNS, instance metadata,
 host loopback, unsolicited ingress, and lateral access to other runner
-services. The guest must not be able to weaken this policy.
+services. The guest must not be able to weaken this policy. `NvxManager`
+snapshots the host resolver configuration into the identity-owned run
+directory and binds that regular file read-only at `/etc/resolv.conf` because
+the `consomme` backend requires resolver initialization. Host policy continues
+to deny guest DNS traffic.
 
 NVX's `portable` profile, deny rules, and explicit allow rules may be part of
 the implementation, but AWF must verify the effective host-side state and run
@@ -269,6 +309,8 @@ startup failure.
 Phase 2 will implement the image builder, but Phase 1 fixes its contract:
 
 - build deterministic EROFS lower layers from allowlisted inputs;
+- use the reproducible fixed-timestamp and fixed-UUID options available in the
+  Ubuntu 24.04 `erofs-utils` 1.7.1 production baseline;
 - do not pass arbitrary host paths directly to OpenVMM;
 - exclude credentials, sockets, devices, and host control files regardless of
   workspace contents;
@@ -276,7 +318,8 @@ Phase 2 will implement the image builder, but Phase 1 fixes its contract:
   manifest;
 - create a fresh sparse ext4 scratch image for every invocation;
 - mount lower layers read-only and scratch `rw,nosuid,nodev`;
-- reject symlinks or aliases that escape the staged build root;
+- rewrite absolute guest-root symlinks to equivalent relative targets and
+  reject relative symlinks or aliases that escape the staged build root;
 - cap scratch size and verify teardown; and
 - never reuse guest-writable state across workflow runs.
 

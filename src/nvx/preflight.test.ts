@@ -5,8 +5,10 @@ import {
   NVX_COMMIT,
   NVX_OPENVMM_COMMIT,
   NVX_RELEASE_TAG,
+  NVX_VALIDATION_SIGNER_WORKFLOW,
 } from './artifact-manifest';
 import {
+  resolveTrustedNvxHostTool,
   runNvxPreflight,
   type NvxArtifactSnapshot,
   type NvxPreflightDependencies,
@@ -55,13 +57,13 @@ const options = {
 
 function snapshot(): NvxArtifactSnapshot {
   return {
-    directory: `/run/awf-nvx/trusted-artifacts/run-${options.runId}`,
-    openvmm: `/run/awf-nvx/trusted-artifacts/run-${options.runId}/openvmm`,
-    kernel: `/run/awf-nvx/trusted-artifacts/run-${options.runId}/vmlinux`,
-    initramfs: `/run/awf-nvx/trusted-artifacts/run-${options.runId}/initramfs.cpio.gz`,
-    manifestPath: `/run/awf-nvx/trusted-artifacts/run-${options.runId}/manifest.json`,
+    directory: `/var/lib/awf-nvx/trusted-artifacts/run-${options.runId}`,
+    openvmm: `/var/lib/awf-nvx/trusted-artifacts/run-${options.runId}/openvmm`,
+    kernel: `/var/lib/awf-nvx/trusted-artifacts/run-${options.runId}/vmlinux`,
+    initramfs: `/var/lib/awf-nvx/trusted-artifacts/run-${options.runId}/initramfs.cpio.gz`,
+    manifestPath: `/var/lib/awf-nvx/trusted-artifacts/run-${options.runId}/manifest.json`,
     bundlePath:
-      `/run/awf-nvx/trusted-artifacts/run-${options.runId}/manifest.sigstore.json`,
+      `/var/lib/awf-nvx/trusted-artifacts/run-${options.runId}/manifest.sigstore.json`,
   };
 }
 
@@ -116,6 +118,7 @@ describe('NVX preflight', () => {
       '/usr/bin/gh',
       snapshot().manifestPath,
       snapshot().bundlePath,
+      NVX_ARTIFACT_SIGNER_WORKFLOW,
     );
     expect(deps.createSnapshot).toHaveBeenCalledWith(
       options,
@@ -125,6 +128,73 @@ describe('NVX preflight', () => {
       }),
     );
     expect(deps.sha256).toHaveBeenCalledTimes(3);
+  });
+
+  describe('trusted NVX host tool resolution', () => {
+    it('accepts a root-owned alternatives symlink whose canonical target stays trusted', async () => {
+      const lstat = jest.fn(async (filePath: string) => ({
+        isFile: () => filePath === '/usr/sbin/xtables-nft-multi',
+        isSymbolicLink: () => false,
+        uid: 0,
+        mode: 0o100755,
+      }));
+      const realpath = jest.fn(async (filePath: string) => {
+        if (filePath === '/usr/sbin/iptables') return '/usr/sbin/xtables-nft-multi';
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      });
+
+      await expect(resolveTrustedNvxHostTool(
+        'iptables',
+        { lstat, realpath },
+      )).resolves.toBe('/usr/sbin/xtables-nft-multi');
+    });
+
+    it('rejects a canonical tool target outside the trusted system directories', async () => {
+      const lstat = jest.fn();
+      const realpath = jest.fn(async (filePath: string) => {
+        if (filePath === '/usr/sbin/iptables') return '/opt/untrusted/iptables';
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      });
+
+      await expect(resolveTrustedNvxHostTool(
+        'iptables',
+        { lstat, realpath },
+      )).rejects.toThrow(/required trusted NVX host tool/);
+      expect(lstat).not.toHaveBeenCalled();
+    });
+  });
+
+  it('accepts an explicitly pinned validation workflow without weakening the default', async () => {
+    const signer = NVX_VALIDATION_SIGNER_WORKFLOW;
+    const signedManifest = manifest().replace(NVX_ARTIFACT_SIGNER_WORKFLOW, signer);
+    const deps = dependencies({
+      readFile: jest.fn(async (filePath) => {
+        if (filePath === '/sys/fs/cgroup/cgroup.controllers') return 'cpu memory pids';
+        if (filePath === '/proc/sys/kernel/seccomp/actions_avail') {
+          return 'kill_process kill_thread errno';
+        }
+        if (filePath === options.manifestPath || filePath === snapshot().manifestPath) {
+          return signedManifest;
+        }
+        throw new Error(`unexpected read: ${filePath}`);
+      }),
+    });
+
+    await runNvxPreflight({ ...options, expectedSignerWorkflow: signer }, deps);
+
+    expect(deps.verifyAttestation).toHaveBeenCalledWith(
+      '/usr/bin/gh',
+      snapshot().manifestPath,
+      snapshot().bundlePath,
+      signer,
+    );
+  });
+
+  it('rejects signer overrides outside the two pinned AWF workflows', async () => {
+    await expect(runNvxPreflight({
+      ...options,
+      expectedSignerWorkflow: 'github/gh-aw-firewall/.github/workflows/untrusted.yml',
+    }, dependencies())).rejects.toThrow(/Untrusted NVX artifact signer workflow/);
   });
 
   it('rejects source artifacts whose sizes do not match the manifest before copying', async () => {
@@ -169,7 +239,7 @@ describe('NVX preflight', () => {
   it('removes a snapshot whose copied digest does not match', async () => {
     const deps = dependencies({
       sha256: jest.fn(async (filePath) =>
-        filePath.startsWith('/run/awf-nvx/') && filePath.endsWith('openvmm')
+        filePath.startsWith('/var/lib/awf-nvx/') && filePath.endsWith('openvmm')
           ? 'f'.repeat(64)
           : filePath.endsWith('openvmm')
               ? DIGESTS.openvmm
@@ -185,7 +255,7 @@ describe('NVX preflight', () => {
   it('rejects a snapshot outside the canonical per-run directory', async () => {
     const unexpected = {
       ...snapshot(),
-      directory: '/run/awf-nvx/trusted-artifacts/run-other',
+      directory: '/var/lib/awf-nvx/trusted-artifacts/run-other',
     };
     const deps = dependencies({
       createSnapshot: jest.fn().mockResolvedValue(unexpected),
