@@ -352,6 +352,22 @@ describe('prepareWorkDirectories', () => {
       expect(fs.existsSync(geminiDir)).toBe(true);
     });
 
+    it('writes Gemini system settings without following a pre-existing symlink', () => {
+      const emptyHomeDir = `${fixture.tempDir}-chroot-home`;
+      const settingsDir = path.join(emptyHomeDir, '.awf');
+      const target = path.join(fixture.tempDir, 'target');
+      const settingsPath = path.join(settingsDir, 'gemini-cli-system-settings.json');
+      fs.mkdirSync(settingsDir, { recursive: true });
+      fs.writeFileSync(target, 'unchanged');
+      fs.symlinkSync(target, settingsPath);
+
+      const config = buildConfig({ enableApiProxy: true, geminiApiKey: 'test-key' });
+      const logPaths = resolveLogPaths(config);
+
+      expect(() => prepareWorkDirectories(config, logPaths)).toThrow();
+      expect(fs.readFileSync(target, 'utf8')).toBe('unchanged');
+    });
+
     it('creates .gemini directory when googleApiKey is provided', () => {
       const geminiDir = path.join(fixture.tempDir, '.gemini');
       if (fs.existsSync(geminiDir)) {
@@ -503,7 +519,50 @@ describe('prepareChrootHomeMounts (sub-function)', () => {
     expect(fs.existsSync(geminiDir)).toBe(false);
   });
 
-  it('refuses existing symlinked nested home tool paths', () => {    const sandboxState = path.join(fixture.tempDir, '.local', 'state', 'sandboxes');
+  // Regression: Gemini CLI >= 0.44 maps GOOGLE_GEMINI_BASE_URL (which AWF sets for
+  // api-proxy routing) to its unsupported "gateway" auth type and exits 41. AWF pins
+  // the auth type with a system settings file in the chroot home instead.
+  describe('Gemini CLI system settings', () => {
+    const settingsPath = () =>
+      path.join(`${fixture.tempDir}-chroot-home`, '.awf', 'gemini-cli-system-settings.json');
+    const originalVertex = process.env.GOOGLE_GENAI_USE_VERTEXAI;
+
+    afterEach(() => {
+      if (originalVertex === undefined) delete process.env.GOOGLE_GENAI_USE_VERTEXAI;
+      else process.env.GOOGLE_GENAI_USE_VERTEXAI = originalVertex;
+    });
+
+    it('pins the API-key auth type when Gemini is routed through the api-proxy', () => {
+      workdirSetupTestHelpers.prepareChrootHomeMounts(
+        buildConfig({ enableApiProxy: true, geminiApiKey: 'key' }),
+      );
+
+      expect(JSON.parse(fs.readFileSync(settingsPath(), 'utf8'))).toEqual({
+        security: { auth: { selectedType: 'gemini-api-key' } },
+      });
+    });
+
+    it('does not write the settings file when the api-proxy is disabled', () => {
+      workdirSetupTestHelpers.prepareChrootHomeMounts(buildConfig({ geminiApiKey: 'key' }));
+
+      expect(fs.existsSync(settingsPath())).toBe(false);
+    });
+
+    it('does not pin the auth type for Vertex AI runs', () => {
+      workdirSetupTestHelpers.prepareChrootHomeMounts(
+        buildConfig({
+          enableApiProxy: true,
+          geminiApiKey: 'key',
+          additionalEnv: { GOOGLE_GENAI_USE_VERTEXAI: 'true' },
+        }),
+      );
+
+      expect(fs.existsSync(settingsPath())).toBe(false);
+    });
+  });
+
+  it('refuses existing symlinked nested home tool paths', () => {
+    const sandboxState = path.join(fixture.tempDir, '.local', 'state', 'sandboxes');
     const localBin = path.join(fixture.tempDir, '.local', 'bin');
     fs.mkdirSync(sandboxState, { recursive: true });
     fs.symlinkSync(sandboxState, localBin);
