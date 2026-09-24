@@ -83,12 +83,15 @@ const MAPPING_FAMILIES_NOT_EXPOSED_BY_COPILOT_CLI = new Set([
   'gpt-rosalind-research', // restricted-access, responses-only life-sciences model; not in the Copilot CLI model picker
   'gpt-5-6-cyber', // responses-only gpt-5.6 variant; not in the Copilot CLI model picker
   'gpt-5-5-pro', // responses-only gpt-5.5 variant; not in the Copilot CLI model picker
+  'gpt-5-2-pro', // responses-only gpt-5.2 variant; not in the Copilot CLI model picker
+  'gpt-5-1-codex', // older responses-only Codex family; not in the Copilot CLI model picker
   'gpt-5-1-codex-max',
   'gpt-5-codex/pro',
   'o4-mini-deep-research',
   'o4',
   'o3-pro/deep-research',
   'o1-pro',
+  'o1-mini/preview',
   'o1',
   'computer-use-preview',
   'codex-mini',
@@ -113,6 +116,20 @@ describe('SUPPORTED_COPILOT_MODELS ↔ ai-credits-pricing catalog sync', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const pricing = require(pricingPath) as Record<string, unknown>;
   const pricingModels = Object.keys(pricing);
+  const docsMappingPath = path.resolve(__dirname, '..', 'docs', 'model-api-mapping.json');
+  const apiProxyMappingPath = path.resolve(
+    __dirname,
+    '..',
+    'containers',
+    'api-proxy',
+    'model-api-mapping.json',
+  );
+
+  it('keeps the docs and packaged API proxy model API mappings identical', () => {
+    expect(fs.readFileSync(apiProxyMappingPath, 'utf8')).toBe(
+      fs.readFileSync(docsMappingPath, 'utf8'),
+    );
+  });
 
   it('every Copilot CLI model in ai-credits-pricing.js appears in SUPPORTED_COPILOT_MODELS', () => {
     // Build a separator-normalised view of the supported set so that
@@ -153,8 +170,7 @@ describe('SUPPORTED_COPILOT_MODELS ↔ ai-credits-pricing catalog sync', () => {
   });
 
   it('every mapped completion family is represented or explicitly excluded', () => {
-    const mappingPath = path.resolve(__dirname, '..', 'docs', 'model-api-mapping.json');
-    const mapping = JSON.parse(fs.readFileSync(mappingPath, 'utf8')) as {
+    const mapping = JSON.parse(fs.readFileSync(docsMappingPath, 'utf8')) as {
       providers: Record<string, { models?: Array<{ family?: string }> }>;
     };
     const normalizedSupported = [...testHelpers.supportedCopilotModels].map(normalizeSeparators);

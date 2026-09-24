@@ -42,6 +42,31 @@ describe('model-api-mapping', () => {
       expect(result.endpoints).toContain('responses');
     });
 
+    it.each([
+      ['gpt-6-sol', 'gpt-6-sol'],
+      ['gpt-6-luna', 'gpt-6-luna'],
+      ['gpt-4.5-preview', 'gpt-4.5'],
+    ])('finds %s as supporting both endpoints', (model, family) => {
+      const result = lookupModelEndpoints(model, 'openai');
+      expect(result).not.toBeNull();
+      expect(result.family).toBe(family);
+      expect(result.endpoints).toContain('chat_completions');
+      expect(result.endpoints).toContain('responses');
+    });
+
+    it.each([
+      ['gpt-rosalind-research', 'gpt-rosalind-research'],
+      ['gpt-5.3-codex', 'gpt-5.3-codex'],
+      ['gpt-5.2-codex', 'gpt-5.2-codex'],
+      ['gpt-5.2-pro', 'gpt-5.2-pro'],
+      ['codex-mini-latest', 'codex-mini'],
+    ])('finds %s as responses-only', (model, family) => {
+      const result = lookupModelEndpoints(model, 'openai');
+      expect(result).not.toBeNull();
+      expect(result.family).toBe(family);
+      expect(result.endpoints).toEqual(['responses']);
+    });
+
     it('finds GPT-5.5 as supporting both endpoints', () => {
       const result = lookupModelEndpoints('gpt-5.5', 'openai');
       expect(result).not.toBeNull();
@@ -57,12 +82,11 @@ describe('model-api-mapping', () => {
       expect(result.endpoints).toEqual(['responses']);
     });
 
-    it('finds GPT-5.1 as supporting both endpoints', () => {
+    it('finds GPT-5.1-codex as responses-only', () => {
       const result = lookupModelEndpoints('gpt-5.1-codex', 'openai');
       expect(result).not.toBeNull();
-      expect(result.family).toBe('gpt-5.1');
-      expect(result.endpoints).toContain('chat_completions');
-      expect(result.endpoints).toContain('responses');
+      expect(result.family).toBe('gpt-5.1-codex');
+      expect(result.endpoints).toEqual(['responses']);
     });
 
     it('finds GPT-5.1-codex-max as responses-only', () => {
@@ -151,7 +175,7 @@ describe('model-api-mapping', () => {
       expect(reflect.available).toBe(true);
       expect(reflect.providers).toContain('openai');
       expect(reflect.providers).toContain('anthropic');
-      expect(reflect.last_updated).toBe('2026-09-04T07:01:27Z');
+      expect(reflect.last_updated).toBe('2026-09-24T07:03:39Z');
       expect(reflect.models.anthropic.models[0].family).toBe('claude-opus-5');
       expect(reflect.error).toBeNull();
     });
