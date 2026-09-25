@@ -15,6 +15,11 @@ import {
   resolveApiProxyShutdownTimeoutMs,
 } from './api-proxy-env-config';
 import { buildApiProxyLifecycleConfig } from './api-proxy-lifecycle-config';
+import {
+  ROUTING_CONTAINER_INPUT_DIR,
+  ROUTING_CONTAINER_OUTPUT_DIR,
+} from '../routing/bootstrap';
+import { ROUTER_SERVICE_NAME, ROUTING_NETWORK_NAME } from './router-service';
 
 interface ApiProxyServiceConfigParams {
   config: WrapperConfig;
@@ -62,6 +67,10 @@ export function buildApiProxyServiceConfig(params: ApiProxyServiceConfigParams):
         // Mount log directory for api-proxy logs
         `${apiProxyLogsPath}:/var/log/api-proxy:rw`,
         ...(apiProxyCaCertPath ? [`${apiProxyCaCertPath}:${API_PROXY_UPSTREAM_CA_CERT_CONTAINER_PATH}:ro`] : []),
+        ...(config.modelRoutingBootstrap ? [
+          `${config.modelRoutingBootstrap.inputDir}:${ROUTING_CONTAINER_INPUT_DIR}:ro`,
+          `${config.modelRoutingBootstrap.outputDir}:${ROUTING_CONTAINER_OUTPUT_DIR}:rw`,
+        ] : []),
       ],
       config.dockerHostPathPrefix,
     ),
@@ -70,6 +79,18 @@ export function buildApiProxyServiceConfig(params: ApiProxyServiceConfigParams):
     ...buildContainerSecurityHardening({ memLimit: '512m', pidsLimit: 100, cpuShares: 512 }),
     stop_grace_period: `${stopGracePeriodSeconds}s`,
   };
+  if (config.modelRoutingBootstrap) {
+    proxyService.networks = {
+      ...proxyService.networks,
+      [ROUTING_NETWORK_NAME]: {},
+    };
+    proxyService.depends_on = {
+      ...(proxyService.depends_on || {}),
+      [ROUTER_SERVICE_NAME]: {
+        condition: 'service_healthy',
+      },
+    };
+  }
 
   // Use GHCR image or build locally
   assignImageSource(proxyService, {

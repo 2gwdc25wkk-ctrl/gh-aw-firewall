@@ -11,6 +11,7 @@ import { normalizeCodexHostedWebPolicy } from '../codex-hosted-web-policy';
 
 const DEFAULT_API_PROXY_SHUTDOWN_TIMEOUT_MS = 8000;
 export const API_PROXY_UPSTREAM_CA_CERT_CONTAINER_PATH = '/usr/local/share/ca-certificates/awf-upstream-ca.crt';
+export const MODEL_ROUTING_NOT_STAGED_MESSAGE = 'Model routing was configured but the routing conversation was not staged';
 
 /**
  * Builds provider API target/basePath environment variables for the api-proxy container.
@@ -272,9 +273,6 @@ function buildModelPolicyEnv(config: WrapperConfig): Record<string, string> {
     ...(config.modelFallback && {
       AWF_MODEL_FALLBACK: JSON.stringify(config.modelFallback),
     }),
-    ...(config.modelRouting && {
-AWF_ROUTING_CONFIG: JSON.stringify(config.modelRouting),
-    }),
     // Model policy (allowed/disallowed)
     ...(config.allowedModels && config.allowedModels.length > 0 && {
       AWF_ALLOWED_MODELS: JSON.stringify(config.allowedModels),
@@ -307,6 +305,21 @@ AWF_ROUTING_CONFIG: JSON.stringify(config.modelRouting),
       }),
     ...(config.maxCapturedBytes !== undefined && {
       AWF_MAX_BLOCKED_CAPTURE_BYTES: String(config.maxCapturedBytes),
+    }),
+  };
+}
+
+function buildModelRoutingEnv(config: WrapperConfig): Record<string, string> {
+  if (!config.modelRouting) return {};
+  if (!config.modelRoutingBootstrap) {
+    throw new Error(MODEL_ROUTING_NOT_STAGED_MESSAGE);
+  }
+  return {
+    AWF_ROUTING_CONFIG: JSON.stringify({
+      ...config.modelRouting,
+      task: {
+        conversationFile: config.modelRoutingBootstrap.containerInputFile,
+      },
     }),
   };
 }
@@ -371,6 +384,7 @@ export function buildApiProxyBaseEnv(config: WrapperConfig, networkConfig: Netwo
     ...buildOtelEnv(),
     ...buildRateLimitEnv(config),
     ...buildModelPolicyEnv(config),
+    ...buildModelRoutingEnv(config),
     ...buildOidcEnv(config),
   };
 }
@@ -384,6 +398,7 @@ export const testHelpers = {
   buildOtelEnv,
   buildRateLimitEnv,
   buildModelPolicyEnv,
+  buildModelRoutingEnv,
   buildOidcEnv,
   resolveApiProxyShutdownTimeoutMs,
 };

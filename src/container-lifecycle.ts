@@ -6,6 +6,7 @@ import {
   SQUID_CONTAINER_NAME,
   IPTABLES_INIT_CONTAINER_NAME,
   API_PROXY_CONTAINER_NAME,
+  ROUTER_CONTAINER_NAME,
   CLI_PROXY_CONTAINER_NAME,
   ENCLAVE_AGENT_API_PROXY_CONTAINER_NAME,
   ENCLAVE_MCP_SERVER_CONTAINER_NAME,
@@ -29,7 +30,13 @@ const MAX_GVISOR_AGENT_RETRIES = 1;
 // Node/V8 initialisation (before any agent work began) and are safe to restart.
 const GVISOR_STARTUP_CRASH_WINDOW_MS = 30_000;
 
-class InfrastructureReadinessError extends Error {}
+class InfrastructureReadinessError extends Error {
+  constructor(message: string, cause: unknown) {
+    super(message);
+    this.name = 'InfrastructureReadinessError';
+    Object.defineProperty(this, 'cause', { value: cause, configurable: true });
+  }
+}
 class PostReadinessAgentStartupError extends Error {}
 
 function getComposeUpArgs(skipPull?: boolean): string[] {
@@ -109,6 +116,7 @@ async function attemptContainerStartup(
       } catch (error) {
         throw new InfrastructureReadinessError(
           error instanceof Error ? error.message : String(error),
+          error,
         );
       }
       if (!services.includes('agent')) {
@@ -308,6 +316,7 @@ export async function startContainers(
       AGENT_CONTAINER_NAME,
       IPTABLES_INIT_CONTAINER_NAME,
       API_PROXY_CONTAINER_NAME,
+      ROUTER_CONTAINER_NAME,
       CLI_PROXY_CONTAINER_NAME,
       ENCLAVE_MCP_SERVER_CONTAINER_NAME,
       ENCLAVE_AGENT_API_PROXY_CONTAINER_NAME,

@@ -52,6 +52,13 @@ import {
   formatCloudHypervisorDockerFallbackWarning,
   isCloudHypervisorUnsupportedHostError,
 } from '../cloud-hypervisor/errors';
+import {
+  cleanupRoutingState,
+  RoutingFailureExitError,
+  stageRoutingConversation,
+  verifyRoutingCompletion,
+  waitForRoutingSelection,
+} from '../routing/bootstrap';
 
 const SENSITIVE_CONFIG_KEYS = new Set([
   'openaiApiKey',
@@ -66,6 +73,17 @@ const SENSITIVE_CONFIG_KEYS = new Set([
 ]);
 
 const REFLECT_COMMAND = 'curl --fail --silent --show-error --noproxy "*" http://api-proxy:10000/reflect';
+
+function findRoutingFailure(error: unknown): RoutingFailureExitError | undefined {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    if (current instanceof RoutingFailureExitError) return current;
+    seen.add(current);
+    current = (current as Error & { cause?: unknown }).cause;
+  }
+  return undefined;
+}
 
 function redactConfigForLogging(config: WrapperConfig): Record<string, unknown> {
   const redactedConfig: Record<string, unknown> = {};
@@ -407,6 +425,7 @@ export function createMainAction(getOptionValueSource: OptionSourceResolver) {
           : fastKillAgentContainer()
       ),
       performCleanup: (signal) => performCleanup(signal),
+      cleanupRouting: () => cleanupRoutingState(config),
     });
 
     if (externalRuntimeBackend) {
@@ -490,6 +509,10 @@ export function createMainAction(getOptionValueSource: OptionSourceResolver) {
         assertEnclaveGithubGatewayReady,
         prepareEnclaves,
         startEnclaveDynamicDelegation,
+        prepareRouting: async (routingConfig) => stageRoutingConversation(routingConfig),
+        waitForRoutingSelection,
+        verifyRoutingCompletion: async (routingState) => verifyRoutingCompletion(routingState),
+        cleanupRouting: async (routingConfig) => cleanupRoutingState(routingConfig),
       },
       {
         logger,
@@ -512,8 +535,10 @@ export function createMainAction(getOptionValueSource: OptionSourceResolver) {
       writeStartupFailureDiagnostic(config, error);
     }
     await performCleanup();
-    console.error(`Process exiting with code: 1`);
-    process.exit(1);
+    cleanupRoutingState(config);
+    const fatalExitCode = findRoutingFailure(error)?.exitCode ?? 1;
+    console.error(`Process exiting with code: ${fatalExitCode}`);
+    process.exit(fatalExitCode);
   }
   };
 }
