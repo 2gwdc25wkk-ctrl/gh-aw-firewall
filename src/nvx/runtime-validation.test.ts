@@ -1,5 +1,9 @@
+import { promises as fs } from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import type { WrapperConfig } from '../types';
 import {
+  assertNvxContainerWorkDirResolvesWithinWorkspace,
   assertNvxHostEligibility,
   assertNvxRuntimeCompatibility,
   assertNvxSelection,
@@ -10,6 +14,7 @@ import {
 function baseNvx() {
   return {
     previewEnabled: true,
+    mountPolicy: 'workspace-only' as const,
     layerPath: '/opt/nvx/distro.layer',
     artifactManifestPath: '/opt/nvx/manifest.json',
     artifactManifestBundlePath: '/opt/nvx/manifest.sigstore.jsonl',
@@ -94,6 +99,46 @@ describe('NVX runtime validation', () => {
       expect(() => assertNvxRuntimeCompatibility(config(), baseNvx())).not.toThrow();
     });
 
+    describe('assertNvxContainerWorkDirResolvesWithinWorkspace', () => {
+      let root: string;
+      let workspace: string;
+
+      beforeEach(async () => {
+        root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'nvx-workdir-')));
+        workspace = path.join(root, 'workspace');
+        await fs.mkdir(path.join(workspace, 'packages', 'app'), { recursive: true });
+      });
+
+      afterEach(async () => {
+        await fs.rm(root, { recursive: true, force: true });
+      });
+
+      it('accepts an existing directory inside the canonical workspace', async () => {
+        await expect(assertNvxContainerWorkDirResolvesWithinWorkspace(
+          '/workspace/packages/app',
+          workspace,
+        )).resolves.toBeUndefined();
+      });
+
+      it('rejects a workspace symlink that resolves outside the export', async () => {
+        const outside = path.join(root, 'outside');
+        await fs.mkdir(outside);
+        await fs.symlink(outside, path.join(workspace, 'escaped'));
+
+        await expect(assertNvxContainerWorkDirResolvesWithinWorkspace(
+          '/workspace/escaped',
+          workspace,
+        )).rejects.toThrow(/resolves outside the guest workspace export/);
+      });
+
+      it('reports a missing workdir as an NVX container-workdir error', async () => {
+        await expect(assertNvxContainerWorkDirResolvesWithinWorkspace(
+          '/workspace/missing',
+          workspace,
+        )).rejects.toThrow(/--container-workdir does not exist in the workspace export/);
+      });
+    });
+
     it('rejects when the preview flag is not enabled', () => {
       expect(() => assertNvxRuntimeCompatibility(config({
         nvx: { ...baseNvx(), previewEnabled: false },
@@ -142,9 +187,26 @@ describe('NVX runtime validation', () => {
         .toThrow(/does not support --network-subnet/);
     });
 
-    it('rejects an explicit container working directory', () => {
+    it('accepts a container working directory inside the live workspace export', () => {
+      expect(() => assertNvxRuntimeCompatibility(
+        config({ containerWorkDir: '/workspace/packages/app' }),
+      )).not.toThrow();
+    });
+
+    it('rejects a container working directory outside the live workspace export', () => {
       expect(() => assertNvxRuntimeCompatibility(config({ containerWorkDir: '/repo' })))
-        .toThrow(/does not support --container-workdir/);
+        .toThrow(/must be inside the guest workspace export/);
+    });
+
+    it('rejects a relative container working directory', () => {
+      expect(() => assertNvxRuntimeCompatibility(config({ containerWorkDir: 'repo' })))
+        .toThrow(/requires an absolute --container-workdir/);
+    });
+
+    it('rejects an unsupported mount policy', () => {
+      expect(() => assertNvxRuntimeCompatibility(config({
+        nvx: { ...baseNvx(), mountPolicy: 'everything' as never },
+      }))).toThrow(/mount policy must be/);
     });
 
     it('rejects primary-agent execution with enclaves enabled, without any fallback', () => {

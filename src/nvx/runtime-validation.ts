@@ -1,4 +1,8 @@
+import { promises as fs } from 'fs';
+import * as path from 'path';
 import type { NvxOptions, WrapperConfig } from '../types';
+import { NVX_MOUNT_POLICIES, type NvxMountPolicy } from '../types/runtime-options';
+import { NVX_GUEST_WORKSPACE } from './workspace-export';
 
 /**
  * Explicit, fail-closed compatibility guards for the NVX preview one-shot
@@ -6,7 +10,9 @@ import type { NvxOptions, WrapperConfig } from '../types';
  *
  * Unlike Cloud Hypervisor, NVX never falls back to another runtime when an
  * explicit selection is unsupported or misconfigured — every failure here
- * must be surfaced to the caller and abort the run.
+ * must be surfaced to the caller and abort the run. This divergence is a
+ * deliberate, documented design decision rather than an unclosed parity gap:
+ * see "Fallback behaviour" in docs/nvx-security-design.md.
  */
 
 export function isPrimaryNvxRuntime(
@@ -49,6 +55,17 @@ export function assertNvxRuntimeCompatibility(
   if (!config.enableApiProxy) {
     throw new Error('NVX preview requires API proxy credential isolation');
   }
+  if (!NVX_MOUNT_POLICIES.includes(nvx.mountPolicy as NvxMountPolicy)) {
+    throw new Error(
+      'NVX mount policy must be "workspace-only" or "workspace-and-tool-cache"',
+    );
+  }
+  // Deliberately still rejected at parity with the assessment recorded in
+  // docs/nvx-security-design.md: the runtime-neutral microVM infrastructure
+  // discovery in `src/microvm/infrastructure.ts` asserts the Docker network
+  // carries exactly the compile-time default subnet, so an alternate subnet
+  // cannot be honoured by NVX (or by Cloud Hypervisor) without changing that
+  // shared contract. Rejecting is preferable to silently ignoring the flag.
   if (config.networkSubnet) {
     throw new Error(
       'NVX preview does not support --network-subnet; its microVM infrastructure '
@@ -71,12 +88,7 @@ export function assertNvxRuntimeCompatibility(
   if (config.volumeMounts?.length) {
     throw new Error('NVX preview does not support additional host volume mounts');
   }
-  if (config.containerWorkDir) {
-    throw new Error(
-      'NVX preview does not support --container-workdir; the guest workspace path '
-      + 'is fixed and the host workspace is not exported into the microVM',
-    );
-  }
+  assertNvxContainerWorkDir(config.containerWorkDir);
   if (config.difcProxyHost) {
     throw new Error('NVX preview does not yet support DIFC proxies');
   }
@@ -103,6 +115,83 @@ export function assertNvxRuntimeCompatibility(
     );
   }
   assertNvxHostEligibility();
+}
+
+/**
+ * `--container-workdir` selects the guest directory the agent command runs in.
+ * The host workspace is exported live at {@link NVX_GUEST_WORKSPACE}, so any
+ * directory inside that export is addressable; paths outside it would resolve
+ * against the read-only guest distro layer and are rejected rather than
+ * silently ignored.
+ */
+export function assertNvxContainerWorkDir(containerWorkDir?: string): void {
+  if (!containerWorkDir) return;
+  if (!path.posix.isAbsolute(containerWorkDir)) {
+    throw new Error(
+      `NVX preview requires an absolute --container-workdir; found ${containerWorkDir}`,
+    );
+  }
+  const normalized = path.posix.normalize(containerWorkDir).replace(/\/+$/, '')
+    || NVX_GUEST_WORKSPACE;
+  if (
+    normalized !== NVX_GUEST_WORKSPACE &&
+    !normalized.startsWith(`${NVX_GUEST_WORKSPACE}/`)
+  ) {
+    throw new Error(
+      `NVX preview --container-workdir must be inside the guest workspace export `
+      + `${NVX_GUEST_WORKSPACE}; found ${containerWorkDir}`,
+    );
+  }
+}
+
+/**
+ * Resolves a selected guest workdir through the exported host workspace before
+ * launch. This rejects workspace symlinks that would cause the guest `cd` to
+ * escape the live export.
+ */
+export async function assertNvxContainerWorkDirResolvesWithinWorkspace(
+  containerWorkDir: string | undefined,
+  workspaceSource: string,
+): Promise<void> {
+  assertNvxContainerWorkDir(containerWorkDir);
+  if (!containerWorkDir) return;
+  const normalized = resolveNvxGuestWorkDir(containerWorkDir);
+  const relative = path.posix.relative(NVX_GUEST_WORKSPACE, normalized);
+  const canonicalWorkspace = await fs.realpath(workspaceSource);
+  const workDirCandidate = path.join(workspaceSource, relative);
+  let canonicalWorkDir: string;
+  try {
+    canonicalWorkDir = await fs.realpath(workDirCandidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(
+        `NVX preview --container-workdir does not exist in the workspace export: ${
+          containerWorkDir
+        }`,
+      );
+    }
+    throw error;
+  }
+  if (
+    canonicalWorkDir !== canonicalWorkspace
+    && !canonicalWorkDir.startsWith(`${canonicalWorkspace}${path.sep}`)
+  ) {
+    throw new Error(
+      `NVX preview --container-workdir resolves outside the guest workspace export: ${
+        containerWorkDir
+      }`,
+    );
+  }
+}
+
+/**
+ * Resolves the guest working directory for a run, defaulting to the workspace
+ * export root.
+ */
+export function resolveNvxGuestWorkDir(containerWorkDir?: string): string {
+  assertNvxContainerWorkDir(containerWorkDir);
+  if (!containerWorkDir) return NVX_GUEST_WORKSPACE;
+  return path.posix.normalize(containerWorkDir).replace(/\/+$/, '') || NVX_GUEST_WORKSPACE;
 }
 
 /**
