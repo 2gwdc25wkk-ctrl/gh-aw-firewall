@@ -160,8 +160,15 @@ steps:
     run: |
       set -euo pipefail
       artifact_dir="$RUNNER_TEMP/nvx-attested-artifacts"
-      chmod 0555 "$artifact_dir/openvmm"
-      chmod 0444 "$artifact_dir/vmlinux" "$artifact_dir/initramfs.cpio.gz" \
+      # actions/download-artifact restores files owned by the runner user, but
+      # NVX's preflight (assertTrustedFile in src/nvx/preflight.ts) requires
+      # every trusted artifact to be root-owned, so re-root them here. Once
+      # chowned to root, only sudo can chmod them.
+      sudo chown root:root "$artifact_dir"/openvmm "$artifact_dir"/vmlinux \
+        "$artifact_dir"/initramfs.cpio.gz "$artifact_dir"/manifest.json \
+        "$artifact_dir"/manifest.sigstore.jsonl
+      sudo chmod 0555 "$artifact_dir/openvmm"
+      sudo chmod 0444 "$artifact_dir/vmlinux" "$artifact_dir/initramfs.cpio.gz" \
         "$artifact_dir/manifest.json" "$artifact_dir/manifest.sigstore.jsonl"
 
   - name: Build the guest distro layer with the pinned Copilot CLI
@@ -204,8 +211,20 @@ steps:
       test -r /workspace/package.json
       test -n "${AWF_NVX_SMOKE_MARKER:-}"
       test -n "${HTTPS_PROXY:-}"
-      if env | grep -Eq '^(GH_TOKEN|GITHUB_TOKEN|COPILOT_GITHUB_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY)='; then
+      if env | grep -Eq '^(GH_TOKEN|GITHUB_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY)='; then
         echo "credential variable reached the NVX guest" >&2
+        exit 1
+      fi
+      # COPILOT_GITHUB_TOKEN is expected to be present here: --enable-api-proxy
+      # deliberately replaces the real GitHub token with a fixed, non-secret
+      # isolation placeholder before the guest ever sees it (see
+      # src/services/credentials/copilot-credential-env.ts and
+      # src/constants/placeholders.ts). Assert the value is exactly that
+      # placeholder rather than banning the variable name outright, so a real
+      # leaked credential still fails this check.
+      if [ -n "${COPILOT_GITHUB_TOKEN:-}" ] && \
+         [ "$COPILOT_GITHUB_TOKEN" != "ghu_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]; then
+        echo "real credential value reached the NVX guest via COPILOT_GITHUB_TOKEN" >&2
         exit 1
       fi
       printf '%s\n' "$AWF_NVX_SMOKE_MARKER" > /workspace/nvx-smoke-workspace-proof.txt
@@ -251,7 +270,6 @@ steps:
       rm -f "$proof_file" "$copilot_file"
 
       sudo --preserve-env=COPILOT_GITHUB_TOKEN \
-        AWF_NVX_SMOKE_MARKER="$marker" \
         node "$GITHUB_WORKSPACE/dist/cli.js" \
         --container-runtime nvx \
         --nvx-preview \
@@ -264,11 +282,13 @@ steps:
         --nvx-signer-workflow \
         'github/gh-aw-firewall/.github/workflows/smoke-nvx-copilot.lock.yml' \
         --nvx-mount-policy workspace-only \
+        --nvx-scratch-bytes 536870912 \
         --container-workdir /workspace \
         --network-isolation \
         --enable-api-proxy \
+        --proxy-logs-dir "$data_dir/logs/inner-proxy-logs" \
         --allow-domains github.com,api.github.com,api.githubcopilot.com \
-        --env AWF_NVX_SMOKE_MARKER \
+        --env "AWF_NVX_SMOKE_MARKER=$marker" \
         --log-level info \
         -- /usr/local/bin/awf-nvx-smoke \
         > "$data_dir/logs/awf.log" 2>&1
@@ -302,11 +322,26 @@ steps:
           "no NVX-COPILOT-PROOF in nvx-smoke-copilot-proof.txt"
       fi
 
+      if [ -f "$proof_file" ]; then
+        cp "$proof_file" "$data_dir/workspace-proof.txt"
+      fi
+      if [ -f "$copilot_file" ]; then
+        cp "$copilot_file" "$data_dir/copilot-response.txt"
+      fi
       rm -f "$proof_file" "$copilot_file"
       sudo chown -R "$(id -u):$(id -g)" "$data_dir"
       cat "$results"
+
       exit 0
 post-steps:
+  - name: Upload NVX smoke evidence
+    if: always()
+    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+    with:
+      name: nvx-smoke-evidence
+      path: /tmp/gh-aw/agent/smoke-nvx-copilot/
+      if-no-files-found: warn
+      retention-days: 7
   - name: Validate safe outputs were invoked
     run: |
       OUTPUTS_FILE="${GH_AW_SAFE_OUTPUTS:-${RUNNER_TEMP}/gh-aw/safeoutputs/outputs.jsonl}"
