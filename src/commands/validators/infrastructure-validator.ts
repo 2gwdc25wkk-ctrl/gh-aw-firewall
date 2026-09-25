@@ -12,6 +12,23 @@ import {
  * binaries source path.  Calls `process.exit(1)` on any failure.
  */
 export function validateInfrastructureOptions(config: WrapperConfig): void {
+  for (const { key, flag } of [
+    { key: 'maxGithubApiPointsRest', flag: 'max-github-api-points-rest' },
+    { key: 'maxGithubApiPointsGraphql', flag: 'max-github-api-points-graphql' },
+  ] as const) {
+    const rawValue = config[key];
+    if (rawValue === undefined) continue;
+    const value = Number(rawValue);
+    if (!Number.isInteger(value) || value <= 0) {
+      logger.error(`❌ --${flag} must be a positive integer`);
+      process.exit(1);
+    }
+    config[key] = value;
+  }
+  if ((config.maxGithubApiPointsRest !== undefined || config.maxGithubApiPointsGraphql !== undefined) && !config.difcProxyHost) {
+    logger.error('❌ GitHub API point limits require --difc-proxy-host.');
+    process.exit(1);
+  }
   if (config.awfDockerHost &&
       !config.awfDockerHost.startsWith('unix://') &&
       !isLoopbackTcpDockerHostUri(config.awfDockerHost)) {
