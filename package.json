@@ -27,7 +27,10 @@
     "benchmark": "npx tsx scripts/ci/benchmark-performance.ts",
     "benchmark:trend": "npx tsx scripts/ci/benchmark-trend.ts",
     "build:bundle": "npm run build && node scripts/build-bundle.mjs",
-    "generate:schema": "node scripts/generate-schema.mjs"
+    "generate:schema": "node scripts/generate-schema.mjs",
+    "diagnostics:validate": "npx tsx scripts/diagnostics/cli.ts validate",
+    "diagnostics:render": "npx tsx scripts/diagnostics/cli.ts render",
+    "diagnostics:check": "npx tsx scripts/diagnostics/cli.ts check-sync"
   },
   "keywords": [
     "agentic-workflows",
@@ -75,6 +78,7 @@
     "jest": "^30.5.1",
     "markdownlint-cli2": "^0.23.2",
     "ts-jest": "^29.4.12",
+    "tsx": "4.23.15",
     "typescript": "^5.9.3",
     "typescript-eslint": "8.69.0"
   },
