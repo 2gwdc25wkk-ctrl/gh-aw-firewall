@@ -29,6 +29,17 @@ describe('smoke enclave build workflow', () => {
     expect(lock).toContain('"tools": ["enclave_run_script"]');
   });
 
+  it('allows Copilot to invoke only the required enclave tool', () => {
+    expect(source).toContain('args: ["--allow-tool", "awf-enclave-enclave_run_script"]');
+    const start = lock.indexOf('      - name: Execute GitHub Copilot CLI');
+    const end = lock.indexOf('      - name: Detect agent errors');
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const executeStep = lock.slice(start, end);
+    expect(executeStep).toContain('--allow-tool awf-enclave-enclave_run_script');
+    expect(executeStep).not.toContain('--allow-all-tools');
+  });
+
   it('uses the compatible gateway and local AWF build', () => {
     expect(lock).toContain('ghcr.io/github/gh-aw-mcpg:v0.4.26');
     expect(lock).toContain('"awf-enclave": {\n                "required": false,');
