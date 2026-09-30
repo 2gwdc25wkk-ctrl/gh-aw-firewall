@@ -160,7 +160,7 @@ export function computeRuleStats(
   const hitCounts = new Map<string, number>();
 
   for (const entry of enrichedEntries) {
-    // Skip benign operational entries
+    // Skip benign operational entries and SSL-bump step-1 preflight peeks.
     if (isNoneDecision(entry.decision) || entry.url === 'error:transaction-end-before-headers') continue;
     hitCounts.set(entry.matchedRuleId, (hitCounts.get(entry.matchedRuleId) || 0) + 1);
   }

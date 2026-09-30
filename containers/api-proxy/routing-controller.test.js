@@ -23,8 +23,8 @@ function capabilities(models = []) {
   };
 }
 
-function snapshot(models) {
-  return { provider: 'copilot', configured: true, discovery: 'complete', models };
+function snapshot(models, provider = 'copilot') {
+  return { provider, configured: true, discovery: 'complete', models };
 }
 
 function classifierBody(text) {
@@ -80,9 +80,13 @@ function createHarness(overrides = {}) {
     ...overrides.executor,
   };
   const controller = createRoutingController({
-    config: { objective: { goal: 'cost', mode: 'balanced' }, task: { conversationFile: '/tmp/conversation.json' } },
+    config: {
+      provider: overrides.provider || 'copilot',
+      objective: { goal: 'cost', mode: 'balanced' },
+      task: { conversationFile: '/tmp/conversation.json' },
+    },
     planner,
-    catalogue: { getSnapshot: jest.fn(async () => snapshot(models)) },
+    catalogue: { getSnapshot: jest.fn(async () => snapshot(models, overrides.provider || 'copilot')) },
     loadConversation: overrides.loadConversation || jest.fn(async () => JSON.parse(JSON.stringify(CONVERSATION))),
     executor,
     observer: { record: record => records.push(record) },
@@ -104,6 +108,7 @@ describe('routing controller', () => {
     const { controller, calls, records } = createHarness({
       catalogueModels: [{ model: 'github-copilot/gpt-test', efforts: ['low'] }],
     });
+
     const result = await controller.run();
 
     expect(result.ok).toBe(true);
@@ -146,6 +151,26 @@ describe('routing controller', () => {
     expect(typeof selectionRecord.latency_ms).toBe('number');
   });
 
+  it('routes Anthropic candidates through Messages without changing the selected provider', async () => {
+    const { controller, calls } = createHarness({
+      provider: 'anthropic',
+      models: [{
+        id: 'claude-opus-5-5',
+        efforts: ['medium'],
+        protocols: ['messages'],
+        contextWindow: 1_000_000,
+      }],
+    });
+    const result = await controller.run();
+    expect(result.selection.provider).toBe('anthropic');
+    expect(result.selection.choice.model).toBe('anthropic/claude-opus-5-5');
+    expect(calls.execute[0]).toMatchObject({
+      path: '/v1/messages',
+      provider: 'anthropic',
+      body: { output_config: { effort: 'medium' } },
+    });
+  });
+
   it('runs the decision at most once', async () => {
     const { controller, planner } = createHarness();
     const first = controller.run();
@@ -185,6 +210,24 @@ describe('routing controller', () => {
 
     expect(result.ok).toBe(true);
     expect(calls.execute).toHaveLength(0);
+    expect(result.degradedReason).toBe('classifier_capacity_exhausted');
+    expect(records.find(record => record.stage === 'selection')).toMatchObject({
+      classifier_attempts: 0,
+      degraded_reason: 'classifier_capacity_exhausted',
+    });
+  });
+
+  it('skips classification when context capacity is missing but retains the model for final routing', async () => {
+    const { controller, calls, records } = createHarness({
+      models: [{ id: 'unknown-capacity', efforts: ['low'], protocols: ['responses'] }],
+    });
+    const result = await controller.run();
+
+    expect(result.ok).toBe(true);
+    expect(calls.execute).toHaveLength(0);
+    expect(calls.route[0].models).toEqual([
+      expect.objectContaining({ model: 'github-copilot/unknown-capacity' }),
+    ]);
     expect(result.degradedReason).toBe('classifier_capacity_exhausted');
     expect(records.find(record => record.stage === 'selection')).toMatchObject({
       classifier_attempts: 0,
